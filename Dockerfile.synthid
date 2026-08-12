@@ -1,0 +1,40 @@
+# Optional local Docker image for the reverse-SynthID pixel scorer.
+#
+# Build from the repository root:
+#   docker build -f Dockerfile.synthid -t watermark-remover-synthid-scorer .
+#
+# The upstream code is fetched from source at build time and is NOT
+# redistributed by this repository. Users must comply with the upstream
+# project's non-commercial Research License.
+
+FROM python:3.11-slim
+
+ARG REVERSE_SYNTHID_REF=main
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        git \
+        libgl1 \
+        libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --depth 1 --filter=blob:none --sparse \
+        --branch "${REVERSE_SYNTHID_REF}" \
+        https://github.com/aloshdenny/reverse-SynthID.git /opt/reverse-synthid \
+    && cd /opt/reverse-synthid \
+    && git sparse-checkout set --no-cone \
+        '/src/' \
+        '/artifacts/spectral_codebook_v4.npz' \
+        '/requirements.txt' \
+        '/LICENSE' \
+        '/README.md'
+
+COPY skills/remove-ai-marks/scripts/requirements-synthid-scorer.txt /app/requirements-synthid-scorer.txt
+COPY skills/remove-ai-marks/scripts/score_synthid.py /app/score_synthid.py
+
+RUN pip install --no-cache-dir -r /app/requirements-synthid-scorer.txt
+
+ENV REVERSE_SYNTHID_DIR=/opt/reverse-synthid
+
+WORKDIR /app
+ENTRYPOINT ["python3", "/app/score_synthid.py"]
