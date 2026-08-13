@@ -20,12 +20,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import shlex
-import shutil
 import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import zlib
 from collections import deque
 from dataclasses import dataclass
@@ -34,12 +35,28 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from common import eprint
+from common import (
+    atomic_write_bytes,
+    eprint,
+    paths_alias,
+    read_bytes_bounded,
+    validate_output_path,
+)
 from image_meta import detect_format
 
 DEFAULT_DILATION_RADIUS = 3
 MAX_PIXELS = 40_000_000  # bounds decompression/allocation; covers 8K UHD
+MAX_ENCODED_BYTES = 256 * 1024 * 1024
+MAX_TEXTURE_PATCH_PIXELS = 1_048_576
+MAX_TEXTURE_CANDIDATES = 20_000
+MAX_COMMAND_DIAGNOSTIC_BYTES = 64 * 1024
+EXTERNAL_COMMAND_TIMEOUT_SECONDS = 1800
 PNG_SIG = b"\x89PNG\r\n\x1a\n"
+
+
+def _read_bounded(path: Path, limit: int | None = None) -> bytes:
+    effective_limit = MAX_ENCODED_BYTES if limit is None else limit
+    return read_bytes_bounded(path, effective_limit, label="encoded file")
 
 
 def _validate_dimensions(width: int, height: int) -> None:
