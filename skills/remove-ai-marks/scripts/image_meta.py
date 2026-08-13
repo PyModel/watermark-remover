@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from common import which
+from common import atomic_write_bytes, which
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 
@@ -409,6 +409,28 @@ def strip_png(data: bytes, *, strip_all_text: bool = True) -> tuple[bytes, list[
     return bytes(out), actions
 
 
+def _find_jpeg_eoi(data: bytes, start: int) -> int | None:
+    """Locate an unstuffed EOI marker in entropy-coded JPEG data."""
+    i = start
+    while i + 1 < len(data):
+        if data[i] != 0xFF:
+            i += 1
+            continue
+        j = i + 1
+        while j < len(data) and data[j] == 0xFF:
+            j += 1
+        if j >= len(data):
+            return None
+        marker = data[j]
+        if marker == 0x00 or 0xD0 <= marker <= 0xD7:
+            i = j + 1
+            continue
+        if marker == 0xD9:
+            return j - 1
+        i = j + 1
+    return None
+
+
 def strip_jpeg(data: bytes, *, strip_all_app: bool = True) -> tuple[bytes, list[str]]:
     if not data.startswith(JPEG_SOI):
         raise ValueError("not JPEG")
@@ -416,6 +438,7 @@ def strip_jpeg(data: bytes, *, strip_all_app: bool = True) -> tuple[bytes, list[
     out = bytearray(JPEG_SOI)
     i = 2
     n = len(data)
+    saw_eoi = False
     while i < n:
         if data[i] != 0xFF:
             raise ValueError(f"malformed JPEG marker stream at offset {i}")
@@ -428,6 +451,7 @@ def strip_jpeg(data: bytes, *, strip_all_app: bool = True) -> tuple[bytes, list[
 
         if marker == 0xD9:  # EOI
             out.extend(b"\xff\xd9")
+            saw_eoi = True
             break
         if marker == 0xD8:  # nested SOI?
             continue
@@ -437,18 +461,24 @@ def strip_jpeg(data: bytes, *, strip_all_app: bool = True) -> tuple[bytes, list[
         if marker == 0xDA:  # SOS — copy through end
             # need length of SOS header then entropy-coded data to EOI
             if i + 2 > n:
-                break
+                raise ValueError("truncated JPEG SOS length")
             segment_length = struct.unpack(">H", data[i : i + 2])[0]
             if segment_length < 2 or i + segment_length > n:
                 raise ValueError("truncated JPEG SOS header")
-            # Preserve the complete entropy-coded stream after validating the SOS header.
+            # Preserve the complete entropy-coded stream only after locating an
+            # unstuffed EOI marker; FF00 and restart markers are scan data.
+            scan_start = i + segment_length
+            eoi = _find_jpeg_eoi(data, scan_start)
+            if eoi is None:
+                raise ValueError("JPEG scan has no complete EOI marker")
             out.extend(b"\xff\xda")
-            out.extend(data[i:])
-            actions.append("preserved entropy-coded scan (SOS→EOF)")
+            out.extend(data[i : eoi + 2])
+            actions.append("preserved entropy-coded scan through EOI")
+            saw_eoi = True
             break
 
         if i + 2 > n:
-            break
+            raise ValueError(f"truncated JPEG segment length at marker 0x{marker:02X}")
         seglen = struct.unpack(">H", data[i : i + 2])[0]
         if seglen < 2 or i + seglen > n:
             raise ValueError(f"truncated JPEG segment at marker 0x{marker:02X}")
@@ -489,6 +519,8 @@ def strip_jpeg(data: bytes, *, strip_all_app: bool = True) -> tuple[bytes, list[
             out.extend(data[i : i + seglen])
         i = next_i
 
+    if not saw_eoi:
+        raise ValueError("JPEG has no complete EOI marker")
     if not actions:
         actions.append("no JPEG APP segments removed")
     return bytes(out), actions
