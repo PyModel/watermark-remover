@@ -82,6 +82,15 @@ class Mask:
         return sum(v != 0 for v in self.data)
 
 
+@dataclass(frozen=True)
+class TextureMatch:
+    x: int
+    y: int
+    width: int
+    height: int
+    score: float
+
+
 @dataclass
 class Raster:
     width: int
