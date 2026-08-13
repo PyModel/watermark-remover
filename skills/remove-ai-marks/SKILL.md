@@ -78,7 +78,11 @@ Optional tools are auto-detected. PDF order: exiftool → full-document pypdf cl
 Never guess a region. Require `--mask`, `--box`, or `--detect-command`.
 
 ```bash
-# Simple-background stdlib fallback
+# Default stdlib backend: nearby texture-patch search + full mask replacement
+python3 "$SCRIPTS/morphomod.py" input.png -o output.png \
+  --box X,Y,W,H --dilation 3 --backend texture
+
+# Uniform-background fallback
 python3 "$SCRIPTS/morphomod.py" input.png -o output.png \
   --box X,Y,W,H --dilation 3 --backend simple
 
@@ -112,9 +116,14 @@ WATERMARKS_REWRITE_BASE_URL=http://127.0.0.1:8080 \
 WATERMARKS_REWRITE_MODEL=my-model \
   python3 "$SCRIPTS/rewrite_text.py" INPUT \
     --strength tsapa --generations 5 --population 12
+
+# Qwen/Transformers-compatible endpoint: prevent reasoning preambles
+python3 "$SCRIPTS/rewrite_text.py" INPUT \
+  --backend openai-compatible --base-url http://127.0.0.1:8080 \
+  --model my-thinking-model --strength paraphrase --disable-thinking
 ```
 
-Prefer a rewrite model different from the suspected origin. Preserve facts, numbers, names, and technical identifiers. Report style/precision degradation risk. Code files should use formatter + Layer A unless the user explicitly approves semantic rewriting.
+Prefer a rewrite model different from the suspected origin. Preserve facts, numbers, names, and technical identifiers. Report style/precision degradation risk. Use `--disable-thinking` only for Qwen/Transformers-compatible endpoints that support `chat_template_kwargs`; generic endpoints do not receive it by default. Code files should use formatter + Layer A unless the user explicitly approves semantic rewriting.
 
 `clean_file.py --tsapa` refuses to run without a live backend; it never writes a prompt into the user’s output or silently falls back.
 
