@@ -21,18 +21,17 @@ import json
 import math
 import os
 import sys
-import urllib.error
-import urllib.request
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import layer_b_http
 from common import (
     cleaned_path,
     eprint,
     read_bool_env,
-    read_json_object_bounded,
     read_text_input,
     validate_output_path,
     write_text_output,
@@ -63,6 +62,111 @@ TSAPA_PACK = (
     "Output only the final rewritten text.\n\n---\n{TEXT}"
 )
 
+REWRITE_BACKENDS = ("print-prompt", "ollama", "openai-compatible")
+LIVE_REWRITE_BACKENDS = ("ollama", "openai-compatible")
+REWRITE_STRENGTHS = ("paraphrase", "backtranslate", "structural", "tsapa")
+
+
+class RewriteConfigurationError(ValueError):
+    """Invalid Layer B mode or required provider configuration."""
+
+
+@dataclass(frozen=True, slots=True)
+class RewritePlan:
+    """Immutable policy for one Layer B rewrite."""
+
+    backend: str = "print-prompt"
+    model: str | None = None
+    base_url: str | None = None
+    api_key: str | None = field(default=None, repr=False)
+    strength: str = "paraphrase"
+    lang: str = "French"
+    original_lang: str = "English"
+    timeout: float = 120.0
+    layer_a_after: bool = True
+    generations: int = 5
+    population: int = 12
+    disable_thinking: bool = False
+
+    def __post_init__(self) -> None:
+        if self.backend not in REWRITE_BACKENDS:
+            raise RewriteConfigurationError(f"unknown backend: {self.backend}")
+        if self.strength not in REWRITE_STRENGTHS:
+            raise RewriteConfigurationError(f"unknown strength: {self.strength}")
+        if not isinstance(self.disable_thinking, bool):
+            raise TypeError("disable_thinking must be a bool")
+        if isinstance(self.timeout, bool) or not isinstance(self.timeout, (int, float)):
+            raise TypeError("timeout must be a finite positive number")
+        if not math.isfinite(self.timeout) or self.timeout <= 0:
+            raise RewriteConfigurationError("timeout must be a finite positive number")
+        if self.strength == "tsapa":
+            if not isinstance(self.generations, int) or isinstance(self.generations, bool):
+                raise TypeError("generations must be an integer")
+            if self.generations < 0:
+                raise RewriteConfigurationError("generations must be >= 0")
+            if not isinstance(self.population, int) or isinstance(self.population, bool):
+                raise TypeError("population must be an integer")
+            if self.population < 2:
+                raise RewriteConfigurationError("population must be >= 2")
+        if self.backend in LIVE_REWRITE_BACKENDS:
+            if not self.model:
+                raise RewriteConfigurationError(
+                    "error: --model required for ollama/openai-compatible backends"
+                )
+            if not self.base_url:
+                raise RewriteConfigurationError(
+                    "error: --base-url required for ollama/openai-compatible backends"
+                )
+
+    @classmethod
+    def prompt(
+        cls,
+        strength: str,
+        *,
+        lang: str = "French",
+        original_lang: str = "English",
+        generations: int = 5,
+        population: int = 12,
+    ) -> RewritePlan:
+        return cls(
+            strength=strength,
+            lang=lang,
+            original_lang=original_lang,
+            layer_a_after=False,
+            generations=generations,
+            population=population,
+        )
+
+    @classmethod
+    def live_tsapa_from_environment(
+        cls,
+        *,
+        generations: int,
+        population: int,
+    ) -> RewritePlan:
+        backend = os.environ.get("WATERMARKS_REWRITE_BACKEND", "print-prompt")
+        if backend not in ("ollama", "openai-compatible"):
+            raise RewriteConfigurationError(
+                "--tsapa requires a live backend; set "
+                "WATERMARKS_REWRITE_BACKEND=ollama|openai-compatible"
+            )
+        model = os.environ.get("WATERMARKS_REWRITE_MODEL")
+        if not model:
+            raise RewriteConfigurationError("--tsapa requires WATERMARKS_REWRITE_MODEL")
+        return cls(
+            backend=backend,
+            model=model,
+            base_url=os.environ.get(
+                "WATERMARKS_REWRITE_BASE_URL",
+                "http://127.0.0.1:11434",
+            ),
+            api_key=os.environ.get("WATERMARKS_REWRITE_API_KEY"),
+            strength="tsapa",
+            generations=generations,
+            population=population,
+            disable_thinking=read_bool_env("WATERMARKS_REWRITE_DISABLE_THINKING"),
+        )
+
 
 def _env(name: str, default: str | None = None) -> str | None:
     v = os.environ.get(name)
@@ -71,13 +175,19 @@ def _env(name: str, default: str | None = None) -> str | None:
     return v
 
 
-def _warn_remote(base_url: str) -> None:
-    host = urlparse(base_url).hostname or ""
-    if host not in ("localhost", "127.0.0.1", "::1"):
-        eprint(
+def remote_warning(base_url: str | None) -> str | None:
+    if base_url is None:
+        return None
+    try:
+        host = urlparse(base_url).hostname
+    except ValueError:
+        return None
+    if host and host not in ("localhost", "127.0.0.1", "::1"):
+        return (
             f"warning: rewrite base URL host is '{host}' (not localhost); "
             "content will leave this machine"
         )
+    return None
 
 
 def build_prompt(strength: str, text: str, *, lang: str, original_lang: str) -> str:
@@ -100,40 +210,27 @@ def build_prompt(strength: str, text: str, *, lang: str, original_lang: str) -> 
     raise ValueError(f"unknown strength: {strength}")
 
 
-def _http_json(url: str, payload: dict, headers: dict[str, str], timeout: float) -> dict:
-    body = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=body,
-        headers={"Content-Type": "application/json", **headers},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return read_json_object_bounded(resp)
-
-
-def call_ollama(base_url: str, model: str, prompt: str, timeout: float) -> str:
-    url = base_url.rstrip("/") + "/api/chat"
-    data = _http_json(
-        url,
+def _call_ollama(base_url: str, model: str, prompt: str, timeout: float) -> str:
+    data = layer_b_http.request_json(
+        base_url,
+        "/api/chat",
         {
             "model": model,
             "stream": False,
             "messages": [{"role": "user", "content": prompt}],
         },
-        {},
-        timeout,
+        timeout=timeout,
     )
     message = data.get("message")
     if not isinstance(message, dict):
-        raise RuntimeError(f"ollama invalid message: {data!r}"[:500])
+        raise RuntimeError("ollama invalid message")
     content = message.get("content")
     if not isinstance(content, str) or not content.strip():
-        raise RuntimeError(f"ollama empty response: {data!r}"[:500])
+        raise RuntimeError("ollama empty response")
     return content.strip()
 
 
-def call_openai_compatible(
+def _call_openai_compatible(
     base_url: str,
     model: str,
     prompt: str,
@@ -142,7 +239,7 @@ def call_openai_compatible(
     *,
     disable_thinking: bool = False,
 ) -> str:
-    url = base_url.rstrip("/") + "/v1/chat/completions"
+    route = "/v1/chat/completions"
     headers: dict[str, str] = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -155,53 +252,37 @@ def call_openai_compatible(
         # Supported by Qwen/Transformers-compatible servers; opt-in so generic
         # OpenAI-compatible endpoints never receive an unknown extension.
         payload["chat_template_kwargs"] = {"enable_thinking": False}
-    data = _http_json(url, payload, headers, timeout)
+    data = layer_b_http.request_json(base_url, route, payload, headers=headers, timeout=timeout)
     choices = data.get("choices")
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
-        raise RuntimeError(f"openai-compatible invalid choices: {data!r}"[:500])
+        raise RuntimeError("openai-compatible invalid choices")
     message = choices[0].get("message")
     if not isinstance(message, dict):
-        raise RuntimeError(f"openai-compatible invalid message: {data!r}"[:500])
+        raise RuntimeError("openai-compatible invalid message")
     content = message.get("content")
     if not isinstance(content, str) or not content.strip():
-        raise RuntimeError(f"openai-compatible empty content: {data!r}"[:500])
+        raise RuntimeError("openai-compatible empty content")
     return content.strip()
 
 
-def _validate_endpoint(base_url: str) -> None:
-    parsed = urlparse(base_url)
-    if parsed.scheme not in ("http", "https") or not parsed.hostname:
-        raise ValueError("base_url must be an absolute http(s) URL")
-    if parsed.username or parsed.password:
-        raise ValueError("base_url must not contain credentials")
-
-
-def rewrite(
-    text: str,
-    *,
-    backend: str,
-    model: str | None,
-    base_url: str | None,
-    api_key: str | None,
-    strength: str,
-    lang: str,
-    original_lang: str,
-    timeout: float,
-    layer_a_after: bool,
-    generations: int = 5,
-    population: int = 12,
-    disable_thinking: bool = False,
-) -> tuple[str, dict]:
+def rewrite(text: str, plan: RewritePlan) -> tuple[str, dict]:
     if not isinstance(text, str):
         raise TypeError("text must be a string")
-    if not isinstance(disable_thinking, bool):
-        raise TypeError("disable_thinking must be a bool")
-    if not math.isfinite(timeout) or timeout <= 0:
-        raise ValueError("timeout must be a finite positive number")
-    if strength == "tsapa" and generations < 0:
-        raise ValueError("generations must be >= 0")
-    if strength == "tsapa" and population < 2:
-        raise ValueError("population must be >= 2")
+    if not isinstance(plan, RewritePlan):
+        raise TypeError("plan must be a RewritePlan")
+
+    backend = plan.backend
+    model = plan.model
+    base_url = plan.base_url
+    api_key = plan.api_key
+    strength = plan.strength
+    lang = plan.lang
+    original_lang = plan.original_lang
+    timeout = plan.timeout
+    layer_a_after = plan.layer_a_after
+    generations = plan.generations
+    population = plan.population
+    disable_thinking = plan.disable_thinking
 
     info: dict = {
         "backend": backend,
@@ -235,18 +316,10 @@ def rewrite(
         info["mode"] = "print-prompt"
         return prompt, info
 
-    if not model:
-        raise SystemExit("error: --model required for ollama/openai-compatible backends")
-    if not base_url:
-        raise SystemExit("error: --base-url required for ollama/openai-compatible backends")
-
-    _validate_endpoint(base_url)
-    _warn_remote(base_url)
-
     if backend == "ollama":
-        out = call_ollama(base_url, model, prompt, timeout)
+        out = _call_ollama(base_url, model, prompt, timeout)
     elif backend == "openai-compatible":
-        out = call_openai_compatible(
+        out = _call_openai_compatible(
             base_url,
             model,
             prompt,
@@ -255,7 +328,7 @@ def rewrite(
             disable_thinking=disable_thinking,
         )
     else:
-        raise SystemExit(f"unknown backend: {backend}")
+        raise RewriteConfigurationError(f"unknown backend: {backend}")
 
     if layer_a_after:
         out, stats = clean_text(out)
@@ -284,7 +357,7 @@ def _rewrite_tsapa(
     disable_thinking: bool,
     info: dict,
 ) -> tuple[str, dict]:
-    from tsapa import heuristic_pll, http_embed, http_pll, tsapa
+    from tsapa import TSAPAAdapterError, heuristic_pll, http_embed, http_pll, tsapa
 
     if backend == "print-prompt":
         prompt = (
@@ -299,19 +372,14 @@ def _rewrite_tsapa(
         )
         return prompt, info
 
-    if not model or not base_url:
-        raise SystemExit("error: --model and --base-url required for tsapa with live backends")
-    _validate_endpoint(base_url)
-    _warn_remote(base_url)
-
     if backend == "ollama":
 
         def llm(prompt: str) -> str:
-            return call_ollama(base_url, model, prompt, timeout)
+            return _call_ollama(base_url, model, prompt, timeout)
     elif backend == "openai-compatible":
 
         def llm(prompt: str) -> str:
-            return call_openai_compatible(
+            return _call_openai_compatible(
                 base_url,
                 model,
                 prompt,
@@ -320,23 +388,30 @@ def _rewrite_tsapa(
                 disable_thinking=disable_thinking,
             )
     else:
-        raise SystemExit(f"unknown backend: {backend}")
+        raise RewriteConfigurationError(f"unknown backend: {backend}")
 
     pll_model = os.environ.get("WATERMARKS_PLL_MODEL", model or "")
     embed_model = os.environ.get("WATERMARKS_EMBED_MODEL", model or "")
     fallbacks = {"pll": 0, "embedding": 0}
+    embedding_dimensions: int | None = None
 
     def pll(t: str) -> float:
         try:
             return http_pll(base_url, t, model=pll_model, api_key=api_key, timeout=timeout)
-        except Exception:
+        except (layer_b_http.LayerBHTTPError, TSAPAAdapterError):
             fallbacks["pll"] += 1
             return heuristic_pll(t)  # labeled fallback
 
     def embed(t: str) -> list[float]:
+        nonlocal embedding_dimensions
         try:
-            return http_embed(base_url, t, model=embed_model, api_key=api_key, timeout=timeout)
-        except Exception:
+            values = http_embed(base_url, t, model=embed_model, api_key=api_key, timeout=timeout)
+            if embedding_dimensions is None:
+                embedding_dimensions = len(values)
+            elif len(values) != embedding_dimensions:
+                raise TSAPAAdapterError("embedding dimensions changed between responses")
+            return values
+        except (layer_b_http.LayerBHTTPError, TSAPAAdapterError):
             fallbacks["embedding"] += 1
             raise
 
@@ -420,8 +495,7 @@ def main() -> int:
             if args.disable_thinking is None
             else args.disable_thinking
         )
-        result, info = rewrite(
-            text,
+        plan = RewritePlan(
             backend=args.backend,
             model=args.model,
             base_url=args.base_url,
@@ -435,8 +509,14 @@ def main() -> int:
             population=args.population,
             disable_thinking=disable_thinking,
         )
-    except (urllib.error.URLError, TimeoutError, RuntimeError, ValueError) as e:
-        eprint(f"rewrite failed: {e}")
+        if warning := remote_warning(plan.base_url):
+            eprint(warning)
+        result, info = rewrite(text, plan)
+    except RewriteConfigurationError as error:
+        eprint(str(error))
+        return 1
+    except (RuntimeError, ValueError) as error:
+        eprint(f"rewrite failed: {error}")
         return 1
 
     out = args.output
