@@ -20,30 +20,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
-
-from common import atomic_write_text
-from container_meta import clean_container, detect_container_format
-from image_meta import clean_image
-from image_meta import detect_format as detect_image_format
-from rewrite_text import rewrite
-from text_unicode import clean_text
-
-IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".heic", ".heif", ".avif"}
-TEXT_EXTS = {".txt", ".text", ".csv", ".json"}
-
-
-def _classify(path: Path) -> str:
-    ext = path.suffix.lower()
-    if ext in IMAGE_EXTS:
-        return "image"
-    if ext in TEXT_EXTS:
-        return "text"
-    if detect_container_format(path) != "unknown":
-        return "container"
-    data = path.read_bytes()[:4096]
-    if detect_image_format(data) in ("png", "jpeg", "heif", "avif"):
-        return "image"
-    return "text"
+from asset_kind import classify_asset
+from clean_asset import CleanPlan, clean_asset
+from rewrite_text import RewritePlan, rewrite
 
 
 def clean_upload(file_obj, keep_non_ai: bool, layer_b: bool, strength: str):
@@ -54,25 +33,11 @@ def clean_upload(file_obj, keep_non_ai: bool, layer_b: bool, strength: str):
     workdir = Path(tempfile.mkdtemp(prefix="wmr-"))
     dest = workdir / f"{src.stem}.cleaned{src.suffix}"
 
-    kind = _classify(src)
     try:
-        if kind == "text":
-            text = src.read_text(encoding="utf-8", errors="surrogateescape")
-            cleaned, stats = clean_text(text)
-            atomic_write_text(dest, cleaned)
-            result = {
-                "kind": "text",
-                "input": str(src),
-                "output": str(dest),
-                "stats": stats,
-            }
-        elif kind == "image":
-            result = {
-                "kind": "image",
-                **clean_image(src, dest, strip_all_metadata=not keep_non_ai),
-            }
-        else:
-            result = {"kind": "container", **clean_container(src, dest)}
+        kind = classify_asset(src)
+        result = clean_asset(
+            src, dest, CleanPlan(forced_kind=kind, strip_all_metadata=not keep_non_ai)
+        ).to_dict()
     except Exception as e:
         return f"**Error cleaning {src.name}:** `{e}`", None, ""
 
@@ -80,18 +45,7 @@ def clean_upload(file_obj, keep_non_ai: bool, layer_b: bool, strength: str):
     if layer_b and kind == "text":
         body = dest.read_text(encoding="utf-8", errors="surrogateescape")
         if body.strip():
-            prompt, _ = rewrite(
-                body,
-                backend="print-prompt",
-                model=None,
-                base_url=None,
-                api_key=None,
-                strength=strength,
-                lang="French",
-                original_lang="English",
-                timeout=120.0,
-                layer_a_after=False,
-            )
+            prompt, _ = rewrite(body, RewritePlan.prompt(strength))
     elif layer_b:
         prompt = "Layer B is available only for plain-text uploads."
 
