@@ -6,9 +6,9 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
+from conftest import fake_command_result
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
@@ -47,10 +47,11 @@ def test_run_synthid_score_unconfigured_returns_none(
 def test_run_synthid_score_unavailable_returns_none(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    def fake_run(*args, **kwargs):
-        return SimpleNamespace(returncode=3, stdout="", stderr="unavailable")
-
-    monkeypatch.setattr(image_meta.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        image_meta.external_command,
+        "run_command",
+        lambda *args, **kwargs: fake_command_result(3, stderr="unavailable"),
+    )
     assert run_synthid_score(Path("x.png"), upstream_dir="/tmp/upstream") is None
 
 
@@ -67,9 +68,9 @@ def test_run_synthid_score_parses_json(
 
     def fake_run(cmd, **kwargs):
         captured["cmd"] = cmd
-        return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+        return fake_command_result(0, stdout=json.dumps(payload))
 
-    monkeypatch.setattr(image_meta.subprocess, "run", fake_run)
+    monkeypatch.setattr(image_meta.external_command, "run_command", fake_run)
     result = run_synthid_score(Path("img.png"), upstream_dir="/tmp/upstream")
 
     assert result == payload
@@ -81,10 +82,11 @@ def test_run_synthid_score_parses_json(
 def test_run_synthid_score_runtime_error_is_reported(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    def fake_run(*args, **kwargs):
-        return SimpleNamespace(returncode=1, stdout="", stderr="boom")
-
-    monkeypatch.setattr(image_meta.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        image_meta.external_command,
+        "run_command",
+        lambda *args, **kwargs: fake_command_result(1, stderr="boom"),
+    )
     result = run_synthid_score(Path("img.png"), upstream_dir="/tmp/upstream")
 
     assert result is not None
