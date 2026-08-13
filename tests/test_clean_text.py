@@ -93,6 +93,39 @@ def test_clean_preserves_normal_text():
     assert stats["removed_count"] == 0
 
 
+def test_clean_text_preserves_preexisting_backup_on_rejection(tmp_path: Path):
+    src = tmp_path / "input.txt"
+    src.write_text("a\u200bb", encoding="utf-8")
+    backup = src.with_suffix(".txt.bak")
+    backup.write_text("old backup", encoding="utf-8")
+    script = SCRIPTS / "clean_text.py"
+    result = subprocess.run(
+        [sys.executable, str(script), str(src), "--in-place"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert backup.read_text(encoding="utf-8") == "old backup"
+    assert src.read_text(encoding="utf-8") == "a\u200bb"
+
+
+def test_clean_text_in_place_rejects_backup_symlink(tmp_path: Path):
+    src = tmp_path / "input.txt"
+    src.write_text("a\u200bb", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("preserve", encoding="utf-8")
+    src.with_suffix(".txt.bak").symlink_to(outside)
+    script = SCRIPTS / "clean_text.py"
+    result = subprocess.run(
+        [sys.executable, str(script), str(src), "--in-place"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert outside.read_text(encoding="utf-8") == "preserve"
+    assert src.read_text(encoding="utf-8") == "a\u200bb"
+
+
 def test_cli_roundtrips_invalid_utf8_and_backup_is_byte_exact(tmp_path: Path):
     src = tmp_path / "mixed.txt"
     original = b"abc\xffdef\xe2\x80\x8b"
