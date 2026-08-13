@@ -20,6 +20,18 @@ from image_meta import ImageInspectReport, run_synthid_score
 SCORE_SCRIPT = SCRIPTS / "score_synthid.py"
 
 
+def _command_result(returncode: int, *, stdout: str = "", stderr: str = ""):
+    return SimpleNamespace(
+        returncode=returncode,
+        stdout=stdout.encode(),
+        stderr=stderr.encode(),
+        stdout_text=stdout,
+        stderr_text=stderr,
+        stdout_truncated=False,
+        stderr_truncated=False,
+    )
+
+
 def test_score_synthid_cli_unavailable_without_upstream(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -47,10 +59,11 @@ def test_run_synthid_score_unconfigured_returns_none(
 def test_run_synthid_score_unavailable_returns_none(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    def fake_run(*args, **kwargs):
-        return SimpleNamespace(returncode=3, stdout="", stderr="unavailable")
-
-    monkeypatch.setattr(image_meta.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        image_meta.external_command,
+        "run_command",
+        lambda *args, **kwargs: _command_result(3, stderr="unavailable"),
+    )
     assert run_synthid_score(Path("x.png"), upstream_dir="/tmp/upstream") is None
 
 
@@ -67,9 +80,9 @@ def test_run_synthid_score_parses_json(
 
     def fake_run(cmd, **kwargs):
         captured["cmd"] = cmd
-        return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+        return _command_result(0, stdout=json.dumps(payload))
 
-    monkeypatch.setattr(image_meta.subprocess, "run", fake_run)
+    monkeypatch.setattr(image_meta.external_command, "run_command", fake_run)
     result = run_synthid_score(Path("img.png"), upstream_dir="/tmp/upstream")
 
     assert result == payload
@@ -81,10 +94,11 @@ def test_run_synthid_score_parses_json(
 def test_run_synthid_score_runtime_error_is_reported(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    def fake_run(*args, **kwargs):
-        return SimpleNamespace(returncode=1, stdout="", stderr="boom")
-
-    monkeypatch.setattr(image_meta.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        image_meta.external_command,
+        "run_command",
+        lambda *args, **kwargs: _command_result(1, stderr="boom"),
+    )
     result = run_synthid_score(Path("img.png"), upstream_dir="/tmp/upstream")
 
     assert result is not None

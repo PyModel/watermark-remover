@@ -143,9 +143,15 @@ def test_exiftool_nonzero_is_logged_as_failure(tmp_path: Path, monkeypatch):
         lambda name: "/fake/exiftool" if name == "exiftool" else None,
     )
     monkeypatch.setattr(
-        image_meta.subprocess,
-        "run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=7, stdout="", stderr="denied"),
+        image_meta.external_command,
+        "run_command",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=7,
+            stdout_text="",
+            stderr_text="denied",
+            stdout_truncated=False,
+            stderr_truncated=False,
+        ),
     )
     report = clean_image(src, dest)
     assert any("exiftool failed (rc=7)" in action for action in report["actions"])

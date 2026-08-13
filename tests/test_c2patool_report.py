@@ -26,8 +26,12 @@ MANIFEST_OUTPUT = """{
 class _Completed:
     def __init__(self, returncode: int, stdout: str = "", stderr: str = "") -> None:
         self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
+        self.stdout = stdout.encode()
+        self.stderr = stderr.encode()
+        self.stdout_text = stdout
+        self.stderr_text = stderr
+        self.stdout_truncated = False
+        self.stderr_truncated = False
 
 
 def _fake_c2patool(monkeypatch, output: str, returncode: int, on_stderr: bool = False):
@@ -42,7 +46,7 @@ def _fake_c2patool(monkeypatch, output: str, returncode: int, on_stderr: bool = 
         return _Completed(returncode, stdout=output)
 
     monkeypatch.setattr(image_meta, "which", fake_which)
-    monkeypatch.setattr(image_meta.subprocess, "run", fake_run)
+    monkeypatch.setattr(image_meta.external_command, "run_command", fake_run)
 
 
 def test_no_claim_found_is_not_a_manifest(monkeypatch, tmp_path):
