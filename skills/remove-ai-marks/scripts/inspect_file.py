@@ -75,17 +75,25 @@ def main() -> int:
     p.add_argument("--glob", default="*")
     args = p.parse_args()
 
-    missing = [source for source in args.path if not source.exists()]
-    if missing:
-        for source in missing:
-            eprint(f"not a file or directory: {source}")
+    invalid = [
+        source
+        for source in args.path
+        if not source.exists() or source.is_symlink() or not (source.is_file() or source.is_dir())
+    ]
+    if invalid:
+        for source in invalid:
+            eprint(f"not a regular file or directory: {source}")
         return 2
-    items = collect_inputs(
-        args.path,
-        recursive=args.recursive,
-        pattern=args.glob,
-        extensions=SUPPORTED_EXTS,
-    )
+    try:
+        items = collect_inputs(
+            args.path,
+            recursive=args.recursive,
+            pattern=args.glob,
+            extensions=SUPPORTED_EXTS,
+        )
+    except ValueError as error:
+        eprint(f"invalid input selection: {error}")
+        return 2
     if not items:
         eprint("no matching input files")
         return 2
