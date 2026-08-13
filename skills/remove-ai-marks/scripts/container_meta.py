@@ -383,6 +383,9 @@ def _validate_zip(zf: zipfile.ZipFile) -> None:
     infos = zf.infolist()
     if len(infos) > MAX_ZIP_ENTRIES:
         raise ValueError(f"archive has too many entries ({len(infos)} > {MAX_ZIP_ENTRIES})")
+    names = [info.filename for info in infos]
+    if len(names) != len(set(names)):
+        raise ValueError("archive contains duplicate entry names")
     total = 0
     for info in infos:
         if info.file_size > MAX_ZIP_ENTRY_BYTES:
@@ -405,8 +408,9 @@ def inspect_docx(data: bytes) -> tuple[bool, bool, list[str], dict]:
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
             _validate_zip(zf)
             parts = zf.namelist()
-            for name in parts:
-                raw = zf.read(name)
+            for info in zf.infolist():
+                name = info.filename
+                raw = zf.read(info)
                 c2, ai, hits = _blob_hits(raw)
                 if c2 or ai:
                     if c2:
@@ -433,7 +437,7 @@ def clean_docx(data: bytes) -> tuple[bytes, list[str]]:
         _validate_zip(zin)
         for info in zin.infolist():
             name = info.filename
-            raw = zin.read(name)
+            raw = zin.read(info)
             # customXml can back content controls/business data. Preserve it; the
             # post-clean inspection reports any provenance-like residue.
             if name in DOCX_META_PARTS or name.startswith("docProps/"):
@@ -494,8 +498,9 @@ def inspect_odt(data: bytes) -> tuple[bool, bool, list[str], dict]:
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
             _validate_zip(zf)
-            for name in zf.namelist():
-                raw = zf.read(name)
+            for info in zf.infolist():
+                name = info.filename
+                raw = zf.read(info)
                 c2, ai, hits = _blob_hits(raw)
                 if c2 or ai:
                     if c2:
@@ -523,7 +528,7 @@ def clean_odt(data: bytes) -> tuple[bytes, list[str]]:
         _validate_zip(zin)
         for info in zin.infolist():
             name = info.filename
-            raw = zin.read(name)
+            raw = zin.read(info)
             if name == "meta.xml":
                 text = raw.decode("utf-8", errors="replace")
                 new, n = re.subn(
@@ -550,16 +555,9 @@ def clean_odt(data: bytes) -> tuple[bytes, list[str]]:
                     flags=re.I | re.DOTALL,
                 )
                 raw = text.encode("utf-8")
-            else:
-                c2, ai, _ = _blob_hits(raw)
-                if (c2 or ai) and name not in (
-                    "content.xml",
-                    "styles.xml",
-                    "mimetype",
-                    "META-INF/manifest.xml",
-                ):
-                    actions.append(f"drop part {name} (AI/C2PA markers)")
-                    continue
+            # Preserve every non-metadata part. Embedded objects, thumbnails,
+            # and custom package data may legitimately contain vendor-like text;
+            # inspection reports residual markers instead of deleting content.
             zout.writestr(info, raw)
     if not actions:
         actions.append("no ODT metadata removed")
