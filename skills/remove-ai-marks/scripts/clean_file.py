@@ -307,8 +307,9 @@ def _clean_single_file(path: Path, output_path: Path | None, args) -> dict:
                     cleaned, mode=args.char_mode, strength=args.char_strength, seed=args.seed
                 )
                 stats["char_perturb"] = perturb_stats
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_text(cleaned, encoding="utf-8", errors="surrogateescape")
+            if args.in_place:
+                create_backup(path)
+            atomic_write_text(dest, cleaned)
             if not args.json:
                 eprint(
                     f"wrote {dest} removed={stats['removed_count']} replaced={stats['replaced_count']}"
@@ -330,7 +331,9 @@ def _clean_single_file(path: Path, output_path: Path | None, args) -> dict:
                         "visible removal requires --visible-mask, --visible-box, or --detect-command"
                     )
                 with tempfile.TemporaryDirectory(prefix="wm-visible-") as td:
-                    fmt = detect_image_format(src.read_bytes())
+                    fmt = detect_image_format(
+                        read_bytes_bounded(src, 256 * 1024 * 1024, label="image")
+                    )
                     visible_dest = Path(td) / ("visible.png" if fmt == "png" else src.name)
                     visible_report = remove_visible(
                         src,
