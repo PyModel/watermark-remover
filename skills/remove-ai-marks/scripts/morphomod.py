@@ -611,11 +611,50 @@ def composite(original: Raster, inpainted: Raster, mask: Mask) -> Raster:
 
 def _run_template(template: str, **values: str) -> None:
     command = template.format(**values)
-    proc = subprocess.run(shlex.split(command), capture_output=True, text=True, timeout=1800)
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"external command failed ({proc.returncode}): {(proc.stderr or proc.stdout)[:1000]}"
-        )
+    process = subprocess.Popen(
+        shlex.split(command),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=0,
+    )
+    if process.stdout is None:
+        process.kill()
+        process.wait()
+        raise RuntimeError("external command diagnostics pipe unavailable")
+
+    diagnostic_tail = bytearray()
+
+    def drain_output() -> None:
+        try:
+            while chunk := process.stdout.read(64 * 1024):
+                diagnostic_tail.extend(chunk)
+                overflow = len(diagnostic_tail) - MAX_COMMAND_DIAGNOSTIC_BYTES
+                if overflow > 0:
+                    del diagnostic_tail[:overflow]
+        except (OSError, ValueError):
+            # The parent closes the pipe after a timeout; command failure is
+            # reported by the wait path below.
+            pass
+
+    reader = threading.Thread(target=drain_output, name="external-command-output", daemon=True)
+    reader.start()
+    try:
+        return_code = process.wait(timeout=EXTERNAL_COMMAND_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+        raise
+    finally:
+        reader.join(timeout=1)
+        if reader.is_alive():
+            process.stdout.close()
+            reader.join(timeout=1)
+        elif not process.stdout.closed:
+            process.stdout.close()
+
+    if return_code != 0:
+        tail = diagnostic_tail.decode("utf-8", errors="replace")
+        raise RuntimeError(f"external command failed ({return_code}): {tail}")
 
 
 def _jpeg_dimensions(data: bytes) -> tuple[int, int] | None:
