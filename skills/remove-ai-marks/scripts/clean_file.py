@@ -351,10 +351,15 @@ def _clean_single_file(path: Path, output_path: Path | None, args) -> dict:
                     )
                     if visible_report["status"] != "completed":
                         raise RuntimeError("visible pipeline did not produce an output")
+                    if args.in_place:
+                        create_backup(path)
                     result = clean_image(
                         visible_dest, dest, strip_all_metadata=not args.keep_non_ai_metadata
                     )
             else:
+                if args.in_place:
+                    backup = create_backup(path)
+                    src = backup
                 result = clean_image(src, dest, strip_all_metadata=not args.keep_non_ai_metadata)
             result["input"] = str(path)
             if visible_report:
@@ -371,6 +376,9 @@ def _clean_single_file(path: Path, output_path: Path | None, args) -> dict:
                     eprint("warning: residual C2PA/AI/soft-binding signals may remain")
             return {"kind": "image", **result, "exit_code": 1 if residual else 0}
 
+        if args.in_place:
+            backup = create_backup(path)
+            src = backup
         result = clean_container(src, dest)
         residual = result["still_has_c2pa"] or result["still_has_ai_metadata"]
         if not args.json:
