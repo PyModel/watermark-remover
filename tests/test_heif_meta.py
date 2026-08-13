@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from heif_meta import clean_heif, detect_heif, inspect_heif, neutralize_heif
+from heif_meta import C2PA_BMFF_UUID, clean_heif, detect_heif, inspect_heif, neutralize_heif
 from image_meta import (
     clean_image,
     detect_format,
@@ -41,7 +41,15 @@ def make_heif(
     data_reference_index: int = 0,
 ) -> bytes:
     ftyp = _box(b"ftyp", major + b"\x00\x00\x00\x00" + b"mif1" + major)
-    infe = _fullbox(b"infe", 2, struct.pack(">HH", 1, 0) + item_type + item_type + b"\x00")
+    item_info = struct.pack(">HH", 1, 0) + item_type + item_type + b"\x00"
+    if item_type == b"mime":
+        content_type = (
+            b"application/rdf+xml"
+            if item_payload.lstrip().startswith(b"<x:xmpmeta")
+            else b"application/octet-stream"
+        )
+        item_info += content_type + b"\x00"
+    infe = _fullbox(b"infe", 2, item_info)
     iinf = _fullbox(b"iinf", 0, struct.pack(">H", 1) + infe)
 
     def iloc(off: int) -> bytes:
@@ -69,6 +77,18 @@ def test_detect_heif_brands():
     assert detect_heif(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32) == "unknown"
     assert detect_format(make_heif(b"heic")) == "heif"
     assert detect_format(make_heif(b"avif")) == "avif"
+
+
+def test_c2pa_uuid_box_is_detected_and_neutralized():
+    ftyp = _box(b"ftyp", b"heic" + b"\x00\x00\x00\x00" + b"mif1heic")
+    data = ftyp + _box(b"uuid", C2PA_BMFF_UUID + b"manifest payload")
+    has_c2pa, has_ai, findings, _ = inspect_heif(data)
+    assert has_c2pa and has_ai
+    assert any("uuid" in finding for finding in findings)
+    cleaned, actions = neutralize_heif(data)
+    assert C2PA_BMFF_UUID not in cleaned
+    assert b"free" in cleaned
+    assert any("uuid" in action for action in actions)
 
 
 def test_inspect_flags_c2pa_and_ai():
@@ -117,10 +137,34 @@ def test_image_meta_delegates():
     assert not has_c2pa2 and not has_ai2
 
 
-def test_external_data_reference_is_never_edited_as_local_extent():
+def test_external_data_reference_is_reported_and_cleaning_fails_closed():
     data = make_heif(with_jumb=False, data_reference_index=1)
+    has_c2pa, has_ai, findings, _ = inspect_heif(data)
+    assert has_ai and has_c2pa  # byte-scan still sees C2PA tokens in the external item
+    assert any("unsupported external/idat" in finding for finding in findings)
+    try:
+        neutralize_heif(data, strip_all_metadata=True)
+    except ValueError as error:
+        assert "unsupported HEIF metadata extent layout" in str(error)
+    else:
+        raise AssertionError("expected unsupported extent rejection")
+    assert EXIF_PAYLOAD in data
+    assert PIXEL_BYTES in data
+
+
+def test_strip_all_preserves_xml_mime_that_is_not_declared_xmp():
+    payload = b"<svg xmlns='http://www.w3.org/2000/svg'><text>OpenAI c2pa</text></svg>"
+    data = make_heif(with_jumb=False, item_type=b"mime", item_payload=payload)
     cleaned, _ = neutralize_heif(data, strip_all_metadata=True)
-    assert EXIF_PAYLOAD in cleaned
+    assert payload in cleaned
+    assert PIXEL_BYTES in cleaned
+
+
+def test_strip_all_zeroes_declared_xmp_mime_item():
+    payload = b"<x:xmpmeta>OpenAI c2pa</x:xmpmeta>"
+    data = make_heif(with_jumb=False, item_type=b"mime", item_payload=payload)
+    cleaned, _ = neutralize_heif(data, strip_all_metadata=True)
+    assert payload not in cleaned
     assert PIXEL_BYTES in cleaned
 
 
