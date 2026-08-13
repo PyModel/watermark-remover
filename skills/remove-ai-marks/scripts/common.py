@@ -10,6 +10,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+DEFAULT_HTTP_JSON_LIMIT = 16 * 1024 * 1024
+
 
 def eprint(*args: object) -> None:
     print(*args, file=sys.stderr)
