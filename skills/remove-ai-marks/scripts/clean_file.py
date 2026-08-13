@@ -20,7 +20,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from batch_inputs import InputItem, collect_inputs, safe_output_path
+from asset_kind import SUPPORTED_EXTENSIONS, classify_asset
+from batch_inputs import InputItem, safe_output_path, select_inputs
 from common import (
     atomic_write_text,
     backup_path,
@@ -58,7 +59,6 @@ TEXT_EXTS = {
     ".toml",
     ".csv",
 }
-SUPPORTED_EXTS = IMAGE_EXTS | CONTAINER_EXTS | TEXT_EXTS
 
 
 def classify(path: Path) -> str:
@@ -136,37 +136,29 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = _build_parser().parse_args()
-    invalid = [
-        source
-        for source in args.path
-        if not source.exists() or source.is_symlink() or not (source.is_file() or source.is_dir())
-    ]
-    if invalid:
-        for source in invalid:
-            eprint(f"not a regular file or directory: {source}")
-        return 2
-    allowed = SUPPORTED_EXTS
+    allowed = SUPPORTED_EXTENSIONS
     if args.extensions:
         allowed = {
             "." + e.strip().lstrip(".").lower() for e in args.extensions.split(",") if e.strip()
         }
+    excluded_roots = (
+        (args.output,)
+        if args.output and not args.in_place and any(source.is_dir() for source in args.path)
+        else ()
+    )
     try:
-        items = collect_inputs(
+        selection = select_inputs(
             args.path,
             recursive=args.recursive,
             pattern=args.glob,
             extensions=allowed,
+            excluded_roots=excluded_roots,
         )
     except ValueError as error:
         eprint(f"invalid input selection: {error}")
         return 2
-    if args.output and not args.in_place and any(source.is_dir() for source in args.path):
-        output_root = args.output.resolve()
-        items = [item for item in items if not item.path.resolve().is_relative_to(output_root)]
-    if not items:
-        eprint("no matching input files")
-        return 2
-    batch = len(items) > 1 or any(source.is_dir() for source in args.path)
+    items = selection.items
+    batch = selection.batch
     if batch and (args.visible_mask or args.visible_box):
         eprint(
             "error: --visible-mask/--visible-box are single-file options; use --detect-command for batch"
