@@ -20,8 +20,18 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from batch_inputs import collect_inputs, safe_output_path
-from common import cleaned_path, eprint
+from batch_inputs import InputItem, collect_inputs, safe_output_path
+from common import (
+    atomic_write_text,
+    backup_path,
+    cleaned_path,
+    create_backup,
+    eprint,
+    paths_alias,
+    read_bool_env,
+    read_bytes_bounded,
+    validate_output_path,
+)
 from container_meta import clean_container, detect_container_format
 from image_meta import clean_image
 from image_meta import detect_format as detect_image_format
@@ -113,7 +123,11 @@ def _build_parser() -> argparse.ArgumentParser:
     visible.add_argument("--visible-box", type=_parse_box, metavar="X,Y,W,H")
     visible.add_argument("--detect-command", help="Detector template: {input} {mask} {prompt}")
     p.add_argument("--dilate", type=int, default=None, metavar="RADIUS")
-    p.add_argument("--visible-backend", choices=("simple", "external"), default="simple")
+    p.add_argument(
+        "--visible-backend",
+        choices=("texture", "simple", "external"),
+        default="texture",
+    )
     p.add_argument("--inpaint-command", help="Inpainter template: {input} {mask} {output} {prompt}")
     p.add_argument("--visible-prompt", default="Remove watermark, fill with background")
     p.add_argument("--soft-binding", action="store_true")
