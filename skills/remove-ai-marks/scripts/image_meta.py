@@ -311,12 +311,12 @@ def run_synthid_score(
     except Exception as error:
         return {"available": False, "error": str(error)}
 
+    if result.stdout_truncated or result.stderr_truncated:
+        return {"available": False, "error": "scorer output exceeded safety limit"}
     if result.returncode == 3:
         return None
     if result.returncode != 0:
         return {"available": False, "error": result.stderr_text.strip()[:2000]}
-    if result.stdout_truncated or result.stderr_truncated:
-        return {"available": False, "error": "scorer output exceeded safety limit"}
     try:
         return json.loads(result.stdout_text or "{}")
     except json.JSONDecodeError as error:
@@ -359,7 +359,7 @@ def inspect_image(
 def strip_png(data: bytes, *, strip_all_text: bool = True) -> tuple[bytes, list[str]]:
     actions: list[str] = []
     out = bytearray(PNG_SIG)
-    for chunk in iter_png_chunks(data):
+    for chunk in iter_png_chunks(data, allow_trailing_data=True):
         ctype = chunk.kind
         payload = chunk.payload
         name = ctype.decode("latin-1", errors="replace")

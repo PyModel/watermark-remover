@@ -77,6 +77,22 @@ def test_iterator_rejects_trailing_bytes() -> None:
         list(iter_png_chunks(_png() + b"unexpected"))
 
 
+def test_iterator_discards_trailing_bytes_without_relaxing_validation() -> None:
+    chunks = list(iter_png_chunks(_png() + b"trailing", allow_trailing_data=True))
+
+    assert [chunk.kind for chunk in chunks] == [b"IHDR", b"IDAT", b"IEND"]
+    assert all(b"trailing" not in bytes(chunk.raw) for chunk in chunks)
+
+    crc_mismatch = bytearray(_png())
+    crc_mismatch[-1] ^= 0xFF
+    with pytest.raises(ValueError, match="CRC mismatch"):
+        list(iter_png_chunks(bytes(crc_mismatch) + b"trailing", allow_trailing_data=True))
+
+    without_iend = _png()[: -len(_chunk(b"IEND", b""))]
+    with pytest.raises(ValueError, match="IEND"):
+        list(iter_png_chunks(without_iend, allow_trailing_data=True))
+
+
 @pytest.mark.parametrize(
     ("data", "message"),
     [

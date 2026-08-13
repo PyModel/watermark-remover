@@ -161,6 +161,13 @@ def test_png_roundtrip_rgb_and_rgba():
         assert decoded == raster
 
 
+def test_decode_png_ignores_trailing_data_after_iend():
+    raster = Raster(2, 1, 3, bytearray([10, 20, 30, 40, 50, 60]))
+    encoded = encode_png(raster)
+
+    assert decode_png(encoded + b"HIDDEN-PAYLOAD") == decode_png(encoded)
+
+
 def test_remove_visible_rejects_oversized_encoded_input(tmp_path: Path, monkeypatch):
     src = tmp_path / "oversized.png"
     src.write_bytes(b"x" * 32)
