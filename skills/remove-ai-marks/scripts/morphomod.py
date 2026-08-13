@@ -678,6 +678,24 @@ def _jpeg_dimensions(data: bytes) -> tuple[int, int] | None:
     return None
 
 
+def _validate_visible_paths(
+    path: Path,
+    dest: Path | None,
+    mask_path: Path | None,
+    mask_output: Path | None,
+) -> None:
+    inputs = [path, *([mask_path] if mask_path else [])]
+    outputs = [candidate for candidate in (dest, mask_output) if candidate is not None]
+    for output in outputs:
+        validate_output_path(path, output)
+        if output.is_symlink():
+            raise ValueError(f"output path is a symlink: {output}")
+        if any(paths_alias(output, source) for source in inputs):
+            raise ValueError(f"output aliases an input: {output}")
+    if len(outputs) == 2 and paths_alias(outputs[0], outputs[1]):
+        raise ValueError("image output and mask output alias each other")
+
+
 def remove_visible(
     path: Path,
     dest: Path | None,
@@ -691,7 +709,8 @@ def remove_visible(
     mask_output: Path | None = None,
     prompt: str = "Remove watermark, fill with background",
 ) -> dict[str, Any]:
-    data = path.read_bytes()
+    _validate_visible_paths(path, dest, mask_path, mask_output)
+    data = _read_bounded(path)
     fmt = detect_format(data)
     raster = decode_png(data) if fmt == "png" else None
     dims = (raster.width, raster.height) if raster else _jpeg_dimensions(data)
@@ -738,6 +757,7 @@ def remove_visible(
     if mask_output is None:
         base = dest or path.with_name(f"{path.stem}.visible.cleaned{path.suffix}")
         mask_output = base.with_name(f"{base.stem}.mask.pgm")
+        _validate_visible_paths(path, dest, mask_path, mask_output)
     write_pgm(refined, mask_output)
     actions.extend(
         [
