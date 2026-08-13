@@ -791,10 +791,9 @@ def remove_visible(
             raise ValueError("-o/--output required for an inpainting backend")
         filled = simple_inpaint(raster, refined)
         restored = composite(raster, filled, refined)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(encode_png(restored))
+        atomic_write_bytes(dest, encode_png(restored))
         status, output = "completed", str(dest)
-        actions.append("nearest-boundary inpaint + restore (stdlib fallback)")
+        actions.append("nearest-boundary inpaint + restore (uniform-background fallback)")
     elif backend == "external":
         if not command:
             raise ValueError("--command required for external backend")
