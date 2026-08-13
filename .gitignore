@@ -12,3 +12,9 @@ __pycache__/
 .pi/
 .grok/
 research/
+
+# Agent tooling artifacts (GitNexus-generated context files, local agent config)
+.gitnexus/
+.claude/
+AGENTS.md
+CLAUDE.md
