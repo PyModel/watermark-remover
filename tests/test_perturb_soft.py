@@ -116,6 +116,40 @@ def test_clean_file_character_perturbation(tmp_path: Path):
     assert dest.read_text(encoding="utf-8") != SAMPLE
 
 
+def test_optional_c2pa_reader_uses_supported_factory_and_closes(tmp_path: Path, monkeypatch):
+    class Reader:
+        closed = False
+
+        @classmethod
+        def try_create(cls, path):
+            assert path.name == "asset.jpg"
+            return cls()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            type(self).closed = True
+
+        def is_embedded(self):
+            return True
+
+        def get_remote_url(self):
+            return None
+
+        def json(self):
+            return json.dumps(
+                {"manifests": {"active": {"assertions": [{"label": "c2pa.soft-binding"}]}}}
+            )
+
+    monkeypatch.setitem(sys.modules, "c2pa", types.SimpleNamespace(Reader=Reader))
+    asset = tmp_path / "asset.jpg"
+    asset.write_bytes(b"plain")
+    report = inspect_soft_binding(asset)
+    assert report["soft_binding"]["found"] is True
+    assert Reader.closed is True
+
+
 def test_soft_binding_detected(tmp_path: Path):
     f = tmp_path / "sealed.jpg"
     f.write_bytes(
@@ -131,12 +165,46 @@ def test_soft_binding_detected(tmp_path: Path):
     assert report["warning"]
 
 
+def test_soft_binding_scan_rejects_oversized_file(tmp_path: Path, monkeypatch):
+    asset = tmp_path / "large.bin"
+    asset.write_bytes(b"x" * 32)
+    monkeypatch.setattr(soft_binding_module, "MAX_SCAN_BYTES", 16)
+    try:
+        inspect_soft_binding(asset)
+    except ValueError as error:
+        assert "safety limit" in str(error)
+    else:
+        raise AssertionError("expected scan-size rejection")
+
+
 def test_soft_binding_absent_in_clean_file(tmp_path: Path):
     f = tmp_path / "plain.txt"
     f.write_text("ordinary prose, no provenance", encoding="utf-8")
     report = inspect_soft_binding(f)
     assert report["soft_binding"]["found"] is False
     assert report["warning"] is None
+
+
+def test_unstructured_soft_binding_words_are_not_evidence(tmp_path: Path):
+    f = tmp_path / "negative.bin"
+    f.write_bytes(b"c2pa manifest says soft-binding not supported")
+    report = inspect_soft_binding(f)
+    assert report["has_c2pa"] is True
+    assert report["soft_binding"]["found"] is False
+    assert report["soft_binding"]["labels"] == []
+
+
+def test_ordinary_c2pa_certificate_urls_are_not_soft_binding(tmp_path: Path):
+    f = tmp_path / "ordinary-c2pa.bin"
+    f.write_bytes(
+        b"c2pa manifest http://c2pa-ocsp.pki.goog/ "
+        b"http://pki.goog/c2pa/root.crt "
+        b"http://cv.iptc.org/newscodes/digitalsourcetype/trainedAlgorithmicMedia"
+    )
+    report = inspect_soft_binding(f)
+    assert report["has_c2pa"] is True
+    assert report["soft_binding"]["found"] is False
+    assert report["soft_binding"]["manifest_urls"] == []
 
 
 def test_manifestish_url_without_c2pa_is_not_soft_binding(tmp_path: Path):
