@@ -14,7 +14,9 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+import morphomod
 from morphomod import (
+    MAX_ENCODED_BYTES,
     MAX_PIXELS,
     Mask,
     Raster,
@@ -27,6 +29,7 @@ from morphomod import (
     read_pgm,
     remove_visible,
     simple_inpaint,
+    texture_patch_inpaint,
     write_pgm,
 )
 
@@ -80,6 +83,26 @@ def test_png_roundtrip_rgb_and_rgba():
         raster = Raster(3, 2, channels, pixels)
         decoded = decode_png(encode_png(raster))
         assert decoded == raster
+
+
+def test_remove_visible_rejects_oversized_encoded_input(tmp_path: Path, monkeypatch):
+    src = tmp_path / "oversized.png"
+    src.write_bytes(b"x" * 32)
+    monkeypatch.setattr("morphomod.MAX_ENCODED_BYTES", 16)
+    try:
+        remove_visible(src, None)
+    except ValueError as error:
+        assert "encoded file exceeds safety limit" in str(error)
+    else:
+        raise AssertionError("expected encoded-size rejection")
+    assert MAX_ENCODED_BYTES > 16
+
+
+def test_mask_bounds_large_sparse_mask_does_not_build_marked_lists():
+    # Regression: bounds calculation must remain one-pass/constant auxiliary memory.
+    mask = box_mask(1000, 1000, (999, 999, 1, 1))
+    result = dilate(mask, 0)
+    assert result.marked == 1
 
 
 def test_png_decoder_rejects_oversized_dimensions_before_decompression():
