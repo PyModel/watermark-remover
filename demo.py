@@ -21,11 +21,8 @@ ROOT = Path(__file__).resolve().parent
 SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 from asset_kind import classify_asset
-from common import atomic_write_text
-from container_meta import clean_container
-from image_meta import clean_image
+from clean_asset import CleanPlan, clean_asset
 from rewrite_text import RewritePlan, rewrite
-from text_unicode import clean_text
 
 
 def clean_upload(file_obj, keep_non_ai: bool, layer_b: bool, strength: str):
@@ -38,23 +35,9 @@ def clean_upload(file_obj, keep_non_ai: bool, layer_b: bool, strength: str):
 
     kind = classify_asset(src)
     try:
-        if kind == "text":
-            text = src.read_text(encoding="utf-8", errors="surrogateescape")
-            cleaned, stats = clean_text(text)
-            atomic_write_text(dest, cleaned)
-            result = {
-                "kind": "text",
-                "input": str(src),
-                "output": str(dest),
-                "stats": stats,
-            }
-        elif kind == "image":
-            result = {
-                "kind": "image",
-                **clean_image(src, dest, strip_all_metadata=not keep_non_ai),
-            }
-        else:
-            result = {"kind": "container", **clean_container(src, dest)}
+        result = clean_asset(
+            src, dest, CleanPlan(forced_kind=kind, strip_all_metadata=not keep_non_ai)
+        ).to_dict()
     except Exception as e:
         return f"**Error cleaning {src.name}:** `{e}`", None, ""
 
