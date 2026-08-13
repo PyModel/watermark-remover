@@ -10,8 +10,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from common import cleaned_path, eprint
-from image_meta import clean_image
+from common import cleaned_path, create_backup, eprint, validate_output_path
+from image_meta import (
+    clean_image,
+    detect_format,
+    strip_avif,
+    strip_heic,
+    strip_jpeg,
+    strip_png,
+)
 
 
 def main() -> int:
@@ -42,15 +49,28 @@ def main() -> int:
         return 2
 
     src = args.path
-    if args.in_place:
-        bak = args.path.with_suffix(args.path.suffix + ".bak")
-        bak.write_bytes(args.path.read_bytes())
-        src = bak
-        dest = args.path
-    else:
-        dest = args.output or cleaned_path(args.path)
-
     try:
+        if args.in_place:
+            dest = args.path
+            # Validate the full transform before creating a backup or touching
+            # the source. The real pass then reads from the immutable backup.
+            data = args.path.read_bytes()
+            fmt = detect_format(data)
+            strip_all = not args.keep_non_ai_metadata
+            if fmt == "png":
+                strip_png(data, strip_all_text=strip_all)
+            elif fmt == "jpeg":
+                strip_jpeg(data, strip_all_app=strip_all)
+            elif fmt == "heif":
+                strip_heic(data, strip_all=strip_all)
+            elif fmt == "avif":
+                strip_avif(data, strip_all=strip_all)
+            else:
+                raise ValueError(f"unsupported format: {fmt}")
+            src = create_backup(args.path)
+        else:
+            dest = args.output or cleaned_path(args.path)
+            validate_output_path(args.path, dest)
         result = clean_image(
             src,
             dest,
