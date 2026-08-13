@@ -76,6 +76,26 @@ def test_clean_directory_recursive_and_extensions(tmp_path: Path):
     assert not (tmp_path / "out" / "img.png").exists()
 
 
+def test_batch_rejects_parent_traversal_glob(tmp_path: Path):
+    src = tmp_path / "in"
+    src.mkdir()
+    (tmp_path / "outside.txt").write_text(ZWSP, encoding="utf-8")
+    for script in ("clean_file.py", "inspect_file.py"):
+        r = _run(script, src, "--glob", "../*.txt")
+        assert r.returncode == 2
+        assert "invalid input selection" in r.stderr
+
+
+def test_explicit_symlink_input_is_rejected(tmp_path: Path):
+    outside = tmp_path / "outside.txt"
+    outside.write_text(ZWSP, encoding="utf-8")
+    linked = tmp_path / "linked.txt"
+    linked.symlink_to(outside)
+    r = _run("clean_file.py", linked, "--in-place")
+    assert r.returncode == 2
+    assert outside.read_text(encoding="utf-8") == ZWSP
+
+
 def test_clean_directory_glob(tmp_path: Path):
     src = tmp_path / "in"
     src.mkdir()
@@ -102,6 +122,41 @@ def test_clean_multi_file_and_single_json(tmp_path: Path):
     single = json.loads(r1.stdout)
     assert single["kind"] == "text"
     assert single["stats"]["removed_count"] >= 1
+
+
+def test_single_output_cannot_alias_input(tmp_path: Path):
+    src = tmp_path / "draft.txt"
+    src.write_text(ZWSP, encoding="utf-8")
+    original = src.read_bytes()
+    r = _run("clean_file.py", src, "-o", src)
+    assert r.returncode == 2
+    assert "output aliases input" in r.stderr
+    assert src.read_bytes() == original
+
+
+def test_batch_preflight_prevents_output_from_overwriting_another_input(tmp_path: Path):
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.write_text("first", encoding="utf-8")
+    second.write_text("second", encoding="utf-8")
+    r = _run("clean_file.py", first, second, "-o", tmp_path, "--json")
+    assert r.returncode == 2
+    assert "output aliases input" in r.stderr
+    assert first.read_text(encoding="utf-8") == "first"
+    assert second.read_text(encoding="utf-8") == "second"
+
+
+def test_in_place_rejects_existing_backup_symlink(tmp_path: Path):
+    src = tmp_path / "draft.txt"
+    src.write_text(ZWSP, encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("do not overwrite", encoding="utf-8")
+    src.with_suffix(".txt.bak").symlink_to(outside)
+    r = _run("clean_file.py", src, "--in-place")
+    assert r.returncode == 2
+    assert "backup already exists" in r.stderr
+    assert outside.read_text(encoding="utf-8") == "do not overwrite"
+    assert src.read_text(encoding="utf-8") == ZWSP
 
 
 def test_in_place_batch_does_not_follow_symlinked_files(tmp_path: Path):
