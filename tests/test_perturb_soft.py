@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+import inspect_soft_binding as soft_binding_module
 from inspect_soft_binding import inspect_soft_binding
 from perturb_text import perturb_text
 from text_unicode import clean_text
