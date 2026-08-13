@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePath
 
 
 @dataclass(frozen=True)
@@ -16,6 +16,12 @@ class InputItem:
 def is_generated(path: Path) -> bool:
     name = path.name
     return path.suffix == ".bak" or ".cleaned." in name or ".mask." in name
+
+
+def _validate_pattern(pattern: str) -> None:
+    parts = PurePath(pattern).parts
+    if not pattern or Path(pattern).is_absolute() or ".." in parts:
+        raise ValueError("glob must be a non-empty relative pattern without '..'")
 
 
 def safe_output_path(root: Path, relative: Path) -> Path:
@@ -57,12 +63,15 @@ def collect_inputs(
     are namespaced by each root's basename. Explicit files retain their name.
     Missing sources are ignored; the CLI reports them before calling here.
     """
+    _validate_pattern(pattern)
     roots = list(sources)
     multiple_roots = len(roots) > 1
     allowed = {e.lower() for e in extensions}
     seen: set[Path] = set()
     items: list[InputItem] = []
     for source in roots:
+        if source.is_symlink():
+            continue
         if source.is_dir():
             iterator = source.rglob(pattern) if recursive else source.glob(pattern)
             for path in sorted(iterator):
