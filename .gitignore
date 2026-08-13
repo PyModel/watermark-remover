@@ -5,6 +5,10 @@ __pycache__/
 .pytest_cache/
 .firecrawl/
 *.cleaned.*
+*.mask.*
 *.bak
 *.png.bak
 *.jpg.bak
+.pi/
+.grok/
+research/
