@@ -45,21 +45,6 @@ PROMPTS = {
         "structure while preserving all facts, numbers, names, and technical identifiers. "
         "Do not add or remove claims. Output only the rewritten text.\n\n---\n{TEXT}"
     ),
-    "backtranslate_out": (
-        "Translate the following text to {LANG}. Output only the translation.\n\n---\n{TEXT}"
-    ),
-    "backtranslate_back": (
-        "Translate the following text to {ORIGINAL_LANG}. Preserve meaning; use natural "
-        "phrasing. Output only the translation.\n\n---\n{TEXT}"
-    ),
-    "structural_outline": (
-        "Extract a bullet outline of all claims and structure from the text "
-        "(no full sentences). Output only the outline.\n\n---\n{TEXT}"
-    ),
-    "structural_write": (
-        "Write a complete document from this outline in a clear professional style. "
-        "Do not omit any bullet. Output only the document.\n\n---\n{TEXT}"
-    ),
 }
 
 
