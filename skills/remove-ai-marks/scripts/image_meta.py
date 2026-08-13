@@ -548,8 +548,7 @@ def clean_image(
         raise ValueError(f"unsupported format: {fmt}")
 
     # Optional exiftool pass for residual tags
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(cleaned)
+    atomic_write_bytes(dest, cleaned)
     exiftool = which("exiftool")
     if exiftool and strip_all_metadata:
         try:
