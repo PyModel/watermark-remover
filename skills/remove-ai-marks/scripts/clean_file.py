@@ -274,6 +274,7 @@ def _rewrite_tsapa_live(text: str, args) -> tuple[str, dict]:
         layer_a_after=True,
         generations=args.tsapa_generations,
         population=args.tsapa_population,
+        disable_thinking=read_bool_env("WATERMARKS_REWRITE_DISABLE_THINKING"),
     )
 
 
@@ -285,9 +286,8 @@ def _clean_single_file(path: Path, output_path: Path | None, args) -> dict:
     try:
         kind = args.force_type if args.force_type != "auto" else classify(path)
         if args.in_place:
-            backup = path.with_suffix(path.suffix + ".bak")
-            backup.write_bytes(path.read_bytes())
-            src, dest = backup, path
+            src = path
+            dest = path
         else:
             src, dest = path, output_path or cleaned_path(path)
 
