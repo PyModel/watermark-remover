@@ -79,14 +79,14 @@ The CLI modules orchestrate these interfaces; they do not contain alternate impl
 - Dilation reads the original mask—not a mask being mutated in place—so it cannot cascade into a frame-wide flood.
 - A completely masked image is rejected: no surrounding context exists for inpainting.
 - The stdlib codec accepts only non-interlaced 8-bit gray/RGB/RGBA PNG and fails closed otherwise.
-- External commands run with `shell=False`, have timeouts, and must produce their declared output.
+- External commands run with `shell=False`, have timeouts, and must produce their declared output within the encoded-size limit.
 - Original pixels outside the refined mask are restored exactly for PNG.
 
 ### Batch / CLI
 
-- Directory outputs preserve relative paths.
-- Multiple roots are namespaced; output collisions fail.
-- `.cleaned.*`, `.mask.*`, and `.bak` artifacts are not reprocessed.
+- Directory outputs preserve relative paths; every input/output/mask alias and collision is rejected before the first write.
+- Directory roots are namespaced when multiple roots are provided; explicit-file basename collisions fail before any write.
+- `.cleaned.*`, `.mask.*`, and `.bak` artifacts are not reprocessed; in-place backups use exclusive no-follow creation.
 - A directory is batch mode even if a glob returns one file.
 - Exit `0` means all requested operations completed without retained requested risk; `1` means processing error or residual signal; `2` means usage/input selection error.
 
@@ -117,7 +117,7 @@ explicit/external localization
   → metadata clean (when invoked through clean_file.py)
 ```
 
-The stdlib backend is intentionally modest: nearest-boundary wavefront fill works on simple backgrounds. Production-quality texture synthesis belongs in an external LaMa/MI-GAN/diffusion adapter. No model weights or research-licensed code are vendored.
+The default stdlib backend selects a nearby texture patch by boundary error and fully replaces the dilated mask; optional module-level feathering is explicit. Dogfood tests cover flat and textured backgrounds. Nearest-boundary wavefront fill remains available as `simple` for uniform backgrounds. Production-grade semantic reconstruction still belongs in an external LaMa/MI-GAN/diffusion adapter. No model weights or research-licensed code are vendored.
 
 ## 7. Corrected research facts
 
