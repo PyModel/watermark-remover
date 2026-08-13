@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-import image_meta  # noqa: E402
+import image_meta
 
 MANIFEST_OUTPUT = """{
   "active_manifest": "urn:c2pa:0000",

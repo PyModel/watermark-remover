@@ -10,8 +10,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from common import cleaned_path, eprint  # noqa: E402
-from image_meta import clean_image  # noqa: E402
+from common import cleaned_path, eprint
+from image_meta import clean_image
 
 
 def main() -> int:
@@ -81,11 +81,13 @@ def main() -> int:
                 f"confidence {result['synthid_after'].get('confidence', 0.0):.3f} "
                 f"(watermarked: {label})"
             )
-        if result["still_has_c2pa"] or result["still_has_ai_metadata"]:
+    residual = result["still_has_c2pa"] or result["still_has_ai_metadata"]
+    if residual:
+        if not args.json:
             eprint("warning: residual C2PA/AI signals may remain")
-            for f in result.get("post_findings") or []:
-                eprint(f"  ! {f}")
-            return 1
+            for finding in result.get("post_findings") or []:
+                eprint(f"  ! {finding}")
+        return 1
     return 0
 
 

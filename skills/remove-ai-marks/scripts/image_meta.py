@@ -81,7 +81,9 @@ def detect_format(data: bytes) -> str:
         return "png"
     if data.startswith(JPEG_SOI):
         return "jpeg"
-    return "unknown"
+    from heif_meta import detect_heif  # lazy: avoids module-level cycle
+
+    return detect_heif(data)  # 'heif' | 'avif' | 'unknown'
 
 
 def _contains_any(blob: bytes, needles: tuple[bytes, ...]) -> list[str]:
@@ -135,6 +137,36 @@ def inspect_png(data: bytes) -> tuple[bool, bool, list[str]]:
     return has_c2pa, has_ai or has_c2pa, findings
 
 
+def inspect_avif(data: bytes) -> tuple[bool, bool, list[str]]:
+    """Inspect AVIF (ISO-BMFF) for C2PA/JUMBF boxes and AI-marked Exif/XMP items."""
+    from heif_meta import inspect_heif
+
+    has_c2pa, has_ai, findings, _ = inspect_heif(data)
+    return has_c2pa, has_ai, findings
+
+
+def inspect_heic(data: bytes) -> tuple[bool, bool, list[str]]:
+    """Inspect HEIC/HEIF (ISO-BMFF) for C2PA/JUMBF boxes and AI-marked Exif/XMP items."""
+    from heif_meta import inspect_heif
+
+    has_c2pa, has_ai, findings, _ = inspect_heif(data)
+    return has_c2pa, has_ai, findings
+
+
+def strip_avif(data: bytes, *, strip_all: bool = True) -> tuple[bytes, list[str]]:
+    """Neutralize C2PA/AI metadata in AVIF in place (offsets preserved; pixels untouched)."""
+    from heif_meta import neutralize_heif
+
+    return neutralize_heif(data, strip_all_metadata=strip_all)
+
+
+def strip_heic(data: bytes, *, strip_all: bool = True) -> tuple[bytes, list[str]]:
+    """Neutralize C2PA/AI metadata in HEIC/HEIF in place (offsets preserved; pixels untouched)."""
+    from heif_meta import neutralize_heif
+
+    return neutralize_heif(data, strip_all_metadata=strip_all)
+
+
 def inspect_jpeg(data: bytes) -> tuple[bool, bool, list[str]]:
     findings: list[str] = []
     has_c2pa = False
@@ -169,17 +201,14 @@ def inspect_jpeg(data: bytes) -> tuple[bool, bool, list[str]]:
         payload = data[i + 2 : i + seglen]
         i += seglen
 
-        # APP11 (0xEB) often holds JUMBF/C2PA
-        if marker == 0xEB:
-            has_c2pa = True
-            findings.append("JPEG APP11 segment (JUMBF/C2PA common)")
+        # APP11 is only C2PA when the payload actually carries JUMBF/C2PA
+        # markers; APP11 itself has other legitimate uses.
         if marker in (0xE1, 0xE2, 0xED, 0xEE, 0xEB):  # APP1,2,13,14,11
             hits = _contains_any(payload, AI_META_HINTS + C2PA_MARKERS)
             if hits:
                 has_ai = True
                 if any(
-                    h.lower() in ("c2pa", "contentcredentials", "jumb", "contentauth")
-                    for h in hits
+                    h.lower() in ("c2pa", "contentcredentials", "jumb", "contentauth") for h in hits
                 ):
                     has_c2pa = True
                 findings.append(f"JPEG APP{marker - 0xE0}: {', '.join(hits[:8])}")
@@ -213,9 +242,7 @@ def run_optional_tools(path: Path) -> dict[str, Any]:
                 "available": True,
                 "returncode": r.returncode,
                 "snippet": out[:2000],
-                "has_manifest": (
-                    "claim" in low or "c2pa" in low or "manifest" in low
-                )
+                "has_manifest": ("claim" in low or "c2pa" in low or "manifest" in low)
                 and not no_manifest,
             }
         except Exception as e:
@@ -297,12 +324,14 @@ def inspect_image(
 ) -> ImageInspectReport:
     data = path.read_bytes()
     fmt = detect_format(data)
-    if fmt == "png":
+    if fmt in ("heif", "avif"):
+        has_c2pa, has_ai, findings = inspect_heic(data)
+    elif fmt == "png":
         has_c2pa, has_ai, findings = inspect_png(data)
     elif fmt == "jpeg":
         has_c2pa, has_ai, findings = inspect_jpeg(data)
     else:
-        has_c2pa, has_ai, findings = False, False, ["unsupported format (MVP: PNG/JPEG)"]
+        has_c2pa, has_ai, findings = False, False, ["unsupported format (PNG/JPEG/HEIF/AVIF)"]
 
     tools = run_optional_tools(path)
     # Elevate flags from tools
@@ -318,14 +347,8 @@ def inspect_image(
         has_ai_metadata=has_ai,
         findings=findings,
         tools=tools,
-        synthid=run_synthid_score(path, synthid_dir),
+        synthid=(run_synthid_score(path, synthid_dir) if fmt in ("png", "jpeg") else None),
     )
-
-
-def _png_chunk(ctype: bytes, payload: bytes) -> bytes:
-    crc = zlib.crc32(ctype)
-    crc = zlib.crc32(payload, crc) & 0xFFFFFFFF
-    return struct.pack(">I", len(payload)) + ctype + payload + struct.pack(">I", crc)
 
 
 def strip_png(data: bytes, *, strip_all_text: bool = True) -> tuple[bytes, list[str]]:
@@ -334,23 +357,28 @@ def strip_png(data: bytes, *, strip_all_text: bool = True) -> tuple[bytes, list[
     actions: list[str] = []
     out = bytearray(PNG_SIG)
     pos = 8
+    saw_iend = False
     while pos + 8 <= len(data):
         length = struct.unpack(">I", data[pos : pos + 4])[0]
         ctype = data[pos + 4 : pos + 8]
         chunk_start = pos + 8
         chunk_end = chunk_start + length
         if chunk_end + 4 > len(data):
-            break
+            raise ValueError(f"truncated PNG chunk {ctype!r}")
         payload = data[chunk_start:chunk_end]
         crc_bytes = data[chunk_end : chunk_end + 4]
+        stored_crc = struct.unpack(">I", crc_bytes)[0]
+        actual_crc = zlib.crc32(payload, zlib.crc32(ctype)) & 0xFFFFFFFF
+        if stored_crc != actual_crc:
+            raise ValueError(f"PNG CRC mismatch in {ctype!r}")
         pos = chunk_end + 4
         name = ctype.decode("latin-1", errors="replace")
 
         drop = False
-        if ctype in (b"eXIf", b"caBX") or ctype.startswith(b"c2"):
+        if ctype == b"caBX" or ctype.startswith(b"c2"):
             drop = True
             actions.append(f"drop chunk {name}")
-        elif ctype in (b"tEXt", b"zTXt", b"iTXt"):
+        elif ctype == b"eXIf" or ctype in (b"tEXt", b"zTXt", b"iTXt"):
             if strip_all_text or _contains_any(payload, AI_META_HINTS + C2PA_MARKERS):
                 drop = True
                 actions.append(f"drop chunk {name}")
@@ -372,7 +400,10 @@ def strip_png(data: bytes, *, strip_all_text: bool = True) -> tuple[bytes, list[
         if not drop:
             out.extend(struct.pack(">I", length) + ctype + payload + crc_bytes)
         if ctype == b"IEND":
+            saw_iend = True
             break
+    if not saw_iend:
+        raise ValueError("PNG has no complete IEND chunk")
     if not actions:
         actions.append("no PNG metadata chunks removed (already clean or none matched)")
     return bytes(out), actions
@@ -387,10 +418,7 @@ def strip_jpeg(data: bytes, *, strip_all_app: bool = True) -> tuple[bytes, list[
     n = len(data)
     while i < n:
         if data[i] != 0xFF:
-            # unexpected; copy rest
-            out.extend(data[i:])
-            actions.append("copied remainder after non-marker byte")
-            break
+            raise ValueError(f"malformed JPEG marker stream at offset {i}")
         while i < n and data[i] == 0xFF:
             i += 1
         if i >= n:
@@ -410,11 +438,10 @@ def strip_jpeg(data: bytes, *, strip_all_app: bool = True) -> tuple[bytes, list[
             # need length of SOS header then entropy-coded data to EOI
             if i + 2 > n:
                 break
-            seglen = struct.unpack(">H", data[i : i + 2])[0]
-            # Find EOI from here carefully: after SOS segment header, scan for FF D9
-            # not preceded by stuffed FF 00 issues — simple approach: copy from FF DA to end
-            sos_start = i - 2  # points at 0xFF before marker... actually marker already consumed
-            # Reconstruct: FF DA + rest of file
+            segment_length = struct.unpack(">H", data[i : i + 2])[0]
+            if segment_length < 2 or i + segment_length > n:
+                raise ValueError("truncated JPEG SOS header")
+            # Preserve the complete entropy-coded stream after validating the SOS header.
             out.extend(b"\xff\xda")
             out.extend(data[i:])
             actions.append("preserved entropy-coded scan (SOS→EOF)")
@@ -424,9 +451,7 @@ def strip_jpeg(data: bytes, *, strip_all_app: bool = True) -> tuple[bytes, list[
             break
         seglen = struct.unpack(">H", data[i : i + 2])[0]
         if seglen < 2 or i + seglen > n:
-            out.extend(data[i - 2 :])  # best effort
-            actions.append("truncated segment; copied remainder")
-            break
+            raise ValueError(f"truncated JPEG segment at marker 0x{marker:02X}")
         payload = data[i + 2 : i + seglen]
         next_i = i + seglen
 
@@ -434,21 +459,28 @@ def strip_jpeg(data: bytes, *, strip_all_app: bool = True) -> tuple[bytes, list[
         keep = False
         drop = False
         if 0xE0 <= marker <= 0xEF:  # APPn
-            if marker == 0xEB:  # APP11 JUMBF/C2PA
+            hits = _contains_any(payload, AI_META_HINTS + C2PA_MARKERS)
+            app11_is_c2pa = marker == 0xEB and any(
+                h.lower() in ("c2pa", "contentcredentials", "jumb", "contentauth") for h in hits
+            )
+            if app11_is_c2pa:
                 drop = True
                 actions.append("drop APP11 (C2PA/JUMBF)")
             elif strip_all_app and marker != 0xE0:
                 # keep APP0 (JFIF) by default
                 drop = True
                 actions.append(f"drop APP{marker - 0xE0}")
-            elif _contains_any(payload, AI_META_HINTS + C2PA_MARKERS):
+            elif hits:
                 drop = True
                 actions.append(f"drop APP{marker - 0xE0} (AI/C2PA markers)")
             else:
                 keep = True
-        elif marker in (0xFE,):  # COM
-            drop = True
-            actions.append("drop COM comment")
+        elif marker == 0xFE:  # COM
+            if strip_all_app or _contains_any(payload, AI_META_HINTS + C2PA_MARKERS):
+                drop = True
+                actions.append("drop COM comment")
+            else:
+                keep = True
         else:
             keep = True
 
@@ -469,13 +501,17 @@ def clean_image(
     strip_all_metadata: bool = True,
     synthid_dir: str | None = None,
 ) -> dict[str, Any]:
-    synthid_before = run_synthid_score(path, synthid_dir)
     data = path.read_bytes()
     fmt = detect_format(data)
+    synthid_before = run_synthid_score(path, synthid_dir) if fmt in ("png", "jpeg") else None
     if fmt == "png":
         cleaned, actions = strip_png(data, strip_all_text=strip_all_metadata)
     elif fmt == "jpeg":
         cleaned, actions = strip_jpeg(data, strip_all_app=strip_all_metadata)
+    elif fmt == "heif":
+        cleaned, actions = strip_heic(data, strip_all=strip_all_metadata)
+    elif fmt == "avif":
+        cleaned, actions = strip_avif(data, strip_all=strip_all_metadata)
     else:
         raise ValueError(f"unsupported format: {fmt}")
 
@@ -485,7 +521,7 @@ def clean_image(
     exiftool = which("exiftool")
     if exiftool and strip_all_metadata:
         try:
-            subprocess.run(
+            result = subprocess.run(
                 [
                     exiftool,
                     "-all=",
@@ -497,7 +533,11 @@ def clean_image(
                 timeout=60,
                 check=False,
             )
-            actions.append("exiftool -all= pass")
+            if result.returncode == 0:
+                actions.append("exiftool -all= pass")
+            else:
+                detail = (result.stderr or result.stdout or "").strip()[:300]
+                actions.append(f"exiftool failed (rc={result.returncode}): {detail}")
         except Exception as e:
             actions.append(f"exiftool failed: {e}")
 
