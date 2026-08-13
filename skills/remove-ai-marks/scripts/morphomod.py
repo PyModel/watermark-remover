@@ -303,7 +303,7 @@ def _paeth(a: int, b: int, c: int) -> int:
 def decode_png(data: bytes) -> Raster:
     width = height = bit_depth = color_type = interlace = 0
     idat = bytearray()
-    for chunk in iter_png_chunks(data):
+    for chunk in iter_png_chunks(data, allow_trailing_data=True):
         if chunk.kind == b"IHDR":
             width, height, bit_depth, color_type, _, _, interlace = struct.unpack(
                 ">IIBBBBB", chunk.payload
