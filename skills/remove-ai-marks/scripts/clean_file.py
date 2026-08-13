@@ -14,65 +14,26 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import tempfile
+from collections.abc import Sequence
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from batch_inputs import InputItem, collect_inputs, safe_output_path
-from common import (
-    atomic_write_text,
-    backup_path,
-    cleaned_path,
-    create_backup,
-    eprint,
-    paths_alias,
-    read_bytes_bounded,
-    validate_output_path,
-)
-from container_meta import clean_container, detect_container_format
-from image_meta import clean_image
-from image_meta import detect_format as detect_image_format
-from inspect_soft_binding import inspect_soft_binding
-from morphomod import DEFAULT_DILATION_RADIUS, VisiblePlan, remove_visible
+from asset_kind import SUPPORTED_EXTENSIONS, AssetKind, classify_asset
+from batch_inputs import InputItem, safe_output_path, select_inputs
+from clean_asset import CleanPlan, CleanResult, TextCleanPlan, clean_asset
+from common import backup_path, cleaned_path, eprint, paths_alias, validate_output_path
+from morphomod import DEFAULT_DILATION_RADIUS, VISIBLE_CLEAN_BACKENDS, VisiblePlan
 from perturb_text import MODES as PERTURB_MODES
-from perturb_text import perturb_text
-from rewrite_text import RewritePlan, rewrite
-from text_unicode import clean_text
-
-IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".heic", ".heif", ".avif"}
-CONTAINER_EXTS = {".svg", ".pdf", ".docx", ".odt", ".html", ".htm", ".md", ".markdown", ".mdx"}
-TEXT_EXTS = {
-    ".txt",
-    ".text",
-    ".css",
-    ".js",
-    ".py",
-    ".rs",
-    ".go",
-    ".json",
-    ".yaml",
-    ".yml",
-    ".toml",
-    ".csv",
-}
-SUPPORTED_EXTS = IMAGE_EXTS | CONTAINER_EXTS | TEXT_EXTS
+from rewrite_text import RewritePlan, remote_warning
 
 
-def classify(path: Path) -> str:
-    ext = path.suffix.lower()
-    if ext in IMAGE_EXTS:
-        return "image"
-    if ext in CONTAINER_EXTS:
-        return "container"
-    if ext in TEXT_EXTS:
-        return "text"
-    data = path.read_bytes()
-    if detect_image_format(data) in ("png", "jpeg", "heif", "avif"):
-        return "image"
-    if detect_container_format(path, data) != "unknown":
-        return "container"
-    return "text"
+class _CleanPlanPreflightError(RuntimeError):
+    """A per-asset policy failed before batch execution."""
+
+    def __init__(self, path: Path, output: Path, error: Exception) -> None:
+        super().__init__(str(error))
+        self.path = path
+        self.output = output
 
 
 def _parse_box(value: str) -> tuple[int, int, int, int]:
@@ -123,7 +84,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dilate", type=int, default=None, metavar="RADIUS")
     p.add_argument(
         "--visible-backend",
-        choices=("texture", "simple", "external"),
+        choices=VISIBLE_CLEAN_BACKENDS,
         default="texture",
     )
     p.add_argument("--inpaint-command", help="Inpainter template: {input} {mask} {output} {prompt}")
@@ -134,37 +95,31 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = _build_parser().parse_args()
-    invalid = [
-        source
-        for source in args.path
-        if not source.exists() or source.is_symlink() or not (source.is_file() or source.is_dir())
-    ]
-    if invalid:
-        for source in invalid:
-            eprint(f"not a regular file or directory: {source}")
-        return 2
-    allowed = SUPPORTED_EXTS
+    allowed = SUPPORTED_EXTENSIONS
     if args.extensions:
         allowed = {
-            "." + e.strip().lstrip(".").lower() for e in args.extensions.split(",") if e.strip()
+            "." + extension.strip().lstrip(".").lower()
+            for extension in args.extensions.split(",")
+            if extension.strip()
         }
+    excluded_roots = (
+        (args.output,)
+        if args.output and not args.in_place and any(source.is_dir() for source in args.path)
+        else ()
+    )
     try:
-        items = collect_inputs(
+        selection = select_inputs(
             args.path,
             recursive=args.recursive,
             pattern=args.glob,
             extensions=allowed,
+            excluded_roots=excluded_roots,
         )
     except ValueError as error:
         eprint(f"invalid input selection: {error}")
         return 2
-    if args.output and not args.in_place and any(source.is_dir() for source in args.path):
-        output_root = args.output.resolve()
-        items = [item for item in items if not item.path.resolve().is_relative_to(output_root)]
-    if not items:
-        eprint("no matching input files")
-        return 2
-    batch = len(items) > 1 or any(source.is_dir() for source in args.path)
+    items = selection.items
+    batch = selection.batch
     if batch and (args.visible_mask or args.visible_box):
         eprint(
             "error: --visible-mask/--visible-box are single-file options; use --detect-command for batch"
@@ -174,13 +129,21 @@ def main() -> int:
         eprint("warning: -o ignored with --in-place")
     try:
         work = _plan_work(items, args, batch)
+    except _CleanPlanPreflightError as error:
+        result = _error_payload(error.path, error.output, error)
+        if args.json:
+            payload = {"total": 1, "results": [result]} if batch else result
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            eprint(f"error on {error.path}: {error}")
+        return 1
     except ValueError as error:
         eprint(f"invalid output selection: {error}")
         return 2
     if batch and args.output and not args.in_place:
         args.output.mkdir(parents=True, exist_ok=True)
 
-    results = [_clean_single_file(item.path, output, args) for item, output in work]
+    results = [_run_clean_item(item.path, output, args, plan) for item, output, plan in work]
 
     if args.json:
         payload: dict | list = {"total": len(results), "results": results} if batch else results[0]
@@ -191,8 +154,10 @@ def main() -> int:
     return 0 if all(r.get("exit_code", 0) == 0 for r in results) else 1
 
 
-def _plan_work(items: list[InputItem], args, batch: bool) -> list[tuple[InputItem, Path | None]]:
-    """Resolve and validate every destination before the first write."""
+def _plan_work(
+    items: Sequence[InputItem], args, batch: bool
+) -> list[tuple[InputItem, Path | None, CleanPlan]]:
+    """Resolve and validate every destination and plan before the first write."""
     inputs = [item.path for item in items]
     ancillary_inputs = [candidate for candidate in (args.visible_mask,) if candidate is not None]
     for ancillary in ancillary_inputs:
@@ -200,43 +165,43 @@ def _plan_work(items: list[InputItem], args, batch: bool) -> list[tuple[InputIte
             raise ValueError(f"not a regular mask file: {ancillary}")
     all_inputs = [*inputs, *ancillary_inputs]
     destinations: list[Path] = []
-    work: list[tuple[InputItem, Path | None]] = []
+    work: list[tuple[InputItem, Path | None, CleanPlan]] = []
 
     for item in items:
         if args.in_place:
             backup = backup_path(item.path)
             if backup.exists() or backup.is_symlink():
                 raise ValueError(f"backup already exists: {backup}")
-            if _visible_requested(args):
-                mask_output = item.path.with_name(f"{item.path.stem}.mask.pgm")
-                if mask_output.is_symlink():
-                    raise ValueError(f"mask output is a symlink: {mask_output}")
-                if any(paths_alias(mask_output, source) for source in all_inputs):
-                    raise ValueError(f"mask output aliases an input: {mask_output}")
-                if any(paths_alias(mask_output, existing) for existing in destinations):
-                    raise ValueError(f"mask output collision: {mask_output}")
-                destinations.append(mask_output)
-            work.append((item, None))
-            continue
-
-        if args.output is None:
-            output = cleaned_path(item.path)
-        elif batch:
-            output = safe_output_path(args.output, item.relative)
+            output = None
+            dest = item.path
         else:
-            output = args.output
+            if args.output is None:
+                output = cleaned_path(item.path)
+            elif batch:
+                output = safe_output_path(args.output, item.relative)
+            else:
+                output = args.output
 
-        validate_output_path(item.path, output)
-        for source in all_inputs:
-            if paths_alias(output, source):
-                raise ValueError(f"output aliases an input: {output}")
-        for existing in destinations:
-            if paths_alias(output, existing):
-                raise ValueError(f"batch output collision: {output}")
-        destinations.append(output)
+            validate_output_path(item.path, output)
+            for source in all_inputs:
+                if paths_alias(output, source):
+                    raise ValueError(f"output aliases an input: {output}")
+            for existing in destinations:
+                if paths_alias(output, existing):
+                    raise ValueError(f"batch output collision: {output}")
+            destinations.append(output)
+            dest = output
 
-        if _visible_requested(args):
-            mask_output = output.with_name(f"{output.stem}.mask.pgm")
+        try:
+            kind = classify_asset(item.path, forced_kind=args.force_type)
+            plan = _build_clean_plan(args, dest, kind)
+        except Exception as error:
+            raise _CleanPlanPreflightError(item.path, dest, error) from error
+
+        if plan.visible is not None:
+            mask_output = plan.visible.mask_output
+            if mask_output is None:
+                raise ValueError("visible plan is missing a mask output path")
             if mask_output.is_symlink():
                 raise ValueError(f"mask output is a symlink: {mask_output}")
             if any(paths_alias(mask_output, source) for source in all_inputs):
@@ -245,16 +210,51 @@ def _plan_work(items: list[InputItem], args, batch: bool) -> list[tuple[InputIte
                 raise ValueError(f"mask/output collision: {mask_output}")
             destinations.append(mask_output)
 
-        work.append((item, output))
+        work.append((item, output, plan))
     return work
 
 
-def _rewrite_tsapa_live(text: str, args) -> tuple[str, dict]:
-    plan = RewritePlan.live_tsapa_from_environment(
-        generations=args.tsapa_generations,
-        population=args.tsapa_population,
+def _build_clean_plan(args, dest: Path, kind: AssetKind) -> CleanPlan:
+    text_plan = TextCleanPlan()
+    if kind == "text":
+        rewrite_plan = (
+            RewritePlan.live_tsapa_from_environment(
+                generations=args.tsapa_generations,
+                population=args.tsapa_population,
+            )
+            if args.tsapa
+            else None
+        )
+        text_plan = TextCleanPlan(
+            nfkc=args.nfkc,
+            aggressive_homoglyphs=args.aggressive_homoglyphs,
+            preserve_semantic=not args.strip_semantic_format,
+            rewrite_plan=rewrite_plan,
+            perturb_mode=args.char_mode if args.char_perturb else None,
+            perturb_strength=args.char_strength if args.char_perturb else 0.1,
+            perturb_seed=args.seed if args.char_perturb else None,
+        )
+
+    visible_plan = None
+    if kind == "image" and _visible_requested(args):
+        visible_plan = VisiblePlan(
+            mask_path=args.visible_mask,
+            box=args.visible_box,
+            detect_command=args.detect_command,
+            backend=args.visible_backend,
+            command=args.inpaint_command,
+            dilation_radius=(args.dilate if args.dilate is not None else DEFAULT_DILATION_RADIUS),
+            mask_output=dest.with_name(f"{dest.stem}.mask.pgm"),
+            prompt=args.visible_prompt,
+        )
+    return CleanPlan(
+        forced_kind=kind,
+        in_place=args.in_place,
+        text=text_plan,
+        strip_all_metadata=not args.keep_non_ai_metadata,
+        visible=visible_plan,
+        inspect_soft_binding=args.soft_binding,
     )
-    return rewrite(text, plan)
 
 
 def _visible_requested(args) -> bool:
@@ -264,129 +264,70 @@ def _visible_requested(args) -> bool:
             args.visible_box,
             args.detect_command,
             args.dilate is not None,
-            args.visible_backend != "texture",
             args.inpaint_command,
+            args.visible_backend != "texture",
         )
     )
 
 
-def _clean_single_file(path: Path, output_path: Path | None, args) -> dict:
+def _error_payload(path: Path, output: Path, error: Exception) -> dict:
+    return {
+        "kind": "unknown",
+        "input": str(path),
+        "output": str(output),
+        "actions": [f"error: {error}"],
+        "error": str(error),
+        "exit_code": 1,
+    }
+
+
+def _present_result(result: CleanResult, payload: dict) -> None:
+    if result.kind == "text":
+        stats = payload["stats"]
+        eprint(
+            f"wrote {result.output} removed={stats['removed_count']} "
+            f"replaced={stats['replaced_count']}"
+        )
+        return
+    if result.kind == "image":
+        eprint(f"wrote {result.output} ({payload['bytes_in']} -> {payload['bytes_out']})")
+        for action in payload.get("actions", []):
+            eprint(f"  - {action}")
+        if result.residual:
+            eprint("warning: residual C2PA/AI/soft-binding signals may remain")
+        return
+
+    eprint(f"wrote {result.output} format={payload['format']}")
+    for action in payload.get("actions", []):
+        eprint(f"  - {action}")
+    if result.residual:
+        eprint("warning: residual C2PA/AI metadata remains")
+        for finding in payload.get("post_findings") or []:
+            eprint(f"  ! {finding}")
+
+
+def _run_clean_item(
+    path: Path,
+    output_path: Path | None,
+    args,
+    plan: CleanPlan,
+) -> dict:
+    dest = path if args.in_place else output_path or cleaned_path(path)
     try:
-        kind = args.force_type if args.force_type != "auto" else classify(path)
-        if args.in_place:
-            src = path
-            dest = path
-        else:
-            src, dest = path, output_path or cleaned_path(path)
-
-        if kind == "text":
-            text = src.read_text(encoding="utf-8", errors="surrogateescape")
-            cleaned, stats = clean_text(
-                text,
-                nfkc=args.nfkc,
-                aggressive_homoglyphs=args.aggressive_homoglyphs,
-                preserve_semantic=not args.strip_semantic_format,
-            )
-            if args.tsapa:
-                cleaned, tsapa_info = _rewrite_tsapa_live(cleaned, args)
-                stats["tsapa"] = tsapa_info.get("tsapa", tsapa_info)
-            if args.char_perturb:
-                cleaned, perturb_stats = perturb_text(
-                    cleaned, mode=args.char_mode, strength=args.char_strength, seed=args.seed
-                )
-                stats["char_perturb"] = perturb_stats
-            if args.in_place:
-                create_backup(path)
-            atomic_write_text(dest, cleaned)
-            if not args.json:
-                eprint(
-                    f"wrote {dest} removed={stats['removed_count']} replaced={stats['replaced_count']}"
-                )
-            return {
-                "kind": "text",
-                "input": str(path),
-                "output": str(dest),
-                "stats": stats,
-                "exit_code": 0,
-            }
-
-        if kind == "image":
-            soft = inspect_soft_binding(src) if args.soft_binding else None
-            visible_report = None
-            if _visible_requested(args):
-                with tempfile.TemporaryDirectory(prefix="wm-visible-") as td:
-                    fmt = detect_image_format(
-                        read_bytes_bounded(src, 256 * 1024 * 1024, label="image")
-                    )
-                    visible_dest = Path(td) / ("visible.png" if fmt == "png" else src.name)
-                    visible_report = remove_visible(
-                        src,
-                        visible_dest,
-                        VisiblePlan(
-                            mask_path=args.visible_mask,
-                            box=args.visible_box,
-                            detect_command=args.detect_command,
-                            backend=args.visible_backend,
-                            command=args.inpaint_command,
-                            dilation_radius=(
-                                args.dilate if args.dilate is not None else DEFAULT_DILATION_RADIUS
-                            ),
-                            mask_output=dest.with_name(f"{dest.stem}.mask.pgm"),
-                            prompt=args.visible_prompt,
-                        ),
-                    )
-                    if visible_report["status"] != "completed":
-                        raise RuntimeError("visible pipeline did not produce an output")
-                    if args.in_place:
-                        create_backup(path)
-                    result = clean_image(
-                        visible_dest, dest, strip_all_metadata=not args.keep_non_ai_metadata
-                    )
-            else:
-                if args.in_place:
-                    backup = create_backup(path)
-                    src = backup
-                result = clean_image(src, dest, strip_all_metadata=not args.keep_non_ai_metadata)
-            result["input"] = str(path)
-            if visible_report:
-                result["visible"] = visible_report
-            if soft:
-                result["soft_binding"] = soft
-            soft_found = bool(soft and soft["soft_binding"]["found"])
-            residual = result["still_has_c2pa"] or result["still_has_ai_metadata"] or soft_found
-            if not args.json:
-                eprint(f"wrote {result['output']} ({result['bytes_in']} -> {result['bytes_out']})")
-                for action in result.get("actions", []):
-                    eprint(f"  - {action}")
-                if residual:
-                    eprint("warning: residual C2PA/AI/soft-binding signals may remain")
-            return {"kind": "image", **result, "exit_code": 1 if residual else 0}
-
-        if args.in_place:
-            backup = create_backup(path)
-            src = backup
-        result = clean_container(src, dest)
-        residual = result["still_has_c2pa"] or result["still_has_ai_metadata"]
-        if not args.json:
-            eprint(f"wrote {result['output']} format={result['format']}")
-            for action in result.get("actions", []):
-                eprint(f"  - {action}")
-            if residual:
-                eprint("warning: residual C2PA/AI metadata remains")
-                for finding in result.get("post_findings") or []:
-                    eprint(f"  ! {finding}")
-        return {"kind": "container", **result, "exit_code": 1 if residual else 0}
+        rewrite_plan = plan.text.rewrite_plan
+        if rewrite_plan is not None and (warning := remote_warning(rewrite_plan.base_url)):
+            eprint(warning)
+        result = clean_asset(path, dest, plan)
     except Exception as error:
         if not args.json:
             eprint(f"error on {path}: {error}")
-        return {
-            "kind": "unknown",
-            "input": str(path),
-            "output": str(path if args.in_place else output_path or cleaned_path(path)),
-            "actions": [f"error: {error}"],
-            "error": str(error),
-            "exit_code": 1,
-        }
+        return _error_payload(path, dest, error)
+
+    payload = result.to_dict()
+    payload["exit_code"] = 1 if result.residual else 0
+    if not args.json:
+        _present_result(result, payload)
+    return payload
 
 
 if __name__ == "__main__":

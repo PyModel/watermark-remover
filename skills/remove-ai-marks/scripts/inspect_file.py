@@ -13,53 +13,13 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from batch_inputs import collect_inputs
+from asset_kind import SUPPORTED_EXTENSIONS, classify_asset
+from batch_inputs import select_inputs
 from common import emit_json, eprint, read_text_input
-from container_meta import detect_container_format, inspect_container
-from image_meta import detect_format as detect_image_format
+from container_meta import inspect_container
 from image_meta import inspect_image
 from inspect_soft_binding import inspect_soft_binding
 from text_unicode import human_report, inspect_text
-
-TEXT_EXTS = {
-    ".txt",
-    ".text",
-    ".md",
-    ".markdown",
-    ".mdx",
-    ".html",
-    ".htm",
-    ".css",
-    ".js",
-    ".py",
-    ".rs",
-    ".go",
-    ".json",
-    ".yaml",
-    ".yml",
-    ".toml",
-    ".csv",
-}
-IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".heic", ".heif", ".avif"}
-CONTAINER_EXTS = {".svg", ".pdf", ".docx", ".odt", ".html", ".htm", ".md", ".markdown", ".mdx"}
-SUPPORTED_EXTS = TEXT_EXTS | IMAGE_EXTS | CONTAINER_EXTS
-
-
-def classify(path: Path) -> str:
-    ext = path.suffix.lower()
-    if ext in IMAGE_EXTS:
-        return "image"
-    if ext in CONTAINER_EXTS:
-        return "container"
-    if ext in TEXT_EXTS:
-        return "text"
-    data = path.read_bytes()
-    if detect_image_format(data) in ("png", "jpeg", "heif", "avif"):
-        return "image"
-    if detect_container_format(path, data) != "unknown":
-        return "container"
-    return "text"
 
 
 def main() -> int:
@@ -75,30 +35,18 @@ def main() -> int:
     p.add_argument("--glob", default="*")
     args = p.parse_args()
 
-    invalid = [
-        source
-        for source in args.path
-        if not source.exists() or source.is_symlink() or not (source.is_file() or source.is_dir())
-    ]
-    if invalid:
-        for source in invalid:
-            eprint(f"not a regular file or directory: {source}")
-        return 2
     try:
-        items = collect_inputs(
+        selection = select_inputs(
             args.path,
             recursive=args.recursive,
             pattern=args.glob,
-            extensions=SUPPORTED_EXTS,
+            extensions=SUPPORTED_EXTENSIONS,
         )
     except ValueError as error:
         eprint(f"invalid input selection: {error}")
         return 2
-    if not items:
-        eprint("no matching input files")
-        return 2
-    results = [_inspect_single(item.path, args) for item in items]
-    batch = len(items) > 1 or any(source.is_dir() for source in args.path)
+    results = [_inspect_single(item.path, args) for item in selection.items]
+    batch = selection.batch
     if args.json:
         emit_json({"total": len(results), "results": results} if batch else results[0])
     elif batch:
@@ -107,7 +55,7 @@ def main() -> int:
 
 
 def _inspect_single(path: Path, args) -> dict:
-    kind = args.force_type if args.force_type != "auto" else classify(path)
+    kind = classify_asset(path, forced_kind=args.force_type)
     if kind == "text":
         report = inspect_text(read_text_input(str(path)), aggressive=args.aggressive)
         if not args.json:

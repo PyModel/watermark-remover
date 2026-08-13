@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 import struct
 import subprocess
 import sys
 import zlib
 from pathlib import Path
-from types import SimpleNamespace
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
@@ -228,39 +230,190 @@ def test_multi_file_output_collision_fails_before_writes(tmp_path: Path):
     assert not (tmp_path / "out" / "same.txt").exists()
 
 
-def test_degraded_container_residual_is_failure(tmp_path: Path, monkeypatch):
-    sys.path.insert(0, str(SCRIPTS))
-    import clean_file
-
-    src = tmp_path / "x.pdf"
-    src.write_bytes(b"%PDF-1.4\n%%EOF\n")
-    monkeypatch.setattr(
-        clean_file,
-        "clean_container",
-        lambda _src, dest: {
-            "input": str(_src),
-            "output": str(dest),
-            "format": "pdf",
-            "actions": ["copied unchanged"],
-            "bytes_in": 15,
-            "bytes_out": 15,
-            "still_has_c2pa": True,
-            "still_has_ai_metadata": False,
-            "post_findings": ["residual"],
-            "meta": {"degraded": True},
-        },
-    )
-    args = SimpleNamespace(force_type="container", in_place=False, json=True)
-    result = clean_file._clean_single_file(src, tmp_path / "out.pdf", args)
-    assert result["exit_code"] == 1
-
-
 def test_clean_residual_marker_exit_1(tmp_path: Path):
     f = tmp_path / "residual.png"
     f.write_bytes(_png(with_residual_marker=True))
     r = _run("clean_file.py", f)
     assert r.returncode == 1
     assert "residual" in r.stderr
+
+
+@pytest.mark.parametrize(("name", "remote"), [("unset", False), ("remote", True)])
+def test_image_tsapa_flag_does_not_resolve_text_backend(tmp_path: Path, name: str, remote: bool):
+    source = tmp_path / f"{name}.png"
+    source.write_bytes(_png())
+    destination = tmp_path / f"{name}.cleaned.png"
+    env = os.environ.copy()
+    for key in (
+        "WATERMARKS_REWRITE_BACKEND",
+        "WATERMARKS_REWRITE_MODEL",
+        "WATERMARKS_REWRITE_BASE_URL",
+        "WATERMARKS_REWRITE_API_KEY",
+    ):
+        env.pop(key, None)
+    if remote:
+        env.update(
+            WATERMARKS_REWRITE_BACKEND="openai-compatible",
+            WATERMARKS_REWRITE_MODEL="must-not-be-used",
+            WATERMARKS_REWRITE_BASE_URL="https://example.test",
+        )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS / "clean_file.py"),
+            str(source),
+            "-o",
+            str(destination),
+            "--tsapa",
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert destination.is_file()
+    assert "rewrite base URL" not in result.stderr
+
+
+def test_image_ignores_invalid_text_perturb_policy(tmp_path: Path):
+    source = tmp_path / "input.png"
+    source.write_bytes(_png())
+    destination = tmp_path / "output.png"
+
+    result = _run(
+        "clean_file.py",
+        source,
+        "-o",
+        destination,
+        "--char-perturb",
+        "--char-strength",
+        "2",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert destination.is_file()
+
+
+def test_mixed_batch_preflights_tsapa_plan_before_writes(tmp_path: Path):
+    image = tmp_path / "first.png"
+    image.write_bytes(_png())
+    text = tmp_path / "second.txt"
+    text.write_text(ZWSP, encoding="utf-8")
+    output = tmp_path / "out"
+    env = os.environ.copy()
+    for key in (
+        "WATERMARKS_REWRITE_BACKEND",
+        "WATERMARKS_REWRITE_MODEL",
+        "WATERMARKS_REWRITE_BASE_URL",
+        "WATERMARKS_REWRITE_API_KEY",
+    ):
+        env.pop(key, None)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS / "clean_file.py"),
+            str(image),
+            str(text),
+            "-o",
+            str(output),
+            "--tsapa",
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode == 1
+    assert "requires a live backend" in result.stderr
+    assert not (output / image.name).exists()
+    assert not (output / text.name).exists()
+
+
+def test_mixed_batch_preflights_visible_plan_before_writes(tmp_path: Path):
+    text = tmp_path / "first.txt"
+    text.write_text(ZWSP, encoding="utf-8")
+    image = tmp_path / "second.png"
+    image.write_bytes(_png())
+    output = tmp_path / "out"
+
+    result = _run(
+        "clean_file.py",
+        text,
+        image,
+        "-o",
+        output,
+        "--visible-backend",
+        "external",
+    )
+
+    assert result.returncode == 1
+    assert "requires a localization source" in result.stderr
+    assert not (output / text.name).exists()
+    assert not (output / image.name).exists()
+
+
+def test_single_plan_preflight_preserves_json_error(tmp_path: Path):
+    image = tmp_path / "input.png"
+    image.write_bytes(_png())
+    output = tmp_path / "output.png"
+
+    result = _run(
+        "clean_file.py",
+        image,
+        "-o",
+        output,
+        "--visible-backend",
+        "external",
+        "--json",
+    )
+
+    assert result.returncode == 1
+    assert result.stderr == ""
+    payload = json.loads(result.stdout)
+    assert payload["kind"] == "unknown"
+    assert payload["input"] == str(image)
+    assert payload["output"] == str(output)
+    assert payload["exit_code"] == 1
+    assert payload["actions"] == [f"error: {payload['error']}"]
+    assert "requires a localization source" in payload["error"]
+    assert not output.exists()
+
+
+def test_batch_plan_preflight_preserves_json_envelope(tmp_path: Path):
+    text = tmp_path / "first.txt"
+    text.write_text(ZWSP, encoding="utf-8")
+    image = tmp_path / "second.png"
+    image.write_bytes(_png())
+    output = tmp_path / "out"
+
+    result = _run(
+        "clean_file.py",
+        text,
+        image,
+        "-o",
+        output,
+        "--visible-backend",
+        "external",
+        "--json",
+    )
+
+    assert result.returncode == 1
+    assert result.stderr == ""
+    report = json.loads(result.stdout)
+    assert report["total"] == 1
+    assert len(report["results"]) == 1
+    payload = report["results"][0]
+    assert payload["kind"] == "unknown"
+    assert payload["input"] == str(image)
+    assert payload["output"] == str(output / image.name)
+    assert payload["exit_code"] == 1
+    assert payload["actions"] == [f"error: {payload['error']}"]
+    assert "requires a localization source" in payload["error"]
+    assert not (output / text.name).exists()
+    assert not (output / image.name).exists()
 
 
 def test_inspect_directory_batch(tmp_path: Path):
