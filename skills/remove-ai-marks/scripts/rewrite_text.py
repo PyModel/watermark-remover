@@ -190,7 +190,19 @@ def rewrite(
     layer_a_after: bool,
     generations: int = 5,
     population: int = 12,
+    disable_thinking: bool = False,
 ) -> tuple[str, dict]:
+    if not isinstance(text, str):
+        raise TypeError("text must be a string")
+    if not isinstance(disable_thinking, bool):
+        raise TypeError("disable_thinking must be a bool")
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("timeout must be a finite positive number")
+    if strength == "tsapa" and generations < 0:
+        raise ValueError("generations must be >= 0")
+    if strength == "tsapa" and population < 2:
+        raise ValueError("population must be >= 2")
+
     info: dict = {
         "backend": backend,
         "strength": strength,
@@ -198,6 +210,8 @@ def rewrite(
         "base_url": base_url,
         "input_chars": len(text),
     }
+    if backend == "openai-compatible":
+        info["disable_thinking"] = disable_thinking
 
     if strength == "tsapa":
         return _rewrite_tsapa(
