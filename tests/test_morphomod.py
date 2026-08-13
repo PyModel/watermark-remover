@@ -141,6 +141,91 @@ def test_simple_inpaint_and_composite_restore_outside_mask():
     assert restored.data[0:3] == original.data[0:3]  # outside restored exactly
 
 
+def test_remove_visible_rejects_output_aliases_before_writing(tmp_path: Path):
+    src = tmp_path / "input.png"
+    original = encode_png(Raster(3, 3, 3, bytearray([1, 2, 3] * 9)))
+    src.write_bytes(original)
+    mask = tmp_path / "mask.pgm"
+    write_pgm(box_mask(3, 3, (1, 1, 1, 1)), mask)
+
+    for destination, mask_output in ((src, None), (tmp_path / "out.png", src), (mask, None)):
+        try:
+            remove_visible(
+                src,
+                destination,
+                mask_path=mask,
+                mask_output=mask_output,
+                backend="simple",
+                dilation_radius=0,
+            )
+        except ValueError as error:
+            assert "alias" in str(error)
+        else:
+            raise AssertionError("expected output alias rejection")
+    assert src.read_bytes() == original
+
+
+def test_texture_backend_fully_replaces_small_mark_after_default_dilation(tmp_path: Path):
+    width = height = 32
+    pixels = bytearray([30, 90, 30] * width * height)
+    mark_x = mark_y = 24
+    index = (mark_y * width + mark_x) * 3
+    pixels[index : index + 3] = b"\xff\xff\xff"
+    src = tmp_path / "small-mark.png"
+    src.write_bytes(encode_png(Raster(width, height, 3, pixels)))
+    dest = tmp_path / "small-mark.cleaned.png"
+
+    remove_visible(src, dest, box=(mark_x, mark_y, 1, 1), backend="texture")
+
+    cleaned = decode_png(dest.read_bytes())
+    assert cleaned.data[index : index + 3] == bytearray((30, 90, 30))
+
+
+def test_texture_patch_inpaint_preserves_outside_and_replaces_texture():
+    width = height = 48
+    pixels = bytearray()
+    for y in range(height):
+        for x in range(width):
+            value = 70 + ((x * 11 + y * 7 + (x * y) % 13) % 55)
+            pixels.extend((value // 2, value, value // 2, 255))
+    raster = Raster(width, height, 4, pixels)
+    mask = box_mask(width, height, (30, 30, 8, 8))
+    for y in range(30, 38):
+        for x in range(30, 38):
+            index = (y * width + x) * 4
+            raster.data[index : index + 4] = b"\xff\xff\xff\xff"
+
+    result, match = texture_patch_inpaint(raster, mask, feather=2)
+
+    assert match.width == 8 and match.height == 8
+    assert result.data[: 30 * width * 4] == raster.data[: 30 * width * 4]
+    center = (34 * width + 34) * 4
+    assert result.data[center : center + 3] != b"\xff\xff\xff"
+    assert result.data[center + 3] == 255
+
+
+def test_remove_visible_texture_pipeline(tmp_path: Path):
+    width = height = 48
+    pixels = bytearray()
+    for y in range(height):
+        for x in range(width):
+            value = 60 + ((x * 13 + y * 5) % 80)
+            pixels.extend((value // 2, value, value // 2))
+    src = tmp_path / "input.png"
+    src.write_bytes(encode_png(Raster(width, height, 3, pixels)))
+    dest = tmp_path / "cleaned.png"
+    report = remove_visible(
+        src,
+        dest,
+        box=(30, 30, 8, 8),
+        backend="texture",
+        dilation_radius=2,
+    )
+    assert report["status"] == "completed"
+    assert any("texture-patch" in action for action in report["actions"])
+    assert dest.is_file()
+
+
 def test_remove_visible_simple_pipeline(tmp_path: Path):
     pixels = bytearray([20, 40, 60] * 25)
     # Distinct center mark
