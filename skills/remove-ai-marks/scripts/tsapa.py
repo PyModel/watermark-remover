@@ -505,9 +505,15 @@ def tsapa(
             ).strip()
             if candidate:
                 pop.append(Candidate(text=candidate))
-        if not pop:
-            out_chunks.append(chunk)
-            stats.append({"chunk_chars": len(chunk), "skipped": True})
+        if len(pop) < 2:
+            out_chunks.append(pop[0].text if pop else chunk)
+            stats.append(
+                {
+                    "chunk_chars": len(chunk),
+                    "skipped_evolution": True,
+                    "usable_candidates": len(pop),
+                }
+            )
             continue
         for c in pop:
             evaluate(c, chunk, pll=pll, embed=embed, weights=weights, orig_emb=orig_emb)
