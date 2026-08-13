@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import sys
+import warnings
 import zipfile
 from pathlib import Path
 
@@ -152,6 +153,21 @@ def test_docx_preserves_legitimate_customxml_byte_content():
         )
 
 
+def test_zip_containers_reject_duplicate_names():
+    buf = io.BytesIO()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("word/document.xml", "first")
+            zf.writestr("word/document.xml", "second")
+    try:
+        clean_docx(buf.getvalue())
+    except ValueError as error:
+        assert "duplicate entry names" in str(error)
+    else:
+        raise AssertionError("expected duplicate-name rejection")
+
+
 def test_docx_rejects_suspicious_compression_ratio():
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -184,6 +200,19 @@ def _make_odt(generator: str = "Anthropic Claude") -> bytes:
             '<?xml version="1.0"?><manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0"/>',
         )
     return buf.getvalue()
+
+
+def test_odt_preserves_non_metadata_parts_with_vendor_words():
+    data = _make_odt()
+    source = io.BytesIO(data)
+    rebuilt = io.BytesIO()
+    with zipfile.ZipFile(source) as zin, zipfile.ZipFile(rebuilt, "w") as zout:
+        for info in zin.infolist():
+            zout.writestr(info, zin.read(info))
+        zout.writestr("Pictures/vendor-note.txt", "OpenAI Claude c2pa business data")
+    cleaned, _ = clean_odt(rebuilt.getvalue())
+    with zipfile.ZipFile(io.BytesIO(cleaned)) as zf:
+        assert zf.read("Pictures/vendor-note.txt") == b"OpenAI Claude c2pa business data"
 
 
 def test_odt_drops_generator(tmp_path: Path):
