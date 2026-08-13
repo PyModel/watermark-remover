@@ -10,7 +10,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from common import cleaned_path, eprint, read_text_input, write_text_output
+from common import (
+    cleaned_path,
+    create_backup,
+    eprint,
+    read_text_input,
+    validate_output_path,
+    write_text_output,
+)
 from text_unicode import clean_text
 
 
@@ -42,6 +49,15 @@ def main() -> int:
     )
     args = p.parse_args()
 
+    if args.in_place and args.path in (None, "-"):
+        eprint("--in-place requires a file path")
+        return 2
+    if args.path not in (None, "-"):
+        source = Path(args.path)
+        if not source.is_file() or source.is_symlink():
+            eprint(f"not a regular file: {source}")
+            return 2
+
     text = read_text_input(args.path)
     cleaned, stats = clean_text(
         text,
@@ -52,18 +68,20 @@ def main() -> int:
     )
 
     out = args.output
-    if args.in_place:
-        if args.path in (None, "-"):
-            eprint("--in-place requires a file path")
-            return 2
-        src = Path(args.path)
-        bak = src.with_suffix(src.suffix + ".bak")
-        bak.write_bytes(src.read_bytes())  # byte-exact, including invalid UTF-8
-        out = str(src)
-    elif out is None and args.path not in (None, "-"):
-        out = str(cleaned_path(Path(args.path)))
-
-    write_text_output(cleaned, out)
+    try:
+        if args.in_place:
+            source = Path(args.path)
+            create_backup(source)
+            out = str(source)
+        elif args.path not in (None, "-"):
+            source = Path(args.path)
+            destination = Path(out) if out is not None else cleaned_path(source)
+            validate_output_path(source, destination)
+            out = str(destination)
+        write_text_output(cleaned, out)
+    except (OSError, ValueError) as error:
+        eprint(f"error: {error}")
+        return 1
 
     if args.stats:
         eprint(json.dumps(stats, indent=2, ensure_ascii=False))
