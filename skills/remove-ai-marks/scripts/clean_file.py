@@ -396,7 +396,7 @@ def _clean_single_file(path: Path, output_path: Path | None, args) -> dict:
         return {
             "kind": "unknown",
             "input": str(path),
-            "output": str(output_path or cleaned_path(path)),
+            "output": str(path if args.in_place else output_path or cleaned_path(path)),
             "actions": [f"error: {error}"],
             "error": str(error),
             "exit_code": 1,
