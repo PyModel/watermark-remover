@@ -25,6 +25,15 @@ def test_demo_text_handler_and_layer_b_prompt(tmp_path: Path):
     assert "Pareto" in prompt
 
 
+def test_demo_binary_container_does_not_decode_layer_b_text(tmp_path: Path):
+    src = tmp_path / "document.pdf"
+    src.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    report, output, prompt = clean_upload(str(src), False, True, "paraphrase")
+    assert "**Kind:** `container`" in report
+    assert output and Path(output).is_file()
+    assert prompt == "Layer B is available only for plain-text uploads."
+
+
 def test_demo_image_handler(tmp_path: Path):
     src = tmp_path / "image.png"
     src.write_bytes(encode_png(Raster(2, 2, 3, bytearray([1, 2, 3] * 4))))
