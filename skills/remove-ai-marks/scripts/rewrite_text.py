@@ -109,7 +109,7 @@ def _http_json(url: str, payload: dict, headers: dict[str, str], timeout: float)
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+        return read_json_object_bounded(resp)
 
 
 def call_ollama(base_url: str, model: str, prompt: str, timeout: float) -> str:
