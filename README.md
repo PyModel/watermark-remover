@@ -1,236 +1,300 @@
-```
-_ _ _ ____ ___ ____ ____ _  _ ____ ____ _  _    ____ ____ _  _ ____ _  _ ____ ____
-| | | |__|  |  |___ |__/ |\/| |__| |__/ |_/  __ |__/ |___ |\/| |  | |  | |___ |__/
-|_|_| |  |  |  |___ |  \ |  | |  | |  \ | \_    |  \ |___ |  | |__|  \/  |___ |  \
-```
-
 # watermark-remover
 
-<!-- logo: figlet -d .figlet -f cybermedium -w 120 "watermark-remover" -->
+**Inspect and clean AI provenance signals from content you own.** Stdlib-first Python tools cover hidden Unicode, statistical text-watermark attacks, visible image marks, and C2PA / EXIF / XMP metadata.
 
 [![CI](https://github.com/Pythoughts-labs/watermark-remover/actions/workflows/ci.yml/badge.svg)](https://github.com/Pythoughts-labs/watermark-remover/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/Pythoughts-labs/watermark-remover)](https://github.com/Pythoughts-labs/watermark-remover/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Agent skill + stdlib Python scripts to strip **multi-vendor AI provenance marks** from text and files — for privacy and hygiene on content **you own**.
+> **Honesty contract:** deterministic cleaners report what they removed. Rewrite, inpainting, and detector-evasion methods are always labeled **best-effort**. This project never certifies that a vendor detector will fail.
 
-| Layer | Target | How |
-| --- | --- | --- |
-| **A** | Invisible Unicode, exotic spaces, bidi, tag chars | Deterministic Python scripts |
-| **B** | Statistical (token-sampling) text watermarks | Agent rewrite + optional `rewrite_text.py` hook |
-| **Files** | C2PA / EXIF / XMP / doc props | PNG, JPEG, SVG, PDF, DOCX, ODT, HTML, Markdown |
+---
 
-Vendors / ecosystems (class-level): **Claude**, **Gemini / SynthID-Text**, **OpenAI** provenance surfaces, **open-LLM** Kirchenbauer-style marks.
+## What ships
 
-**Latest release:** [v0.1.0](https://github.com/Pythoughts-labs/watermark-remover/releases/tag/v0.1.0)
+| Module | Target | Method | Result class |
+| --- | --- | --- | --- |
+| **Layer A** | Hidden Unicode, bidi controls, tags, exotic spaces | Context-aware deterministic scrub | Verifiable |
+| **Layer B** | Token-distribution text watermarks | Paraphrase, back-translation, structural rewrite, or TSAPA-style evolutionary optimization | Best-effort |
+| **Layer V** | Visible image logos / overlays | Mask → hole fill → morphological dilation → inpaint → restore | Mask removal verifiable; fidelity best-effort |
+| **Layer M** | C2PA, EXIF, XMP, document properties | Format-aware metadata rewrite | Verifiable per format |
+| **Soft-binding inspection** | Remote-manifest / in-content binding risk | Detection and warning only | Detection only |
+| **SynthID scoring** | Pixel-domain SynthID-class signal | Optional external `reverse-SynthID` adapter | Maintainer-scoped score only |
 
-Skill path: [`skills/remove-ai-marks/`](skills/remove-ai-marks/)
+The core remains **Python 3.10+ stdlib only**. Heavy or licensed edges sit behind explicit adapters:
 
-## Install (agent skill)
+- `pypdf` — optional structural PDF rewrite
+- `exiftool`, `c2patool` — optional system tools
+- local Ollama / OpenAI-compatible endpoint — optional Layer B execution
+- external detector / LaMa / MI-GAN / diffusion command — optional visible-mark backend
+- `gradio` — optional demo UI
+
+---
+
+## Quick start
 
 ```bash
-# Grok Build / project-local
+git clone https://github.com/Pythoughts-labs/watermark-remover.git
+cd watermark-remover
+SCRIPTS=skills/remove-ai-marks/scripts
+
+# Inspect before changing anything
+python3 "$SCRIPTS/inspect_file.py" draft.md
+python3 "$SCRIPTS/inspect_file.py" image.png --soft-binding
+
+# Unified clean
+python3 "$SCRIPTS/clean_file.py" draft.md -o draft.cleaned.md
+python3 "$SCRIPTS/clean_file.py" image.png -o image.cleaned.png
+```
+
+### Install as an agent skill
+
+```bash
+# Project-local (Grok Build)
 mkdir -p .grok/skills
 ln -sfn "$(pwd)/skills/remove-ai-marks" .grok/skills/remove-ai-marks
 
-# User-global Grok
+# User-global
 mkdir -p ~/.grok/skills
 ln -sfn "$(pwd)/skills/remove-ai-marks" ~/.grok/skills/remove-ai-marks
 ```
 
-Invoke with `/remove-ai-marks` or ask to “strip AI watermarks / C2PA / Claude marks / SynthID-class text.”
+Invoke with `/remove-ai-marks`, or ask to inspect/clean C2PA, hidden Unicode, visible marks, or statistical text marks.
 
-Optional system tools (auto-used when present):
+---
 
-| Tool | Role |
-| --- | --- |
-| [`c2patool`](https://github.com/contentauth/c2pa-rs/tree/main/cli) | Inspect C2PA manifests |
-| [`exiftool`](https://exiftool.org/) | Residual metadata strip (esp. **PDF**) |
+## Batch mode
 
-Core scripts need **Python 3.10+** stdlib only. Layer B model calls are optional.
-
-## Quick use (scripts)
+Directory mode preserves relative paths, skips its own `.cleaned.*`, `.mask.*`, and `.bak` artifacts, rejects output collisions, and returns non-zero when any file fails or retains a requested risk signal.
 
 ```bash
-SCRIPTS=skills/remove-ai-marks/scripts
+# All supported files below a directory
+python3 "$SCRIPTS/clean_file.py" ./inputs -o ./cleaned --recursive
 
-# Unified inspect / clean
-python3 "$SCRIPTS/inspect_file.py" draft.md
-python3 "$SCRIPTS/clean_file.py" draft.md -o draft.cleaned.md
-python3 "$SCRIPTS/clean_file.py" photo.png -o photo.cleaned.png
-python3 "$SCRIPTS/clean_file.py" notes.docx -o notes.cleaned.docx
+# Glob + extension allow-list
+python3 "$SCRIPTS/clean_file.py" ./inputs -o ./cleaned \
+  --recursive --glob "*.png" --extensions png
 
-# Text Layer A
-python3 "$SCRIPTS/inspect_text.py" draft.md
-python3 "$SCRIPTS/clean_text.py" draft.md -o draft.cleaned.md --stats
-
-# Layer B rewrite hook (default: print prompt only — no model required)
-python3 "$SCRIPTS/rewrite_text.py" draft.md --backend print-prompt --strength paraphrase
-# Optional local Ollama:
-# WATERMARKS_REWRITE_BACKEND=ollama WATERMARKS_REWRITE_MODEL=llama3.2 \
-#   python3 "$SCRIPTS/rewrite_text.py" draft.md -o draft.rewritten.md
-
-# Images
-python3 "$SCRIPTS/inspect_image.py" shot.png
-python3 "$SCRIPTS/clean_image.py" shot.png -o shot.cleaned.png
+# Inspect a tree
+python3 "$SCRIPTS/inspect_file.py" ./inputs --recursive --glob "*.md" --json
 ```
+
+---
+
+## Text
+
+### Layer A — deterministic Unicode hygiene
+
+```bash
+python3 "$SCRIPTS/inspect_text.py" draft.txt --json
+python3 "$SCRIPTS/clean_text.py" draft.txt -o draft.cleaned.txt --stats
+```
+
+Layer A removes or normalizes configured hidden carriers. Some Unicode is meaningful—ZWJ and variation selectors can affect emoji and orthographies, while bidi controls affect display order—so preservation rules are context-aware rather than blanket deletion.
+
+### Layer B — rewrite attacks
+
+```bash
+# No model call: emit an execution prompt
+python3 "$SCRIPTS/rewrite_text.py" draft.txt \
+  --backend print-prompt --strength paraphrase
+
+# TSAPA-style operator pack, still no model call
+python3 "$SCRIPTS/rewrite_text.py" draft.txt \
+  --backend print-prompt --strength tsapa --generations 5 --population 12
+
+# Execute against a local OpenAI-compatible endpoint
+WATERMARKS_REWRITE_BACKEND=openai-compatible \
+WATERMARKS_REWRITE_BASE_URL=http://127.0.0.1:8080 \
+WATERMARKS_REWRITE_MODEL=my-local-model \
+  python3 "$SCRIPTS/rewrite_text.py" draft.txt \
+    --strength tsapa --generations 5 --population 12
+```
+
+The TSAPA-style engine is a real multi-objective evolutionary loop:
+
+1. Generate a diverse candidate population.
+2. Score attack fitness: PLL + n-gram diversity + lexical diversity.
+3. Score fidelity: embedding cosine similarity, with a labeled shingle-Jaccard fallback.
+4. Use NSGA-II non-dominated sorting and crowding distance.
+5. Crossover at sentence boundaries; mutate the lowest-PLL sentence.
+6. Select the Pareto knee point.
+
+A logprobs-capable `/v1/completions` endpoint supplies PLL; `/v1/embeddings` supplies semantic similarity. Either can fail independently and degrade to an explicitly labeled stdlib proxy.
+
+**Cost:** Layer B replaces the original wording and can flatten voice or precision. Prefer a non-origin model so the rewrite does not simply re-stamp the same scheme.
+
+### Character-level perturbations
+
+```bash
+python3 "$SCRIPTS/perturb_text.py" draft.txt \
+  --mode zero-width --strength 0.10 --seed 42
+```
+
+This is an opt-in anti-watermark transform inspired by 2026 character-perturbation research. It intentionally adds artifacts that Layer A removes. `zero-width` and `space-swap` are Layer-A reversible; `confusable` and `case` are not. It is **not** a hygiene pass and carries no detector guarantee.
+
+---
+
+## Visible image marks — MorphoMod-inspired pipeline
+
+`morphomod.py` never guesses a watermark region. Supply one of:
+
+- `--mask mask.pgm|mask.png` (white = remove)
+- `--box X,Y,W,H`
+- `--detect-command '...'` with `{input}`, `{mask}`, `{prompt}` placeholders
+
+```bash
+# Stdlib fallback: useful for simple backgrounds
+python3 "$SCRIPTS/morphomod.py" input.png -o output.png \
+  --box 900,920,120,60 --dilation 3 --backend simple
+
+# Production adapter: external detector + inpainter
+python3 "$SCRIPTS/morphomod.py" input.png -o output.png \
+  --detect-command 'detector --input "{input}" --output "{mask}"' \
+  --backend external \
+  --command 'inpainter --image "{input}" --mask "{mask}" --output "{output}"'
+
+# Combined visible pass, then metadata clean
+python3 "$SCRIPTS/clean_file.py" input.png -o output.png \
+  --visible-mask mask.pgm --dilate 3 --visible-backend simple
+```
+
+The stdlib dilation is non-cascading and O(width × height). PNG decoding supports non-interlaced 8-bit grayscale, RGB, and RGBA. The simple backend performs nearest-boundary wavefront fill; it is deliberately not marketed as LaMa-quality. JPEG visible cleaning requires an external backend; that backend owns JPEG compositing.
+
+Paper-reported MorphoMod improvements are **not** this implementation's measured results. The report includes initial/refined mask pixels and requires manual fidelity review.
+
+---
+
+## Metadata and provenance
+
+```bash
+# PNG/JPEG/HEIC/HEIF/AVIF
+python3 "$SCRIPTS/clean_image.py" photo.heic -o photo.cleaned.heic
+
+# Any supported format
+python3 "$SCRIPTS/clean_file.py" document.pdf -o document.cleaned.pdf
+
+# Detect soft-binding / remote-manifest risk
+python3 "$SCRIPTS/inspect_soft_binding.py" image.png --json
+```
+
+C2PA facts used by the parser:
+
+- Manifest Stores use JUMBF/BMFF structures, claims/assertions, and COSE signatures.
+- JPEG embeds through APP11/JUMBF.
+- PNG uses the private ancillary `caBX` chunk—not generic `tEXt`.
+- HEIF/AVIF are ISO-BMFF. Cleaning neutralizes matching boxes/items **in place**, preserving offsets.
+
+Soft-binding **removal remains out of scope**. The inspector warns when an in-content binding or remote manifest may re-link provenance after hard-bound metadata is stripped.
+
+### PDF quality
+
+PDF cleaning uses this fallback order:
+
+1. `exiftool`
+2. optional `pypdf` full-document clone (outlines/forms/attachments/catalog retained; docinfo/XMP removed)
+3. byte-exact unchanged copy with an explicit residual warning
+
+```bash
+python3 -m pip install pypdf
+```
+
+Encrypted PDFs are never regex-edited.
+
+---
 
 ## Optional SynthID pixel scoring
 
-`inspect_image.py` and `clean_image.py` can report a pixel-domain SynthID
-confidence score when an external checkout of
-[`aloshdenny/reverse-SynthID`](https://github.com/aloshdenny/reverse-SynthID)
-is available. The scorer is **not bundled**: it is loaded at runtime from your
-checkout, and its code remains under the upstream project's non-commercial
-Research License.
-
-### Option 1: one-command bootstrap (no Docker)
+The external [`aloshdenny/reverse-SynthID`](https://github.com/aloshdenny/reverse-SynthID) checkout is not bundled and remains under its upstream non-commercial Research License.
 
 ```bash
 SCRIPTS=skills/remove-ai-marks/scripts
-
-# Clones upstream, creates a venv, and installs scorer-only dependencies.
 "$SCRIPTS/setup_synthid.sh"
 
-# Score an image (default checkout: ~/reverse-SynthID).
 REVERSE_SYNTHID_DIR=~/reverse-SynthID \
-~/reverse-SynthID/.venv/bin/python "$SCRIPTS/score_synthid.py" shot.png
-
-# Or surface the score from inspect / clean (same venv Python).
-REVERSE_SYNTHID_DIR=~/reverse-SynthID \
-~/reverse-SynthID/.venv/bin/python "$SCRIPTS/inspect_image.py" shot.png
+  ~/reverse-SynthID/.venv/bin/python "$SCRIPTS/score_synthid.py" shot.png
 ```
 
-`setup_synthid.sh` accepts `--dir PATH`, `--ref REF`, and `--full` (install the
-full upstream `requirements.txt`, which adds `torch`/`diffusers` for the
-upstream VAE bypass this project does not use).
-
-### Option 2: local Docker build
+Or build the scorer locally:
 
 ```bash
 make docker-synthid-build
 docker run --rm -v "$(pwd):/data" watermark-remover-synthid-scorer /data/shot.png
 ```
 
-The image is built locally from the upstream source at build time. It is not
-published, so it does not redistribute the upstream code.
-
-V4 scoring uses `artifacts/spectral_codebook_v4.npz` from the upstream checkout
-(~220 MB). This is **detection/scoring only** — it does not remove pixel
-watermarks.
-
-## Coverage matrix
-
-| Channel | Claude | Gemini/SynthID | OpenAI | Open-LLM |
-| --- | --- | --- | --- | --- |
-| Unicode / edit-based text | Layer A | Layer A | Layer A | Layer A |
-| Statistical sampling text | Layer B best-effort | Layer B best-effort | Layer B if present | Layer B best-effort |
-| C2PA / file metadata | Yes (listed formats) | Yes when present | Yes when present | Yes when present |
-| Pixel image marks | Out of scope | Optional SynthID score (external); removal out of scope | Out of scope | Out of scope |
-| Training backdoors | Out of scope | Out of scope | Out of scope | Out of scope |
-
-Details: [`skills/remove-ai-marks/references/vendor-notes.md`](skills/remove-ai-marks/references/vendor-notes.md), [`mark-classes.md`](skills/remove-ai-marks/references/mark-classes.md).
+This is **scoring only**. The repository's carrier model and success figures are maintainer-reported reverse-engineering claims, not public Google architecture or an independent guarantee.
 
 ---
 
-## How text marking works (short)
+## Format support
 
-Modern LLM watermarks often hide a signal in **which tokens are chosen** (generative / sampling bias), not only in invisible characters. Edit-based schemes inject Unicode or synonym rules. File schemes attach **C2PA** or generator metadata.
+| Format | Inspect / clean behavior |
+| --- | --- |
+| PNG | `caBX`, text/XMP/EXIF chunks; optional visible pipeline |
+| JPEG | APP11/JUMBF and APP metadata; external visible backend supported |
+| HEIC / HEIF / AVIF | ISO-BMFF brands, JUMBF/C2PA boxes, Exif/XMP item extents; offset-preserving neutralization |
+| SVG | `<metadata>`, XMP, provenance-like comments |
+| PDF | XMP/docinfo via exiftool or full-document pypdf clone; otherwise unchanged copy |
+| DOCX | docProps cleaned; customXml inspected and preserved to avoid application-data loss |
+| ODT | meta.xml and generator-like metadata |
+| HTML | meta tags, provenance JSON-LD, `data-ai*` attributes |
+| Markdown | AI-like YAML frontmatter + Layer A body |
+| Text / code | Layer A; optional Layer B or character perturbation |
 
-- **Layer A** removes edit-based Unicode carriers (testable).
-- **Layer B** attacks sampling watermarks via heavy rewrite (best-effort; literature-standard attacks such as paraphrase / back-translation).
-- **File cleaners** strip C2PA/XMP/props from supported containers.
+## Coverage and limits
 
-Until vendors ship public detectors and keys, **no tool can honestly certify** “this fails the official check.” Reports must separate verifiable vs best-effort work.
-
-Prefer a **non-origin** model for Layer B (do not rewrite Claude text with Claude if you are trying to avoid re-stamping).
-
----
-
-## Disclaimer: what removing a text watermark costs
-
-Text watermarks live in **the wording itself**: the signal is spread across token choices, so nearly every sentence carries a little of it. Two consequences follow, and they are why Layer B is honestly described as *best-effort* rather than a magic eraser.
-
-1. **Removal means rewording, not restructuring.** Shuffling paragraphs, changing headings, or light touch-ups barely move the signal. Stripping a statistical mark requires rewriting a substantial fraction of the text — sentence by sentence, not section by section.
-
-2. **Rewording degrades the copy.** Any rewrite replaces the original word choices with the rewriting model's, which flattens tone, voice, and precision. On production copy (SEO, marketing, client work) that degradation is real and often visible to the people who care most about the writing. It is like taking text from a top-tier model and asking a less capable model to rewrite it from scratch: the result cannot exceed the rewrite model's ceiling.
-
-Which leads to the honest full-circle question:
-
-> If the plan is to rewrite the text with a cheaper model anyway, why pay for a premium model in the first place? Generating directly with the cheaper model is simpler, cheaper, and produces the same — or better — end result.
-
-Layer B makes sense when you specifically want the premium model's **thinking and drafting** and accept a rewrite pass to satisfy a hygiene or privacy requirement — not as a cheap route to mark-free text.
-
-**When to skip Layer B:**
-
-- **Quality matters more than hygiene:** use the lossless path — Layer A Unicode scrub plus the file metadata cleaners — and keep the original prose.
-- **Rewriting anyway:** use a **non-origin** model (rewriting with the origin model can re-stamp the text), and remember residual risk remains — no tool can certify a vendor detector will fail.
-
----
-
-## File formats
-
-| Format | Inspect | Clean |
+| Channel | What this project does | What can remain |
 | --- | --- | --- |
-| PNG / JPEG | C2PA chunks / APP11, AI XMP hints | Drop metadata segments |
-| SVG | `<metadata>`, XMP | Strip blocks |
-| PDF | Byte/XMP + optional tools | **exiftool** preferred; degraded without it |
-| DOCX | docProps / customXml | Scrub props, drop customXml |
-| ODT | meta.xml | Drop generator / AI-ish meta |
-| HTML | meta, JSON-LD, data-ai* | Strip tags/attrs |
-| Markdown | YAML frontmatter AI keys | Drop keys + Layer A body |
+| Hidden/edit-based text | Deterministic Layer A scrub | Meaningful Unicode preserved by policy |
+| Statistical text | Best-effort rewrite / TSAPA-style optimization | Strong or updated detector signal |
+| Visible images | User/external mask + dilation + inpaint | Missed regions; inpaint artifacts |
+| Hard-bound metadata | Format-aware stripping | Soft bindings, remote manifests, pixel marks |
+| Pixel SynthID-class | Optional external score | Pixel/audio/video watermark remains |
+| Training backdoors | Nothing | Out of scope |
 
-Pixel-domain watermark **removal** and **C2PA soft binding** (in-content watermark that can re-link a remote Content Credentials manifest after metadata is stripped) remain **out of scope**. Stripping hard-bound C2PA does **not** clear those channels. An optional local SynthID scorer is available for detection only (see above).
-
-### Residual risk after a clean
-
-This tool reports **verifiable** removals (Unicode counts, metadata actions) and **best-effort** Layer B rewrites. It cannot certify that vendor detectors will fail.
-
-To check residual signals yourself (optional, external):
-
-| Channel | What we remove | What may remain | External check (examples) |
-| --- | --- | --- | --- |
-| Hard-bound C2PA / EXIF / XMP | Yes | Soft-bound / pixel marks | [c2patool](https://github.com/contentauth/c2pa-rs/tree/main/cli), [Content Credentials verify](https://contentcredentials.org/verify) |
-| SynthID-class media | No (optional local score only) | Pixel/audio/video watermark | Provider tools (e.g. [Google SynthID](https://deepmind.google/science/synthid/) / Vertex detector where offered); optional local [reverse-SynthID](https://github.com/aloshdenny/reverse-SynthID) scorer |
-| Statistical text | Best-effort rewrite | Strong marks after light edit | No public universal detector; vendor tools when available |
-
-Industry two-layer context (C2PA + imperceptible watermark): [Institute of AI PM guide](https://www.institutepm.com/knowledge-hub/ai-content-provenance-watermarking).
-
----
-
-## Removal options (summary)
-
-| Option | Removes | Notes |
-| --- | --- | --- |
-| Unicode scrub (Layer A) | ZWSP, bidi, tags, exotic spaces, … | Safe default for text |
-| Rewrite (Layer B) | Statistical token marks (best-effort) | Always offered by skill; costs style — see [Disclaimer](#disclaimer-what-removing-a-text-watermark-costs) |
-| Container/metadata strip | File provenance | See format table |
-| Open-weight local models | Avoid re-stamping with origin model | Operational alternative |
-
-Matrix: [`skills/remove-ai-marks/references/removal-matrix.md`](skills/remove-ai-marks/references/removal-matrix.md).
+No public universal text detector exists, and a detector miss does not prove every signal trace is absent. Stronger attacks trade fidelity for lower detectability. Provider implementations evolve.
 
 ## Ethics
 
-See [`skills/remove-ai-marks/references/ethics.md`](skills/remove-ai-marks/references/ethics.md). For privacy and research on **your** content — not academic fraud or false “human-written” claims.
+For privacy, hygiene, accessibility, and research on **content you own**. Not for academic fraud, evading lawful disclosure requirements, or claiming that output is "proven human-written." See [`skills/remove-ai-marks/references/ethics.md`](skills/remove-ai-marks/references/ethics.md).
 
-## Tests
+---
+
+## Optional demo
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install pytest
-.venv/bin/python -m pytest          # or: make test
-make smoke                          # quick CLI smoke on fixtures
+python3 -m pip install -r requirements-demo.txt
+python3 demo.py
 ```
+
+The demo calls the same modules as the CLI; it is not a separate implementation.
+
+## Development
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-test.txt
+make check
+```
+
+## Documentation
+
+- [`DESIGN.md`](DESIGN.md) — architecture, seams, guarantee classes, roadmap
+- [`skills/remove-ai-marks/SKILL.md`](skills/remove-ai-marks/SKILL.md) — agent workflow
+- [`references/mark-classes.md`](skills/remove-ai-marks/references/mark-classes.md)
+- [`references/removal-matrix.md`](skills/remove-ai-marks/references/removal-matrix.md)
+- [`references/vendor-notes.md`](skills/remove-ai-marks/references/vendor-notes.md)
 
 ## License
 
 MIT — see [LICENSE](LICENSE).
 
-## References
+## Primary references
 
-- [How Claude marks AI-generated content](https://support.claude.com/en/articles/16266773-how-claude-marks-ai-generated-content) (Anthropic)
+- Anthropic, [*How Claude marks AI-generated content*](https://support.claude.com/en/articles/16266773-how-claude-marks-ai-generated-content)
 - Dathathri et al., [*Scalable watermarking for identifying large language model outputs*](https://www.nature.com/articles/s41586-024-08025-4) (SynthID-Text, Nature 2024)
-- Google AI for Developers, [*SynthID safeguards*](https://ai.google.dev/responsible/docs/safeguards/synthid) (Gemini API docs)
-- [C2PA](https://c2pa.org/) / [c2patool](https://github.com/contentauth/c2pa-rs/tree/main/cli)
+- Zhao et al., [*Invisible Image Watermarks Are Provably Removable Using Generative AI*](https://proceedings.neurips.cc/paper_files/paper/2024/hash/10272bfd0371ef960ec557ed6c866058-Abstract-Conference.html) (NeurIPS 2024)
+- [UnMarker](https://arxiv.org/abs/2405.08363) (IEEE S&P 2025)
+- [CtrlRegen](https://arxiv.org/abs/2410.05470) (ICLR 2025)
+- [C2PA specification](https://spec.c2pa.org/specifications/specifications/2.4/specs/C2PA_Specification.html)
 - Kirchenbauer et al., [*A Watermark for Large Language Models*](https://arxiv.org/abs/2301.10226)
-- [google-deepmind/synthid-text](https://github.com/google-deepmind/synthid-text) (research reference; not used for detection here)
-- [aloshdenny/reverse-SynthID](https://github.com/aloshdenny/reverse-SynthID) (research reference)
-- Institute of AI PM, [*AI Content Provenance and Watermarking: The PM's Guide to C2PA and SynthID*](https://www.institutepm.com/knowledge-hub/ai-content-provenance-watermarking) (two-layer industry model: C2PA + imperceptible watermark / soft binding; SB 942 / EU AI Act Art. 50 context)

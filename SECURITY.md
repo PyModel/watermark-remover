@@ -36,7 +36,9 @@ watermark-remover is a local agent skill and a set of Python scripts that
 inspect and clean text and image files. Reports that matter most include:
 
 - Path traversal or unsafe writes outside intended output paths
-- Command injection when optional tools (`c2patool`, `exiftool`) are invoked
+- Command injection when optional tools (`c2patool`, `exiftool`) or visible-mark
+  detector/inpainter adapters are invoked (`shell=False` is required)
+- Leakage to a remote Layer B endpoint contrary to the localhost warning/config
 - Parser crashes or resource exhaustion on crafted images/text that affect
   the host beyond normal process failure
 - Accidental leakage of user file contents in logs, error messages, or
@@ -46,7 +48,8 @@ Out of scope (unless they cause a concrete security impact in this project):
 
 - Bypassing AI provenance marks for fraud, copyright evasion, or illegal
   non-disclosure (see skill `references/ethics.md`)
-- Issues only in third-party tools (`c2patool`, `exiftool`, agents)
+- Issues only in third-party tools (`c2patool`, `exiftool`, Gradio, external
+  detector/inpainter/model adapters)
 - Social engineering of individual users
 
 ## Prefer private disclosure

@@ -25,8 +25,9 @@ issue.
 
 - **Python 3.10+** (stdlib only for the skill scripts; optional rewrite backends
   use HTTP to local Ollama / OpenAI-compatible endpoints)
-- From the repo root: `python3 -m pytest -q` should pass before you open a PR
-- Optional for manual file checks: [`c2patool`](https://github.com/contentauth/c2pa-rs/tree/main/cli), [`exiftool`](https://exiftool.org/) (PDF)
+- Install test extras: `python3 -m pip install -r requirements-test.txt`
+- From the repo root: `make check` must pass before you open a PR
+- Optional for manual checks: [`c2patool`](https://github.com/contentauth/c2pa-rs/tree/main/cli), [`exiftool`](https://exiftool.org/), and external visible-mark adapters
 
 ## Layout
 
@@ -35,6 +36,7 @@ issue.
 | `skills/remove-ai-marks/SKILL.md` | Agent skill entry (workflow, ethics) |
 | `skills/remove-ai-marks/scripts/` | Layer A/B hooks + image/container cleaners |
 | `skills/remove-ai-marks/references/` | Vendors, mark classes, matrix, ethics |
+| `DESIGN.md` | Module seams, invariants, guarantee classes, roadmap |
 | `tests/` | Pytest suite and fixtures |
 | `.github/workflows/ci.yml` | CI job `test` |
 
@@ -43,19 +45,22 @@ issue.
 1. **Layer A (Unicode / format controls)** — deterministic scripts under
    `scripts/` (`text_unicode.py`, `clean_text.py`, `inspect_text.py`). Prefer
    tests with fixtures in `tests/fixtures/`.
-2. **Layer B (statistical rewrite)** — guidance in `SKILL.md` plus optional
-   `rewrite_text.py` (print-prompt default; ollama / openai-compatible). No
-   bundled model. Keep ethics-aware.
-3. **Files (C2PA / EXIF / XMP / props)** — `image_meta.py` (PNG/JPEG),
-   `container_meta.py` (SVG/PDF/DOCX/ODT/HTML/MD), unified
-   `inspect_file.py` / `clean_file.py`. Preserve document body / pixels;
-   strip provenance metadata only.
+2. **Layer B (statistical rewrite)** — `rewrite_text.py` is the backend seam;
+   `tsapa.py` owns evolutionary optimization. No bundled model.
+3. **Layer V (visible images)** — `morphomod.py` owns masks, dilation, PNG
+   restore, and external detector/inpainter adapters. Never guess a region.
+4. **Layer M (C2PA / EXIF / XMP / props)** — `image_meta.py` delegates HEIF/
+   AVIF to `heif_meta.py`; `container_meta.py` handles SVG/PDF/DOCX/ODT/HTML/MD.
+5. **Soft-binding risk** — `inspect_soft_binding.py` detects and warns; removal
+   remains out of scope.
+6. **Batch orchestration** — share discovery through `batch_inputs.py`; do not
+   duplicate traversal/output-path logic in CLI modules.
 
 ## Checklist for a change
 
 - [ ] Behaviour matches `SKILL.md` / `references/removal-matrix.md` when relevant
 - [ ] Unit tests updated or added under `tests/`
-- [ ] `python3 -m pytest -q` passes
+- [ ] `make check` passes (compile + tests + CLI smoke)
 - [ ] Docs updated (README and/or skill references) if user-facing behaviour
       changes
 - [ ] No drive-by refactors unrelated to the fix or feature
