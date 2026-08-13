@@ -209,12 +209,12 @@ def _find_meta(data: bytes) -> Box | None:
 
 def _provenance_items(
     data: bytes,
-) -> tuple[dict[int, tuple[bytes, str]], dict[int, tuple[int, list[tuple[int, int]]]]]:
+) -> tuple[dict[int, tuple[bytes, str, str]], dict[int, tuple[int, list[tuple[int, int]]]]]:
     """(iinf items, iloc extents) from the meta box; empty when absent/corrupt."""
     meta = _find_meta(data)
     if meta is None:
         return {}, {}
-    items: dict[int, tuple[bytes, str]] = {}
+    items: dict[int, tuple[bytes, str, str]] = {}
     extents: dict[int, tuple[int, list[tuple[int, int]]]] = {}
     for child in _iter_boxes(data, meta.payload_start + 4, meta.end):
         if child.type == b"iinf":
