@@ -261,6 +261,25 @@ def test_remove_visible_plan_does_not_claim_removal(tmp_path: Path):
     assert "No blind segmenter" in report["note"]
 
 
+def test_external_command_failure_caps_diagnostics(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(morphomod, "MAX_COMMAND_DIAGNOSTIC_BYTES", 32)
+    noisy = tmp_path / "noisy.py"
+    noisy.write_text(
+        "import sys\nsys.stdout.write('prefix-' + 'x' * 128 + '-tail')\nraise SystemExit(7)\n",
+        encoding="utf-8",
+    )
+    try:
+        morphomod._run_template(f"{shlex.quote(sys.executable)} {shlex.quote(str(noisy))}")
+    except RuntimeError as error:
+        message = str(error)
+        assert "failed (7)" in message
+        assert message.endswith("-tail")
+        assert "prefix-" not in message
+        assert len(message) < 100
+    else:
+        raise AssertionError("expected external command failure")
+
+
 def test_external_adapter_and_restore(tmp_path: Path):
     src = tmp_path / "input.png"
     original = encode_png(Raster(3, 3, 3, bytearray([10, 20, 30] * 9)))
@@ -287,6 +306,92 @@ def test_external_adapter_and_restore(tmp_path: Path):
     )
     assert report["status"] == "completed"
     assert decode_png(dest.read_bytes()) == decode_png(original)
+
+
+def test_external_adapter_rejects_oversized_png_output(tmp_path: Path, monkeypatch):
+    src = tmp_path / "input.png"
+    original = encode_png(Raster(3, 3, 3, bytearray([10, 20, 30] * 9)))
+    src.write_bytes(original)
+    mask = tmp_path / "mask.pgm"
+    write_pgm(box_mask(3, 3, (1, 1, 1, 1)), mask)
+    limit = max(len(original), mask.stat().st_size) + 16
+    monkeypatch.setattr("morphomod.MAX_ENCODED_BYTES", limit)
+
+    writer = tmp_path / "oversized.py"
+    writer.write_text(
+        "from pathlib import Path\n"
+        "import sys\n"
+        f"Path(sys.argv[3]).write_bytes(b'x' * {limit + 1})\n",
+        encoding="utf-8",
+    )
+    command = (
+        f"{shlex.quote(sys.executable)} {shlex.quote(str(writer))} "
+        '"{input}" "{mask}" "{output}"'
+    )
+    dest = tmp_path / "external.png"
+
+    try:
+        remove_visible(
+            src,
+            dest,
+            mask_path=mask,
+            backend="external",
+            command=command,
+            dilation_radius=0,
+        )
+    except ValueError as error:
+        assert "encoded file exceeds safety limit" in str(error)
+    else:
+        raise AssertionError("expected oversized external-output rejection")
+    assert not dest.exists()
+
+
+def test_clean_file_in_place_batch_preflights_generated_masks(tmp_path: Path):
+    first = tmp_path / "first.png"
+    first.write_bytes(encode_png(Raster(3, 3, 3, bytearray([9, 8, 7] * 9))))
+    colliding = tmp_path / "first.mask.pgm"
+    colliding.write_bytes(b"do not overwrite")
+    original = colliding.read_bytes()
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS / "clean_file.py"),
+            str(first),
+            str(colliding),
+            "--in-place",
+            "--detect-command",
+            "detector {input} {mask}",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert "mask output aliases an input" in result.stderr
+    assert colliding.read_bytes() == original
+    assert not first.with_suffix(".png.bak").exists()
+
+
+def test_clean_file_rejects_output_aliasing_visible_mask(tmp_path: Path):
+    src = tmp_path / "input.png"
+    src.write_bytes(encode_png(Raster(3, 3, 3, bytearray([9, 8, 7] * 9))))
+    mask = tmp_path / "mask.pgm"
+    write_pgm(box_mask(3, 3, (1, 1, 1, 1)), mask)
+    original_mask = mask.read_bytes()
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS / "clean_file.py"),
+            str(src),
+            "-o",
+            str(mask),
+            "--visible-mask",
+            str(mask),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert mask.read_bytes() == original_mask
 
 
 def test_clean_file_visible_pipeline(tmp_path: Path):
