@@ -17,11 +17,16 @@ Each module exposes one small interface; implementation complexity stays local.
 
 | Module | Interface | Hidden implementation / invariant |
 | --- | --- | --- |
-| Batch discovery | `batch_inputs.collect_inputs(...)` | Glob/recursive discovery, generated-file skipping, deduplication, relative output paths |
+| Asset routing | `asset_kind.classify_asset(path, forced_kind=...)` | Immutable extension catalog, override/extension/content precedence, 4 KiB sniff, text fallback |
+| Batch discovery | `batch_inputs.select_inputs(...) -> InputSelection` | Source validation, glob/recursive discovery, generated-file skipping, deduplication, excluded output roots, batch determination |
+| Single-asset cleaning | `clean_asset.clean_asset(path, dest, plan) -> CleanResult` | Immutable per-kind plans, semantic residual state, backup/write ownership; no presentation or exit-code mapping |
+| External commands | `external_command.run_command(argv, *, timeout=..., output_limit=...) -> CommandResult` | Shell-free argv execution, bounded output tails, one end-to-end deadline, process-group cleanup |
+| PNG traversal | `png_chunks.iter_png_chunks(data)` | Shared memoryview-backed chunk payloads, strict IHDR/IEND order, length bounds, and CRC validation |
 | Layer A | `text_unicode.clean_text(text, ...)` | Unicode classification, context-aware semantic preservation, normalization, stats |
-| Layer B | `rewrite_text.rewrite(...)` | Backend routing; delegates TSAPA optimization to `tsapa.tsapa(...)` |
+| Layer B | `rewrite_text.RewritePlan`; `rewrite_text.rewrite(text, plan)` | Immutable rewrite policy, backend routing, private provider adapters, TSAPA delegation |
+| Layer B transport | `layer_b_http.request_json(endpoint, route, payload, ...)` | Endpoint/route/timeout validation, path-prefix-safe joining, same-origin redirects, bounded JSON-object decoding, safe transport errors |
 | TSAPA engine | `tsapa.tsapa(text, llm=..., pll=..., embed=...)` | Chunking, fitness, NSGA-II, crowding, crossover, PLL-guided mutation, knee selection |
-| Visible marks | `morphomod.remove_visible(path, dest, ...)` | Mask I/O, hole fill, O(n) dilation, PNG codec, inpaint adapter, restore |
+| Visible marks | `morphomod.remove_visible(path, dest, plan)` | Immutable `VisiblePlan`; mask I/O, hole fill, O(n) dilation, PNG codec, inpaint adapter, restore |
 | Raster metadata | `image_meta.clean_image(path, dest, ...)` | PNG/JPEG parsing; delegates ISO-BMFF work to `heif_meta.neutralize_heif(...)` |
 | Containers | `container_meta.clean_container(path, dest)` | SVG/PDF/DOCX/ODT/HTML/Markdown format logic |
 | Soft-binding risk | `inspect_soft_binding.inspect_soft_binding(path)` | Byte scan plus optional C2PA reader; detection only |
@@ -55,6 +60,13 @@ The CLI modules orchestrate these interfaces; they do not contain alternate impl
 | — | Training backdoors / soft-binding removal | — | Out of scope | — |
 
 ## 4. Correctness invariants
+
+### Asset routing
+
+- `clean_file.py`, `inspect_file.py`, and `demo.py` obtain the processing family through `asset_kind.classify_asset(...)`.
+- Explicit override wins; otherwise a known extension wins over conflicting bytes. Unknown suffixes use a 4 KiB prefix for image/container detection, then fall back to text.
+- ZIP-based container detection opens the file-backed archive because its central directory is at the end; classification never loads the whole file.
+- Source eligibility, presentation, cleaning, and reporting remain caller-owned.
 
 ### Text
 
@@ -106,6 +118,15 @@ f_atk = w1·PLL + w2·ngram_diversity + w3·lexical_diversity
 
 Fidelity is embedding cosine similarity when available, otherwise a labeled shingle-Jaccard proxy. The HTTP PLL adapter consumes token logprobs from `/v1/completions`; failures fall back to `heuristic_pll`. Literature ASR/BERTScore figures describe the paper's experiments—not this run.
 
+`RewritePlan.prompt(...)` creates an offline-only plan for the demo;
+`RewritePlan.live_tsapa_from_environment(...)` resolves the unified cleaner's live
+configuration. The standalone CLI builds the same frozen plan from its flags.
+`rewrite(text, plan)` is the sole execution interface.
+
+Generation, PLL, and embedding requests share the Layer B transport seam. Provider
+adapters still own request payloads, authentication policy, and response fields;
+TSAPA owns fallback labels and degradation counts.
+
 ## 6. Layer V — MorphoMod-inspired implementation
 
 ```
@@ -147,7 +168,7 @@ The default stdlib backend selects a nearby texture patch by boundary error and 
 1. WebP metadata support.
 2. Video metadata without transcoding.
 3. Video visible removal with optical-flow temporal consistency.
-4. Optional diffusion regeneration adapters, only with version-scoped detector evidence.
+4. Diffusion regeneration and spectral subtraction/reverse-SynthID V4 remain research-only; shipped SynthID support is external scoring, not removal.
 5. Ground-truth-aware visible-removal metrics when paired originals exist.
 
 ## 10. Out of scope
