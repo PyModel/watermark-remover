@@ -124,37 +124,56 @@ def call_ollama(base_url: str, model: str, prompt: str, timeout: float) -> str:
         {},
         timeout,
     )
-    msg = data.get("message") or {}
-    content = msg.get("content")
-    if not content:
+    message = data.get("message")
+    if not isinstance(message, dict):
+        raise RuntimeError(f"ollama invalid message: {data!r}"[:500])
+    content = message.get("content")
+    if not isinstance(content, str) or not content.strip():
         raise RuntimeError(f"ollama empty response: {data!r}"[:500])
-    return str(content).strip()
+    return content.strip()
 
 
 def call_openai_compatible(
-    base_url: str, model: str, prompt: str, api_key: str | None, timeout: float
+    base_url: str,
+    model: str,
+    prompt: str,
+    api_key: str | None,
+    timeout: float,
+    *,
+    disable_thinking: bool = False,
 ) -> str:
     url = base_url.rstrip("/") + "/v1/chat/completions"
     headers: dict[str, str] = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    data = _http_json(
-        url,
-        {
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.7,
-        },
-        headers,
-        timeout,
-    )
-    choices = data.get("choices") or []
-    if not choices:
-        raise RuntimeError(f"openai-compatible empty choices: {data!r}"[:500])
-    content = (choices[0].get("message") or {}).get("content")
-    if not content:
+    payload: dict = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.7,
+    }
+    if disable_thinking:
+        # Supported by Qwen/Transformers-compatible servers; opt-in so generic
+        # OpenAI-compatible endpoints never receive an unknown extension.
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
+    data = _http_json(url, payload, headers, timeout)
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        raise RuntimeError(f"openai-compatible invalid choices: {data!r}"[:500])
+    message = choices[0].get("message")
+    if not isinstance(message, dict):
+        raise RuntimeError(f"openai-compatible invalid message: {data!r}"[:500])
+    content = message.get("content")
+    if not isinstance(content, str) or not content.strip():
         raise RuntimeError(f"openai-compatible empty content: {data!r}"[:500])
-    return str(content).strip()
+    return content.strip()
+
+
+def _validate_endpoint(base_url: str) -> None:
+    parsed = urlparse(base_url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError("base_url must be an absolute http(s) URL")
+    if parsed.username or parsed.password:
+        raise ValueError("base_url must not contain credentials")
 
 
 def rewrite(
