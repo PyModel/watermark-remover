@@ -31,3 +31,12 @@ jobs:
 
       - name: Full check (lint, format, compile, test, smoke)
         run: make check PYTHON=python
+
+  # Single stable context for branch protection; the matrix can change freely.
+  ci-green:
+    if: always()
+    needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check matrix result
+        run: '[ "${{ needs.test.result }}" = "success" ]'
