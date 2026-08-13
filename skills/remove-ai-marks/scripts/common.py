@@ -165,29 +165,6 @@ def atomic_write_text(
     atomic_write_bytes(dest, text.encode(encoding, errors=errors))
 
 
-def read_json_object_bounded(
-    stream: Any,
-    *,
-    limit: int | None = None,
-    label: str = "HTTP response",
-) -> dict[str, Any]:
-    """Decode one bounded UTF-8 JSON object from a binary response stream."""
-    if limit is None:
-        limit = DEFAULT_HTTP_JSON_LIMIT
-    if limit < 0:
-        raise ValueError("JSON response limit must be non-negative")
-    raw = stream.read(limit + 1)
-    if len(raw) > limit:
-        raise RuntimeError(f"{label} exceeds safety limit of {limit:,} bytes")
-    try:
-        data = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise RuntimeError(f"{label} is not valid UTF-8 JSON") from error
-    if not isinstance(data, dict):
-        raise RuntimeError(f"{label} must be a JSON object")
-    return data
-
-
 def emit_json(data: Any) -> None:
     json.dump(data, sys.stdout, indent=2, ensure_ascii=False)
     sys.stdout.write("\n")

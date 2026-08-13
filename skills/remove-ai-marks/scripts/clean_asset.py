@@ -148,6 +148,12 @@ def _validate_operation(path: Path, dest: Path, plan: CleanPlan) -> None:
             raise ValueError(f"mask output aliases backup: {plan.visible.mask_output}")
     else:
         validate_output_path(path, dest)
+        if (
+            plan.visible is not None
+            and plan.visible.mask_output is not None
+            and paths_alias(plan.visible.mask_output, dest)
+        ):
+            raise ValueError(f"mask output aliases image output: {plan.visible.mask_output}")
 
 
 def _clean_text_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
