@@ -3,8 +3,9 @@
 <p align="center">
   <a href="https://github.com/Pythoughts-labs/watermark-remover/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Pythoughts-labs/watermark-remover/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://github.com/Pythoughts-labs/watermark-remover/releases"><img alt="Release" src="https://img.shields.io/github/v/release/Pythoughts-labs/watermark-remover"></a>
-  <a href="https://github.com/Pythoughts-labs/watermark-remover/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/Pythoughts-labs/watermark-remover?style=flat"></a>
+  <a href="https://github.com/Pythoughts-labs/watermark-remover/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/Pythoughts-labs/watermark-remover?label=stars&color=e8a33d&labelColor=0f1110"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
+  <a href="https://hits.sh/github.com/Pythoughts-labs/watermark-remover/"><img alt="Visitors" src="https://hits.sh/github.com/Pythoughts-labs/watermark-remover.svg?label=visitors&color=e8a33d&labelColor=0f1110"></a>
 </p>
 
 Tools for finding and removing AI provenance signals from files you own. Four channels are covered: hidden Unicode in text, statistical token watermarks, visible marks burned into images, and metadata such as C2PA, EXIF, and XMP.
@@ -383,9 +384,6 @@ MIT, see [LICENSE](LICENSE).
 - Kirchenbauer et al., [*A Watermark for Large Language Models*](https://arxiv.org/abs/2301.10226)
 
 ---
-
-[![Stars](https://img.shields.io/github/stars/Pythoughts-labs/watermark-remover?label=stars&color=e8a33d&labelColor=0f1110)](https://github.com/Pythoughts-labs/watermark-remover)
-[![Visitors](https://hits.sh/github.com/Pythoughts-labs/watermark-remover.svg?label=visitors&color=e8a33d&labelColor=0f1110)](https://hits.sh/github.com/Pythoughts-labs/watermark-remover/)
 
 ## Star history
 
