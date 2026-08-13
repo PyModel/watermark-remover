@@ -91,19 +91,23 @@ def detect_container_format(path: Path, data: bytes | None = None) -> str:
         if data[:100].lstrip().startswith(b"<") and b"svg" in data[:500].lower():
             return "svg"
         if data[:2] == b"PK":
-            # Prefer the file-backed archive so callers can pass a bounded prefix;
-            # ZIP central directories live at the end of the file.
-            archive_source = path if path.is_file() else io.BytesIO(data)
-            try:
-                with zipfile.ZipFile(archive_source) as zf:
-                    _validate_zip(zf)
-                    names = set(zf.namelist())
-                    if "word/document.xml" in names:
-                        return "docx"
-                    if "content.xml" in names and "meta.xml" in names:
-                        return "odt"
-            except (zipfile.BadZipFile, ValueError, RuntimeError, OSError):
-                pass
+            # zip-based; sniff. A bounded prefix can truncate the central
+            # directory, so when the in-memory parse fails, fall back to the
+            # on-disk archive — a metadata-only read of the tail directory.
+            sources: list[io.BytesIO | Path] = [io.BytesIO(data)]
+            if path.is_file():
+                sources.append(path)
+            for source in sources:
+                try:
+                    with zipfile.ZipFile(source) as zf:
+                        _validate_zip(zf)
+                        names = set(zf.namelist())
+                        if "word/document.xml" in names:
+                            return "docx"
+                        if "content.xml" in names and "meta.xml" in names:
+                            return "odt"
+                except (zipfile.BadZipFile, ValueError, RuntimeError, OSError):
+                    continue
     return "unknown"
 
 

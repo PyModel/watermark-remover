@@ -255,6 +255,7 @@ def _build_clean_plan(args, dest: Path, kind: AssetKind) -> CleanPlan:
         visible=visible_plan,
         inspect_soft_binding=args.soft_binding,
     )
+    return rewrite(text, plan)
 
 
 def _visible_requested(args) -> bool:

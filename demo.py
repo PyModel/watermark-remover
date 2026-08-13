@@ -25,7 +25,7 @@ from common import atomic_write_text
 from container_meta import clean_container, detect_container_format
 from image_meta import clean_image
 from image_meta import detect_format as detect_image_format
-from rewrite_text import rewrite
+from rewrite_text import RewritePlan, rewrite
 from text_unicode import clean_text
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".heic", ".heif", ".avif"}
@@ -82,15 +82,7 @@ def clean_upload(file_obj, keep_non_ai: bool, layer_b: bool, strength: str):
         if body.strip():
             prompt, _ = rewrite(
                 body,
-                backend="print-prompt",
-                model=None,
-                base_url=None,
-                api_key=None,
-                strength=strength,
-                lang="French",
-                original_lang="English",
-                timeout=120.0,
-                layer_a_after=False,
+                RewritePlan.prompt(strength, lang="French", original_lang="English"),
             )
     elif layer_b:
         prompt = "Layer B is available only for plain-text uploads."
