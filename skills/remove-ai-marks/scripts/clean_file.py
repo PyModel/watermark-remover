@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import tempfile
 from pathlib import Path
@@ -28,7 +27,6 @@ from common import (
     create_backup,
     eprint,
     paths_alias,
-    read_bool_env,
     read_bytes_bounded,
     validate_output_path,
 )
@@ -36,10 +34,10 @@ from container_meta import clean_container, detect_container_format
 from image_meta import clean_image
 from image_meta import detect_format as detect_image_format
 from inspect_soft_binding import inspect_soft_binding
-from morphomod import DEFAULT_DILATION_RADIUS, remove_visible
+from morphomod import DEFAULT_DILATION_RADIUS, VisiblePlan, remove_visible
 from perturb_text import MODES as PERTURB_MODES
 from perturb_text import perturb_text
-from rewrite_text import rewrite
+from rewrite_text import RewritePlan, rewrite
 from text_unicode import clean_text
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".heic", ".heif", ".avif"}
@@ -252,34 +250,24 @@ def _plan_work(items: list[InputItem], args, batch: bool) -> list[tuple[InputIte
 
 
 def _rewrite_tsapa_live(text: str, args) -> tuple[str, dict]:
-    backend = os.environ.get("WATERMARKS_REWRITE_BACKEND", "print-prompt")
-    if backend not in ("ollama", "openai-compatible"):
-        raise ValueError(
-            "--tsapa requires a live backend; set WATERMARKS_REWRITE_BACKEND="
-            "ollama|openai-compatible"
-        )
-    model = os.environ.get("WATERMARKS_REWRITE_MODEL")
-    if not model:
-        raise ValueError("--tsapa requires WATERMARKS_REWRITE_MODEL")
-    return rewrite(
-        text,
-        backend=backend,
-        model=model,
-        base_url=os.environ.get("WATERMARKS_REWRITE_BASE_URL", "http://127.0.0.1:11434"),
-        api_key=os.environ.get("WATERMARKS_REWRITE_API_KEY"),
-        strength="tsapa",
-        lang="French",
-        original_lang="English",
-        timeout=120.0,
-        layer_a_after=True,
+    plan = RewritePlan.live_tsapa_from_environment(
         generations=args.tsapa_generations,
         population=args.tsapa_population,
-        disable_thinking=read_bool_env("WATERMARKS_REWRITE_DISABLE_THINKING"),
     )
+    return rewrite(text, plan)
 
 
 def _visible_requested(args) -> bool:
-    return any((args.visible_mask, args.visible_box, args.detect_command, args.dilate is not None))
+    return any(
+        (
+            args.visible_mask,
+            args.visible_box,
+            args.detect_command,
+            args.dilate is not None,
+            args.visible_backend != "texture",
+            args.inpaint_command,
+        )
+    )
 
 
 def _clean_single_file(path: Path, output_path: Path | None, args) -> dict:
@@ -326,10 +314,6 @@ def _clean_single_file(path: Path, output_path: Path | None, args) -> dict:
             soft = inspect_soft_binding(src) if args.soft_binding else None
             visible_report = None
             if _visible_requested(args):
-                if not (args.visible_mask or args.visible_box or args.detect_command):
-                    raise ValueError(
-                        "visible removal requires --visible-mask, --visible-box, or --detect-command"
-                    )
                 with tempfile.TemporaryDirectory(prefix="wm-visible-") as td:
                     fmt = detect_image_format(
                         read_bytes_bounded(src, 256 * 1024 * 1024, label="image")
@@ -338,16 +322,18 @@ def _clean_single_file(path: Path, output_path: Path | None, args) -> dict:
                     visible_report = remove_visible(
                         src,
                         visible_dest,
-                        mask_path=args.visible_mask,
-                        box=args.visible_box,
-                        detect_command=args.detect_command,
-                        backend=args.visible_backend,
-                        command=args.inpaint_command,
-                        dilation_radius=(
-                            args.dilate if args.dilate is not None else DEFAULT_DILATION_RADIUS
+                        VisiblePlan(
+                            mask_path=args.visible_mask,
+                            box=args.visible_box,
+                            detect_command=args.detect_command,
+                            backend=args.visible_backend,
+                            command=args.inpaint_command,
+                            dilation_radius=(
+                                args.dilate if args.dilate is not None else DEFAULT_DILATION_RADIUS
+                            ),
+                            mask_output=dest.with_name(f"{dest.stem}.mask.pgm"),
+                            prompt=args.visible_prompt,
                         ),
-                        mask_output=dest.with_name(f"{dest.stem}.mask.pgm"),
-                        prompt=args.visible_prompt,
                     )
                     if visible_report["status"] != "completed":
                         raise RuntimeError("visible pipeline did not produce an output")

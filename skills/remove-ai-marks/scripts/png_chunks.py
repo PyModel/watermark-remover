@@ -17,12 +17,14 @@ class PNGChunk:
     raw: memoryview
 
 
-def iter_png_chunks(data: bytes) -> Iterator[PNGChunk]:
+def iter_png_chunks(data: bytes, *, allow_trailing_data: bool = False) -> Iterator[PNGChunk]:
     """Yield CRC-validated chunks and require one complete terminal IEND.
 
     Per-chunk bounds and CRC checks run as chunks are produced. The IHDR, IDAT,
     and terminal IEND requirements are enforced only when the caller consumes
     the whole iterator; a caller that stops early gets no whole-file guarantee.
+    When allow_trailing_data is true, data after IEND is discarded rather than
+    preserved.
     """
     if not data.startswith(PNG_SIGNATURE):
         raise ValueError("not PNG")
@@ -66,7 +68,7 @@ def iter_png_chunks(data: bytes) -> Iterator[PNGChunk]:
         if kind == b"IEND":
             if length != 0:
                 raise ValueError("PNG IEND chunk must be empty")
-            if chunk_end != len(view):
+            if not allow_trailing_data and chunk_end != len(view):
                 raise ValueError("PNG has trailing bytes after IEND")
             saw_iend = True
 

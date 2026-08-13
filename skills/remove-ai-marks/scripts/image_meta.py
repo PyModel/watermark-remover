@@ -6,16 +6,19 @@ import json
 import os
 import re
 import struct
-import subprocess
 import sys
-import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import external_command
 from common import atomic_write_bytes, which
+from png_chunks import iter_png_chunks
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
+
+OPTIONAL_TOOL_OUTPUT_LIMIT = 2 * 1024 * 1024
+SYNTHID_OUTPUT_LIMIT = 2 * 1024 * 1024
 
 PNG_SIG = b"\x89PNG\r\n\x1a\n"
 JPEG_SOI = b"\xff\xd8"
@@ -104,32 +107,22 @@ def inspect_png(data: bytes) -> tuple[bool, bool, list[str]]:
     has_ai = False
     if not data.startswith(PNG_SIG):
         return False, False, ["not a PNG"]
-    pos = 8
-    while pos + 8 <= len(data):
-        length = struct.unpack(">I", data[pos : pos + 4])[0]
-        ctype = data[pos + 4 : pos + 8]
-        chunk_start = pos + 8
-        chunk_end = chunk_start + length
-        if chunk_end + 4 > len(data):
-            findings.append(f"truncated chunk {ctype!r}")
-            break
-        payload = data[chunk_start:chunk_end]
-        name = ctype.decode("latin-1", errors="replace")
-        # Private/ancillary chunks sometimes used for JUMBF/C2PA
-        if ctype in (b"caBX", b"juMB", b"jumb") or ctype.startswith(b"c2"):
-            has_c2pa = True
-            findings.append(f"PNG chunk {name} (possible C2PA container)")
-        if ctype in (b"tEXt", b"zTXt", b"iTXt", b"eXIf"):
-            hits = _contains_any(payload, AI_META_HINTS + C2PA_MARKERS)
-            if hits:
-                has_ai = True
-                if any(h.lower() in ("c2pa", "contentcredentials", "jumb") for h in hits):
-                    has_c2pa = True
-                findings.append(f"PNG {name}: {', '.join(hits[:8])}")
-        if ctype == b"IEND":
-            break
-        pos = chunk_end + 4  # skip CRC
-    # Whole-file scan fallback
+    try:
+        for chunk in iter_png_chunks(data):
+            ctype = chunk.kind
+            name = ctype.decode("latin-1", errors="replace")
+            if ctype in (b"caBX", b"juMB", b"jumb") or ctype.startswith(b"c2"):
+                has_c2pa = True
+                findings.append(f"PNG chunk {name} (possible C2PA container)")
+            if ctype in (b"tEXt", b"zTXt", b"iTXt", b"eXIf"):
+                hits = _contains_any(bytes(chunk.payload), AI_META_HINTS + C2PA_MARKERS)
+                if hits:
+                    has_ai = True
+                    if any(hit.lower() in ("c2pa", "contentcredentials", "jumb") for hit in hits):
+                        has_c2pa = True
+                    findings.append(f"PNG {name}: {', '.join(hits[:8])}")
+    except ValueError as error:
+        findings.append(str(error))
     whole = _contains_any(data, C2PA_MARKERS)
     if whole and not has_c2pa:
         has_c2pa = True
@@ -225,56 +218,62 @@ def run_optional_tools(path: Path) -> dict[str, Any]:
     c2patool = which("c2patool")
     if c2patool:
         try:
-            r = subprocess.run(
+            result = external_command.run_command(
                 [c2patool, str(path)],
-                capture_output=True,
-                text=True,
                 timeout=30,
+                output_limit=OPTIONAL_TOOL_OUTPUT_LIMIT,
             )
-            out = (r.stdout or "") + (r.stderr or "")
-            low = out.lower()
-            # Negative markers must veto every positive branch, so the
-            # positive alternatives are parenthesised: c2patool reports a
-            # missing manifest as "Error: No claim found", which contains
-            # the substring "claim" and would otherwise read as a hit.
-            no_manifest = "no claim" in low or "no jumbf" in low
-            tools["c2patool"] = {
-                "available": True,
-                "returncode": r.returncode,
-                "snippet": out[:2000],
-                "has_manifest": ("claim" in low or "c2pa" in low or "manifest" in low)
-                and not no_manifest,
-            }
-        except Exception as e:
-            tools["c2patool"] = {"available": True, "error": str(e)}
+            output = result.stdout_text + result.stderr_text
+            if result.stdout_truncated or result.stderr_truncated:
+                tools["c2patool"] = {
+                    "available": True,
+                    "returncode": result.returncode,
+                    "error": "c2patool output exceeded safety limit",
+                }
+            else:
+                low = output.lower()
+                no_manifest = "no claim" in low or "no jumbf" in low
+                tools["c2patool"] = {
+                    "available": True,
+                    "returncode": result.returncode,
+                    "snippet": output[:2000],
+                    "has_manifest": ("claim" in low or "c2pa" in low or "manifest" in low)
+                    and not no_manifest,
+                }
+        except Exception as error:
+            tools["c2patool"] = {"available": True, "error": str(error)}
     else:
         tools["c2patool"] = {"available": False}
 
     exiftool = which("exiftool")
     if exiftool:
         try:
-            r = subprocess.run(
+            result = external_command.run_command(
                 [exiftool, "-G1", "-a", "-s", str(path)],
-                capture_output=True,
-                text=True,
                 timeout=30,
+                output_limit=OPTIONAL_TOOL_OUTPUT_LIMIT,
             )
-            out = r.stdout or ""
-            interesting = [
-                line
-                for line in out.splitlines()
-                if re.search(
-                    r"c2pa|content.?credential|AIGC|digitalSource|XMP|EXIF|IPTC|jumb",
-                    line,
-                    re.I,
-                )
-            ]
-            tools["exiftool"] = {
-                "available": True,
-                "interesting_lines": interesting[:50],
-            }
-        except Exception as e:
-            tools["exiftool"] = {"available": True, "error": str(e)}
+            if result.stdout_truncated or result.stderr_truncated:
+                tools["exiftool"] = {
+                    "available": True,
+                    "error": "exiftool output exceeded safety limit",
+                }
+            else:
+                interesting = [
+                    line
+                    for line in result.stdout_text.splitlines()
+                    if re.search(
+                        r"c2pa|content.?credential|AIGC|digitalSource|XMP|EXIF|IPTC|jumb",
+                        line,
+                        re.I,
+                    )
+                ]
+                tools["exiftool"] = {
+                    "available": True,
+                    "interesting_lines": interesting[:50],
+                }
+        except Exception as error:
+            tools["exiftool"] = {"available": True, "error": str(error)}
     else:
         tools["exiftool"] = {"available": False}
     return tools
@@ -304,18 +303,24 @@ def run_synthid_score(
         "--json",
     ]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-    except Exception as e:
-        return {"available": False, "error": str(e)}
+        result = external_command.run_command(
+            cmd,
+            timeout=180,
+            output_limit=SYNTHID_OUTPUT_LIMIT,
+        )
+    except Exception as error:
+        return {"available": False, "error": str(error)}
 
-    if r.returncode == 3:
+    if result.stdout_truncated or result.stderr_truncated:
+        return {"available": False, "error": "scorer output exceeded safety limit"}
+    if result.returncode == 3:
         return None
-    if r.returncode != 0:
-        return {"available": False, "error": (r.stderr or "").strip()[:2000]}
+    if result.returncode != 0:
+        return {"available": False, "error": result.stderr_text.strip()[:2000]}
     try:
-        return json.loads(r.stdout or "{}")
-    except json.JSONDecodeError as e:
-        return {"available": False, "error": f"bad scorer JSON: {e}"}
+        return json.loads(result.stdout_text or "{}")
+    except json.JSONDecodeError as error:
+        return {"available": False, "error": f"bad scorer JSON: {error}"}
 
 
 def inspect_image(
@@ -352,26 +357,11 @@ def inspect_image(
 
 
 def strip_png(data: bytes, *, strip_all_text: bool = True) -> tuple[bytes, list[str]]:
-    if not data.startswith(PNG_SIG):
-        raise ValueError("not PNG")
     actions: list[str] = []
     out = bytearray(PNG_SIG)
-    pos = 8
-    saw_iend = False
-    while pos + 8 <= len(data):
-        length = struct.unpack(">I", data[pos : pos + 4])[0]
-        ctype = data[pos + 4 : pos + 8]
-        chunk_start = pos + 8
-        chunk_end = chunk_start + length
-        if chunk_end + 4 > len(data):
-            raise ValueError(f"truncated PNG chunk {ctype!r}")
-        payload = data[chunk_start:chunk_end]
-        crc_bytes = data[chunk_end : chunk_end + 4]
-        stored_crc = struct.unpack(">I", crc_bytes)[0]
-        actual_crc = zlib.crc32(payload, zlib.crc32(ctype)) & 0xFFFFFFFF
-        if stored_crc != actual_crc:
-            raise ValueError(f"PNG CRC mismatch in {ctype!r}")
-        pos = chunk_end + 4
+    for chunk in iter_png_chunks(data, allow_trailing_data=True):
+        ctype = chunk.kind
+        payload = chunk.payload
         name = ctype.decode("latin-1", errors="replace")
 
         drop = False
@@ -379,10 +369,10 @@ def strip_png(data: bytes, *, strip_all_text: bool = True) -> tuple[bytes, list[
             drop = True
             actions.append(f"drop chunk {name}")
         elif ctype == b"eXIf" or ctype in (b"tEXt", b"zTXt", b"iTXt"):
-            if strip_all_text or _contains_any(payload, AI_META_HINTS + C2PA_MARKERS):
+            if strip_all_text or _contains_any(bytes(payload), AI_META_HINTS + C2PA_MARKERS):
                 drop = True
                 actions.append(f"drop chunk {name}")
-        elif _contains_any(ctype + payload, C2PA_MARKERS) and ctype not in (
+        elif _contains_any(ctype + bytes(payload), C2PA_MARKERS) and ctype not in (
             b"IHDR",
             b"IDAT",
             b"IEND",
@@ -398,12 +388,7 @@ def strip_png(data: bytes, *, strip_all_text: bool = True) -> tuple[bytes, list[
             actions.append(f"drop chunk {name} (C2PA marker in payload)")
 
         if not drop:
-            out.extend(struct.pack(">I", length) + ctype + payload + crc_bytes)
-        if ctype == b"IEND":
-            saw_iend = True
-            break
-    if not saw_iend:
-        raise ValueError("PNG has no complete IEND chunk")
+            out.extend(chunk.raw)
     if not actions:
         actions.append("no PNG metadata chunks removed (already clean or none matched)")
     return bytes(out), actions
@@ -552,25 +537,25 @@ def clean_image(
     exiftool = which("exiftool")
     if exiftool and strip_all_metadata:
         try:
-            result = subprocess.run(
+            result = external_command.run_command(
                 [
                     exiftool,
                     "-all=",
                     "-overwrite_original",
                     str(dest),
                 ],
-                capture_output=True,
-                text=True,
                 timeout=60,
-                check=False,
+                output_limit=OPTIONAL_TOOL_OUTPUT_LIMIT,
             )
-            if result.returncode == 0:
+            if result.returncode == 0 and not (result.stdout_truncated or result.stderr_truncated):
                 actions.append("exiftool -all= pass")
             else:
-                detail = (result.stderr or result.stdout or "").strip()[:300]
+                detail = (result.stderr_text or result.stdout_text).strip()[:300]
+                if result.stdout_truncated or result.stderr_truncated:
+                    detail = "output exceeded safety limit"
                 actions.append(f"exiftool failed (rc={result.returncode}): {detail}")
-        except Exception as e:
-            actions.append(f"exiftool failed: {e}")
+        except Exception as error:
+            actions.append(f"exiftool failed: {error}")
 
     after = inspect_image(dest, synthid_dir=synthid_dir)
     return {

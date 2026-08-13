@@ -7,14 +7,18 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-import rewrite_text
-from rewrite_text import rewrite
+import layer_b_http
+from layer_b_http import LayerBHTTPError
+from rewrite_text import RewritePlan, rewrite
 from tsapa import (
     Candidate,
+    TSAPAAdapterError,
     chunk_text,
     cosine,
     crossover,
@@ -58,49 +62,97 @@ def fake_llm(prompt: str) -> str:
     return body
 
 
-def test_http_scorers_bound_responses_and_validate_shapes(monkeypatch):
-    import common
-    import tsapa as tsapa_module
+def live_tsapa_plan(**overrides) -> RewritePlan:
+    values = {
+        "backend": "openai-compatible",
+        "model": "test-model",
+        "base_url": "http://127.0.0.1:9999",
+        "strength": "tsapa",
+        "timeout": 1.0,
+        "layer_a_after": True,
+        "generations": 0,
+        "population": 2,
+    }
+    values.update(overrides)
+    return RewritePlan(**values)
 
-    class FakeResponse:
-        def __init__(self, body):
-            self.body = body
 
-        def __enter__(self):
-            return self
+def test_http_scorers_keep_routes_auth_timeout_and_response_parsing(monkeypatch):
+    calls = []
 
-        def __exit__(self, *_args):
-            return None
+    def fake_request(endpoint, route, payload, *, headers=None, timeout):
+        calls.append((endpoint, route, payload, headers, timeout))
+        if route == "/v1/completions":
+            return {"choices": [{"logprobs": {"token_logprobs": [-1.0, None, -3.0]}}]}
+        return {"data": [{"embedding": [1, 2.5]}]}
 
-        def read(self, limit):
-            return self.body[:limit]
+    monkeypatch.setattr(layer_b_http, "request_json", fake_request)
 
-    monkeypatch.setattr(common, "DEFAULT_HTTP_JSON_LIMIT", 8)
-    monkeypatch.setattr(
-        tsapa_module.urllib.request,
-        "urlopen",
-        lambda *_args, **_kwargs: FakeResponse(b"x" * 9),
+    assert (
+        http_pll(
+            "https://example.test/prefix",
+            TEXT,
+            model="pll-model",
+            api_key="unit-test-secret-never-real",
+            timeout=5.0,
+        )
+        == -2.0
     )
+    assert http_embed(
+        "https://example.test/prefix",
+        TEXT,
+        model="embed-model",
+        api_key="unit-test-secret-never-real",
+        timeout=9.0,
+    ) == [1.0, 2.5]
+
+    pll_call, embed_call = calls
+    assert pll_call[0:2] == ("https://example.test/prefix", "/v1/completions")
+    assert pll_call[3:] == ({"Authorization": "Bearer unit-test-secret-never-real"}, 5.0)
+    assert embed_call[0:2] == ("https://example.test/prefix", "/v1/embeddings")
+    assert embed_call[3:] == ({"Authorization": "Bearer unit-test-secret-never-real"}, 9.0)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_http_pll_rejects_non_finite_token_logprobs(monkeypatch, value):
+    def fake_request(*_args, **_kwargs):
+        return {"choices": [{"logprobs": {"token_logprobs": [-1.0, value]}}]}
+
+    monkeypatch.setattr(layer_b_http, "request_json", fake_request)
+
+    with pytest.raises(TSAPAAdapterError, match="non-finite"):
+        http_pll("http://localhost:8000", TEXT)
+
+
+def test_http_scorers_share_transport_validation(monkeypatch):
+    def fail_network(*_args, **_kwargs):
+        raise AssertionError("invalid configuration reached transport opener")
+
+    monkeypatch.setattr(layer_b_http._OPENER, "open", fail_network)
     for scorer in (http_pll, http_embed):
-        try:
-            scorer("http://localhost", TEXT, timeout=1.0)
-        except RuntimeError as error:
-            assert "safety limit" in str(error)
-        else:
-            raise AssertionError("expected oversized scorer-response rejection")
+        with pytest.raises(LayerBHTTPError, match="endpoint"):
+            scorer("file:///tmp/provider.sock", TEXT, timeout=1.0)
+        for timeout in (0.0, -1.0, float("nan"), float("inf")):
+            with pytest.raises(LayerBHTTPError, match="timeout"):
+                scorer("http://localhost:8000", TEXT, timeout=timeout)
 
-    monkeypatch.setattr(common, "DEFAULT_HTTP_JSON_LIMIT", 256)
+
+def test_http_scorers_validate_provider_shapes(monkeypatch):
     monkeypatch.setattr(
-        tsapa_module.urllib.request,
-        "urlopen",
-        lambda *_args, **_kwargs: FakeResponse(b'{"choices":[null]}'),
+        layer_b_http,
+        "request_json",
+        lambda *_args, **_kwargs: {"choices": [None]},
     )
-    try:
+    with pytest.raises(RuntimeError, match="choices"):
         http_pll("http://localhost", TEXT, timeout=1.0)
-    except RuntimeError as error:
-        assert "choices" in str(error)
-    else:
-        raise AssertionError("expected malformed PLL response rejection")
+
+    monkeypatch.setattr(
+        layer_b_http,
+        "request_json",
+        lambda *_args, **_kwargs: {"data": [None]},
+    )
+    with pytest.raises(RuntimeError, match="data"):
+        http_embed("http://localhost", TEXT, timeout=1.0)
 
 
 def test_cosine_rejects_dimension_mismatch():
@@ -196,17 +248,7 @@ def test_tsapa_validates_evolution_parameters():
 def test_tsapa_print_prompt_backend():
     out, info = rewrite(
         TEXT,
-        backend="print-prompt",
-        model=None,
-        base_url=None,
-        api_key=None,
-        strength="tsapa",
-        lang="French",
-        original_lang="English",
-        timeout=30,
-        layer_a_after=True,
-        generations=7,
-        population=20,
+        RewritePlan.prompt("tsapa", generations=7, population=20),
     )
     assert "7 generations" in out
     assert "20 diverse" in out
@@ -216,40 +258,121 @@ def test_tsapa_print_prompt_backend():
 
 
 def test_live_tsapa_reports_adapter_fallbacks(monkeypatch):
-    import tsapa as tsapa_module
+    def fake_request(_endpoint, route, payload, *, headers=None, timeout):
+        if route == "/v1/chat/completions":
+            return {
+                "choices": [{"message": {"content": fake_llm(payload["messages"][0]["content"])}}]
+            }
+        if route == "/v1/completions":
+            return {"choices": [{}]}
+        if route == "/v1/embeddings":
+            return {"data": [None]}
+        raise AssertionError(f"unexpected route: {route}")
 
-    monkeypatch.setattr(
-        rewrite_text,
-        "call_openai_compatible",
-        lambda _base, _model, prompt, _key, _timeout, **_kwargs: fake_llm(prompt),
-    )
-    monkeypatch.setattr(
-        tsapa_module,
-        "http_pll",
-        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("no logprobs")),
-    )
-    monkeypatch.setattr(
-        tsapa_module,
-        "http_embed",
-        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("no embeddings")),
-    )
+    monkeypatch.setattr(layer_b_http, "request_json", fake_request)
     _out, info = rewrite(
         TEXT,
-        backend="openai-compatible",
-        model="test-model",
-        base_url="http://127.0.0.1:9999",
-        api_key="test-key",
-        strength="tsapa",
-        lang="French",
-        original_lang="English",
-        timeout=1,
-        layer_a_after=True,
-        generations=0,
-        population=2,
+        live_tsapa_plan(api_key="unit-test-secret-never-real"),
     )
     fallbacks = info["tsapa"]["adapter_fallbacks"]
     assert fallbacks["pll"] >= 2
     assert fallbacks["embedding"] >= 1
+
+
+def test_live_tsapa_routes_generation_and_scorers_through_one_transport(monkeypatch):
+    routes = []
+
+    def fake_request(_endpoint, route, payload, *, headers=None, timeout):
+        routes.append(route)
+        if route == "/v1/chat/completions":
+            return {
+                "choices": [{"message": {"content": fake_llm(payload["messages"][0]["content"])}}]
+            }
+        if route == "/v1/completions":
+            return {"choices": [{"logprobs": {"token_logprobs": [-1.0]}}]}
+        if route == "/v1/embeddings":
+            return {"data": [{"embedding": [1.0, 0.0]}]}
+        raise AssertionError(f"unexpected route: {route}")
+
+    monkeypatch.setattr(layer_b_http, "request_json", fake_request)
+    _out, info = rewrite(
+        TEXT,
+        live_tsapa_plan(
+            base_url="http://127.0.0.1:9999/prefix",
+            api_key="unit-test-secret-never-real",
+            timeout=4.0,
+        ),
+    )
+
+    assert {"/v1/chat/completions", "/v1/completions", "/v1/embeddings"} <= set(routes)
+    assert info["tsapa"]["adapter_fallbacks"] == {"pll": 0, "embedding": 0}
+
+
+def test_live_tsapa_reports_inconsistent_embedding_dimensions_as_fallback(monkeypatch):
+    embedding_calls = 0
+
+    def fake_request(_endpoint, route, payload, *, headers=None, timeout):
+        nonlocal embedding_calls
+        if route == "/v1/chat/completions":
+            return {
+                "choices": [{"message": {"content": fake_llm(payload["messages"][0]["content"])}}]
+            }
+        if route == "/v1/completions":
+            return {"choices": [{"logprobs": {"token_logprobs": [-1.0]}}]}
+        if route == "/v1/embeddings":
+            embedding_calls += 1
+            dimensions = 2 if embedding_calls == 1 else 3
+            return {"data": [{"embedding": [1.0] * dimensions}]}
+        raise AssertionError(f"unexpected route: {route}")
+
+    monkeypatch.setattr(layer_b_http, "request_json", fake_request)
+    _out, info = rewrite(TEXT, live_tsapa_plan())
+
+    assert info["tsapa"]["adapter_fallbacks"]["embedding"] >= 1
+
+
+def test_live_tsapa_falls_back_only_for_expected_adapter_failures(monkeypatch):
+    def expected_failures(_endpoint, route, payload, *, headers=None, timeout):
+        if route == "/v1/chat/completions":
+            return {
+                "choices": [{"message": {"content": fake_llm(payload["messages"][0]["content"])}}]
+            }
+        if route in ("/v1/completions", "/v1/embeddings"):
+            raise LayerBHTTPError("offline")
+        raise AssertionError(f"unexpected route: {route}")
+
+    monkeypatch.setattr(layer_b_http, "request_json", expected_failures)
+    _out, info = rewrite(TEXT, live_tsapa_plan())
+    assert info["tsapa"]["adapter_fallbacks"]["pll"] >= 2
+    assert info["tsapa"]["adapter_fallbacks"]["embedding"] >= 1
+
+    def pll_programming_defect(_endpoint, route, payload, *, headers=None, timeout):
+        if route == "/v1/chat/completions":
+            return {
+                "choices": [{"message": {"content": fake_llm(payload["messages"][0]["content"])}}]
+            }
+        if route == "/v1/completions":
+            raise RuntimeError("programming defect")
+        return {"data": [{"embedding": [1.0, 0.0]}]}
+
+    monkeypatch.setattr(layer_b_http, "request_json", pll_programming_defect)
+    with pytest.raises(RuntimeError, match="programming defect"):
+        rewrite(TEXT, live_tsapa_plan())
+
+    def embedding_programming_defect(_endpoint, route, payload, *, headers=None, timeout):
+        if route == "/v1/chat/completions":
+            return {
+                "choices": [{"message": {"content": fake_llm(payload["messages"][0]["content"])}}]
+            }
+        if route == "/v1/completions":
+            return {"choices": [{"logprobs": {"token_logprobs": [-1.0]}}]}
+        if route == "/v1/embeddings":
+            raise RuntimeError("embedding defect")
+        raise AssertionError(f"unexpected route: {route}")
+
+    monkeypatch.setattr(layer_b_http, "request_json", embedding_programming_defect)
+    with pytest.raises(RuntimeError, match="embedding defect"):
+        rewrite(TEXT, live_tsapa_plan())
 
 
 def test_clean_file_tsapa_requires_live_backend(tmp_path: Path):

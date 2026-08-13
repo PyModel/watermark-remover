@@ -10,6 +10,8 @@ import sys
 import zlib
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
@@ -20,6 +22,7 @@ from morphomod import (
     MAX_PIXELS,
     Mask,
     Raster,
+    VisiblePlan,
     box_mask,
     composite,
     decode_png,
@@ -32,6 +35,79 @@ from morphomod import (
     texture_patch_inpaint,
     write_pgm,
 )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"backend": "unknown"}, "unknown visible backend"),
+        ({"backend": "texture"}, "localization source"),
+        (
+            {"mask_path": Path("mask.pgm"), "box": (0, 0, 1, 1)},
+            "exactly one localization source",
+        ),
+        ({"box": (0, 0, 1, 1), "backend": "external"}, "command required"),
+        (
+            {
+                "box": (0, 0, 1, 1),
+                "backend": "texture",
+                "command": "tool {input}",
+            },
+            "only valid for external",
+        ),
+        ({"box": (0, 0, 1, 1), "dilation_radius": -1}, "dilation"),
+    ],
+)
+def test_visible_plan_rejects_invalid_mode_combinations(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        VisiblePlan(**kwargs)
+
+
+def test_visible_backend_requires_destination_before_writing_mask(tmp_path: Path):
+    source = tmp_path / "input.png"
+    source.write_bytes(encode_png(Raster(2, 2, 3, bytearray([0, 0, 0] * 4))))
+    mask_output = tmp_path / "mask.pgm"
+    plan = VisiblePlan(
+        box=(0, 0, 1, 1),
+        backend="texture",
+        mask_output=mask_output,
+    )
+
+    with pytest.raises(ValueError, match="output required"):
+        remove_visible(source, None, plan)
+
+    assert not mask_output.exists()
+
+
+@pytest.mark.parametrize("backend", ["texture", "simple"])
+def test_png_only_backend_rejects_jpeg_before_localization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str
+) -> None:
+    source = tmp_path / "input.jpg"
+    source.write_bytes(b"\xff\xd8\xff\xd9")
+    destination = tmp_path / "output.jpg"
+    mask_output = tmp_path / "mask.pgm"
+    monkeypatch.setattr(
+        morphomod,
+        "_run_template",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("invalid backend reached detector")
+        ),
+    )
+
+    with pytest.raises(ValueError, match=rf"{backend} backend supports PNG only"):
+        remove_visible(
+            source,
+            destination,
+            VisiblePlan(
+                detect_command="detect {input} {mask}",
+                backend=backend,
+                mask_output=mask_output,
+            ),
+        )
+
+    assert not destination.exists()
+    assert not mask_output.exists()
 
 
 def test_dilation_is_bounded_not_cascading():
@@ -85,12 +161,19 @@ def test_png_roundtrip_rgb_and_rgba():
         assert decoded == raster
 
 
+def test_decode_png_ignores_trailing_data_after_iend():
+    raster = Raster(2, 1, 3, bytearray([10, 20, 30, 40, 50, 60]))
+    encoded = encode_png(raster)
+
+    assert decode_png(encoded + b"HIDDEN-PAYLOAD") == decode_png(encoded)
+
+
 def test_remove_visible_rejects_oversized_encoded_input(tmp_path: Path, monkeypatch):
     src = tmp_path / "oversized.png"
     src.write_bytes(b"x" * 32)
     monkeypatch.setattr("morphomod.MAX_ENCODED_BYTES", 16)
     try:
-        remove_visible(src, None)
+        remove_visible(src, None, VisiblePlan())
     except ValueError as error:
         assert "encoded file exceeds safety limit" in str(error)
     else:
@@ -153,10 +236,12 @@ def test_remove_visible_rejects_output_aliases_before_writing(tmp_path: Path):
             remove_visible(
                 src,
                 destination,
-                mask_path=mask,
-                mask_output=mask_output,
-                backend="simple",
-                dilation_radius=0,
+                VisiblePlan(
+                    mask_path=mask,
+                    mask_output=mask_output,
+                    backend="simple",
+                    dilation_radius=0,
+                ),
             )
         except ValueError as error:
             assert "alias" in str(error)
@@ -175,7 +260,11 @@ def test_texture_backend_fully_replaces_small_mark_after_default_dilation(tmp_pa
     src.write_bytes(encode_png(Raster(width, height, 3, pixels)))
     dest = tmp_path / "small-mark.cleaned.png"
 
-    remove_visible(src, dest, box=(mark_x, mark_y, 1, 1), backend="texture")
+    remove_visible(
+        src,
+        dest,
+        VisiblePlan(box=(mark_x, mark_y, 1, 1), backend="texture"),
+    )
 
     cleaned = decode_png(dest.read_bytes())
     assert cleaned.data[index : index + 3] == bytearray((30, 90, 30))
@@ -217,9 +306,11 @@ def test_remove_visible_texture_pipeline(tmp_path: Path):
     report = remove_visible(
         src,
         dest,
-        box=(30, 30, 8, 8),
-        backend="texture",
-        dilation_radius=2,
+        VisiblePlan(
+            box=(30, 30, 8, 8),
+            backend="texture",
+            dilation_radius=2,
+        ),
     )
     assert report["status"] == "completed"
     assert any("texture-patch" in action for action in report["actions"])
@@ -238,9 +329,11 @@ def test_remove_visible_simple_pipeline(tmp_path: Path):
     report = remove_visible(
         src,
         dest,
-        mask_path=mask,
-        backend="simple",
-        dilation_radius=1,
+        VisiblePlan(
+            mask_path=mask,
+            backend="simple",
+            dilation_radius=1,
+        ),
     )
     assert report["status"] == "completed"
     assert report["initial_mask_pixels"] == 1
@@ -255,7 +348,7 @@ def test_remove_visible_simple_pipeline(tmp_path: Path):
 def test_remove_visible_plan_does_not_claim_removal(tmp_path: Path):
     src = tmp_path / "input.png"
     src.write_bytes(encode_png(Raster(2, 2, 3, bytearray([0, 0, 0] * 4))))
-    report = remove_visible(src, None)
+    report = remove_visible(src, None, VisiblePlan())
     assert report["status"] == "plan-only"
     assert report["output"] is None
     assert "No blind segmenter" in report["note"]
@@ -299,10 +392,12 @@ def test_external_adapter_and_restore(tmp_path: Path):
     report = remove_visible(
         src,
         dest,
-        mask_path=mask,
-        backend="external",
-        command=command,
-        dilation_radius=0,
+        VisiblePlan(
+            mask_path=mask,
+            backend="external",
+            command=command,
+            dilation_radius=0,
+        ),
     )
     assert report["status"] == "completed"
     assert decode_png(dest.read_bytes()) == decode_png(original)
@@ -334,10 +429,12 @@ def test_external_adapter_rejects_oversized_png_output(tmp_path: Path, monkeypat
         remove_visible(
             src,
             dest,
-            mask_path=mask,
-            backend="external",
-            command=command,
-            dilation_radius=0,
+            VisiblePlan(
+                mask_path=mask,
+                backend="external",
+                command=command,
+                dilation_radius=0,
+            ),
         )
     except ValueError as error:
         assert "encoded file exceeds safety limit" in str(error)
@@ -431,7 +528,39 @@ def test_clean_file_refuses_dilation_without_mask_source(tmp_path: Path):
         text=True,
     )
     assert r.returncode == 1
-    assert "requires --visible-mask" in r.stderr
+    assert "requires a localization source" in r.stderr
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ("--inpaint-command", "tool {input} {mask} {output}"),
+        ("--visible-backend", "external"),
+    ],
+)
+def test_clean_file_rejects_visible_options_without_localization_before_writing(
+    tmp_path: Path, options: tuple[str, ...]
+) -> None:
+    source = tmp_path / "input.png"
+    source.write_bytes(encode_png(Raster(3, 3, 3, bytearray([9, 8, 7] * 9))))
+    destination = tmp_path / "output.png"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS / "clean_file.py"),
+            str(source),
+            "-o",
+            str(destination),
+            *options,
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "requires a localization source" in result.stderr
+    assert not destination.exists()
 
 
 def test_morphomod_cli(tmp_path: Path):

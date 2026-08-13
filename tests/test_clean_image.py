@@ -8,7 +8,8 @@ import subprocess
 import sys
 import zlib
 from pathlib import Path
-from types import SimpleNamespace
+
+from conftest import fake_command_result
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
@@ -61,6 +62,28 @@ def test_strip_png_removes_text_c2pa(tmp_path: Path):
     # structural: still starts with PNG sig and has IEND
     assert cleaned.startswith(b"\x89PNG")
     assert b"IEND" in cleaned
+
+
+def test_strip_png_discards_trailing_payload():
+    payload = b"HIDDEN-PAYLOAD"
+
+    cleaned, _ = strip_png(_minimal_png_with_text() + payload)
+
+    assert payload not in cleaned
+    assert cleaned.endswith(_png_chunk(b"IEND", b""))
+
+
+def test_clean_image_discards_trailing_payload_at_public_entry_point(tmp_path: Path):
+    payload = b"HIDDEN-PAYLOAD"
+    src = tmp_path / "input.png"
+    src.write_bytes(_minimal_png_with_text() + payload)
+    dest = tmp_path / "output.png"
+
+    clean_image(src, dest)
+
+    cleaned = dest.read_bytes()
+    assert payload not in cleaned
+    assert cleaned.endswith(_png_chunk(b"IEND", b""))
 
 
 def test_strip_jpeg_removes_app11():
@@ -143,9 +166,9 @@ def test_exiftool_nonzero_is_logged_as_failure(tmp_path: Path, monkeypatch):
         lambda name: "/fake/exiftool" if name == "exiftool" else None,
     )
     monkeypatch.setattr(
-        image_meta.subprocess,
-        "run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=7, stdout="", stderr="denied"),
+        image_meta.external_command,
+        "run_command",
+        lambda *args, **kwargs: fake_command_result(7, stderr="denied"),
     )
     report = clean_image(src, dest)
     assert any("exiftool failed (rc=7)" in action for action in report["actions"])
