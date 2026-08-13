@@ -30,6 +30,8 @@ import re
 import urllib.request
 from dataclasses import dataclass
 
+from common import read_json_object_bounded
+
 # ---------------------------------------------------------------------------
 # Text utilities
 # ---------------------------------------------------------------------------
@@ -220,9 +222,17 @@ def http_pll(
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = json.loads(resp.read().decode())
-    logprobs = (data.get("choices") or [{}])[0].get("logprobs") or {}
-    toks = [t for t in logprobs.get("token_logprobs") or [] if t is not None]
+        data = read_json_object_bounded(resp, label="PLL response")
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        raise RuntimeError("invalid choices in PLL response")
+    logprobs = choices[0].get("logprobs")
+    if not isinstance(logprobs, dict):
+        raise RuntimeError("invalid logprobs in PLL response")
+    token_logprobs = logprobs.get("token_logprobs")
+    if not isinstance(token_logprobs, list):
+        raise RuntimeError("invalid token_logprobs in PLL response")
+    toks = [value for value in token_logprobs if isinstance(value, (int, float))]
     if not toks:
         raise RuntimeError("no token_logprobs in response")
     return sum(toks) / len(toks)
@@ -250,11 +260,20 @@ def http_embed(
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = json.loads(resp.read().decode())
-    emb = ((data.get("data") or [{}])[0]).get("embedding")
-    if not emb:
+        data = read_json_object_bounded(resp, label="embedding response")
+    items = data.get("data")
+    if not isinstance(items, list) or not items or not isinstance(items[0], dict):
+        raise RuntimeError("invalid data in embedding response")
+    embedding = items[0].get("embedding")
+    if not isinstance(embedding, list) or not embedding:
         raise RuntimeError("no embedding in response")
-    return [float(x) for x in emb]
+    try:
+        values = [float(value) for value in embedding]
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("embedding contains a non-numeric value") from error
+    if not all(math.isfinite(value) for value in values):
+        raise RuntimeError("embedding contains a non-finite value")
+    return values
 
 
 # ---------------------------------------------------------------------------
