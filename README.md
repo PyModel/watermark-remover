@@ -107,6 +107,12 @@ WATERMARKS_REWRITE_BASE_URL=http://127.0.0.1:8080 \
 WATERMARKS_REWRITE_MODEL=my-local-model \
   python3 "$SCRIPTS/rewrite_text.py" draft.txt \
     --strength tsapa --generations 5 --population 12
+
+# Qwen/Transformers-compatible servers: suppress reasoning preambles
+WATERMARKS_REWRITE_DISABLE_THINKING=true \
+  python3 "$SCRIPTS/rewrite_text.py" draft.txt \
+    --backend openai-compatible --base-url http://127.0.0.1:8080 \
+    --model my-thinking-model --strength paraphrase
 ```
 
 The TSAPA-style engine is a real multi-objective evolutionary loop:
@@ -118,7 +124,7 @@ The TSAPA-style engine is a real multi-objective evolutionary loop:
 5. Cross over at sentence boundaries, mutate the lowest-PLL sentence.
 6. Select the Pareto knee point.
 
-A logprobs-capable `/v1/completions` endpoint supplies PLL, and `/v1/embeddings` supplies semantic similarity. Either can fail independently and degrade to an explicitly labeled standard-library proxy.
+A logprobs-capable `/v1/completions` endpoint supplies PLL, and `/v1/embeddings` supplies semantic similarity. Either can fail independently and degrade to an explicitly labeled standard-library proxy. `--disable-thinking` (or `WATERMARKS_REWRITE_DISABLE_THINKING=true`) opts into the Qwen/Transformers `chat_template_kwargs.enable_thinking=false` extension; it is never sent by default to generic OpenAI-compatible servers.
 
 **Cost:** Layer B replaces the original wording and can flatten voice or precision. Prefer a non-origin model so the rewrite does not re-stamp the same scheme.
 
