@@ -17,6 +17,19 @@ def eprint(*args: object) -> None:
     print(*args, file=sys.stderr)
 
 
+def read_bool_env(name: str, default: bool = False) -> bool:
+    """Read an optional environment flag without treating arbitrary text as true."""
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be true or false")
+
+
 def read_text_input(path: str | None) -> str:
     if path is None or path == "-":
         return sys.stdin.read()
