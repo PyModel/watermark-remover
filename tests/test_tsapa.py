@@ -18,6 +18,8 @@ from tsapa import (
     chunk_text,
     cosine,
     crossover,
+    http_embed,
+    http_pll,
     lexical_diversity,
     ngram_diversity,
     non_dominated_sort,
@@ -54,6 +56,51 @@ def fake_llm(prompt: str) -> str:
     if "expanded detail" in prompt:
         body = body.replace("residual risks", "any residual risks that remain")
     return body
+
+
+def test_http_scorers_bound_responses_and_validate_shapes(monkeypatch):
+    import common
+    import tsapa as tsapa_module
+
+    class FakeResponse:
+        def __init__(self, body):
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, limit):
+            return self.body[:limit]
+
+    monkeypatch.setattr(common, "DEFAULT_HTTP_JSON_LIMIT", 8)
+    monkeypatch.setattr(
+        tsapa_module.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: FakeResponse(b"x" * 9),
+    )
+    for scorer in (http_pll, http_embed):
+        try:
+            scorer("http://localhost", TEXT, timeout=1.0)
+        except RuntimeError as error:
+            assert "safety limit" in str(error)
+        else:
+            raise AssertionError("expected oversized scorer-response rejection")
+
+    monkeypatch.setattr(common, "DEFAULT_HTTP_JSON_LIMIT", 256)
+    monkeypatch.setattr(
+        tsapa_module.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: FakeResponse(b'{"choices":[null]}'),
+    )
+    try:
+        http_pll("http://localhost", TEXT, timeout=1.0)
+    except RuntimeError as error:
+        assert "choices" in str(error)
+    else:
+        raise AssertionError("expected malformed PLL response rejection")
 
 
 def test_cosine_rejects_dimension_mismatch():
@@ -99,6 +146,20 @@ def test_crossover_uses_parent_sentences():
     child = crossover(a, b, random.Random(7))
     assert child.text
     assert "Alpha" in child.text or "Beta" in child.text
+
+
+def test_tsapa_degrades_gracefully_with_one_usable_candidate():
+    calls = 0
+
+    def mostly_empty_llm(_prompt: str) -> str:
+        nonlocal calls
+        calls += 1
+        return "one valid rewrite" if calls == 1 else ""
+
+    result = tsapa(TEXT, llm=mostly_empty_llm, generations=2, population=4, seed=1)
+    assert result["text"] == "one valid rewrite"
+    assert result["stats"][0]["skipped_evolution"] is True
+    assert result["stats"][0]["usable_candidates"] == 1
 
 
 def test_tsapa_offline_end_to_end():
@@ -160,7 +221,7 @@ def test_live_tsapa_reports_adapter_fallbacks(monkeypatch):
     monkeypatch.setattr(
         rewrite_text,
         "call_openai_compatible",
-        lambda _base, _model, prompt, _key, _timeout: fake_llm(prompt),
+        lambda _base, _model, prompt, _key, _timeout, **_kwargs: fake_llm(prompt),
     )
     monkeypatch.setattr(
         tsapa_module,
