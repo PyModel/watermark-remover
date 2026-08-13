@@ -21,12 +21,9 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import shlex
 import struct
-import subprocess
 import sys
 import tempfile
-import threading
 import zlib
 from collections import deque
 from dataclasses import dataclass
@@ -35,6 +32,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import external_command
 from common import (
     atomic_write_bytes,
     eprint,
@@ -43,6 +41,7 @@ from common import (
     validate_output_path,
 )
 from image_meta import detect_format
+from png_chunks import iter_png_chunks
 
 DEFAULT_DILATION_RADIUS = 3
 MAX_PIXELS = 40_000_000  # bounds decompression/allocation; covers 8K UHD
@@ -52,6 +51,42 @@ MAX_TEXTURE_CANDIDATES = 20_000
 MAX_COMMAND_DIAGNOSTIC_BYTES = 64 * 1024
 EXTERNAL_COMMAND_TIMEOUT_SECONDS = 1800
 PNG_SIG = b"\x89PNG\r\n\x1a\n"
+
+VISIBLE_BACKENDS = ("print-plan", "texture", "simple", "external")
+VISIBLE_CLEAN_BACKENDS = ("texture", "simple", "external")
+
+
+@dataclass(frozen=True, slots=True)
+class VisiblePlan:
+    mask_path: Path | None = None
+    box: tuple[int, int, int, int] | None = None
+    detect_command: str | None = None
+    backend: str = "print-plan"
+    command: str | None = None
+    dilation_radius: int = DEFAULT_DILATION_RADIUS
+    mask_output: Path | None = None
+    prompt: str = "Remove watermark, fill with background"
+
+    def __post_init__(self) -> None:
+        if self.backend not in VISIBLE_BACKENDS:
+            raise ValueError(f"unknown visible backend: {self.backend}")
+        sources = sum(
+            source is not None for source in (self.mask_path, self.box, self.detect_command)
+        )
+        if sources > 1:
+            raise ValueError("exactly one localization source may be configured")
+        if sources == 0 and self.backend != "print-plan":
+            raise ValueError("an inpainting backend requires a localization source")
+        if self.backend == "external" and sources and not self.command:
+            raise ValueError("command required for external backend")
+        if self.command and self.backend != "external":
+            raise ValueError("command is only valid for external backend")
+        if (
+            not isinstance(self.dilation_radius, int)
+            or isinstance(self.dilation_radius, bool)
+            or self.dilation_radius < 0
+        ):
+            raise ValueError("dilation radius must be a non-negative integer")
 
 
 def _read_bounded(path: Path, limit: int | None = None) -> bytes:
@@ -266,30 +301,15 @@ def _paeth(a: int, b: int, c: int) -> int:
 
 
 def decode_png(data: bytes) -> Raster:
-    if not data.startswith(PNG_SIG):
-        raise ValueError("not PNG")
-    pos = 8
     width = height = bit_depth = color_type = interlace = 0
     idat = bytearray()
-    while pos + 12 <= len(data):
-        length = struct.unpack(">I", data[pos : pos + 4])[0]
-        kind = data[pos + 4 : pos + 8]
-        payload = data[pos + 8 : pos + 8 + length]
-        if pos + 12 + length > len(data):
-            raise ValueError("truncated PNG chunk")
-        stored_crc = struct.unpack(">I", data[pos + 8 + length : pos + 12 + length])[0]
-        actual_crc = zlib.crc32(payload, zlib.crc32(kind)) & 0xFFFFFFFF
-        if stored_crc != actual_crc:
-            raise ValueError(f"PNG CRC mismatch in {kind!r}")
-        if kind == b"IHDR":
+    for chunk in iter_png_chunks(data):
+        if chunk.kind == b"IHDR":
             width, height, bit_depth, color_type, _, _, interlace = struct.unpack(
-                ">IIBBBBB", payload
+                ">IIBBBBB", chunk.payload
             )
-        elif kind == b"IDAT":
-            idat.extend(payload)
-        elif kind == b"IEND":
-            break
-        pos += 12 + length
+        elif chunk.kind == b"IDAT":
+            idat.extend(chunk.payload)
     channels = {0: 1, 2: 3, 6: 4}.get(color_type)
     if bit_depth != 8 or channels is None or interlace != 0:
         raise ValueError("PNG must be non-interlaced 8-bit gray/RGB/RGBA")
@@ -610,51 +630,14 @@ def composite(original: Raster, inpainted: Raster, mask: Mask) -> Raster:
 
 
 def _run_template(template: str, **values: str) -> None:
-    command = template.format(**values)
-    process = subprocess.Popen(
-        shlex.split(command),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        bufsize=0,
+    result = external_command.run_command(
+        external_command.command_from_template(template, **values),
+        timeout=EXTERNAL_COMMAND_TIMEOUT_SECONDS,
+        output_limit=MAX_COMMAND_DIAGNOSTIC_BYTES,
     )
-    if process.stdout is None:
-        process.kill()
-        process.wait()
-        raise RuntimeError("external command diagnostics pipe unavailable")
-
-    diagnostic_tail = bytearray()
-
-    def drain_output() -> None:
-        try:
-            while chunk := process.stdout.read(64 * 1024):
-                diagnostic_tail.extend(chunk)
-                overflow = len(diagnostic_tail) - MAX_COMMAND_DIAGNOSTIC_BYTES
-                if overflow > 0:
-                    del diagnostic_tail[:overflow]
-        except (OSError, ValueError):
-            # The parent closes the pipe after a timeout; command failure is
-            # reported by the wait path below.
-            pass
-
-    reader = threading.Thread(target=drain_output, name="external-command-output", daemon=True)
-    reader.start()
-    try:
-        return_code = process.wait(timeout=EXTERNAL_COMMAND_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait()
-        raise
-    finally:
-        reader.join(timeout=1)
-        if reader.is_alive():
-            process.stdout.close()
-            reader.join(timeout=1)
-        elif not process.stdout.closed:
-            process.stdout.close()
-
-    if return_code != 0:
-        tail = diagnostic_tail.decode("utf-8", errors="replace")
-        raise RuntimeError(f"external command failed ({return_code}): {tail}")
+    if result.returncode != 0:
+        diagnostics = result.stderr_text or result.stdout_text
+        raise RuntimeError(f"external command failed ({result.returncode}): {diagnostics}")
 
 
 def _jpeg_dimensions(data: bytes) -> tuple[int, int] | None:
@@ -699,83 +682,86 @@ def _validate_visible_paths(
 def remove_visible(
     path: Path,
     dest: Path | None,
-    *,
-    mask_path: Path | None = None,
-    box: tuple[int, int, int, int] | None = None,
-    detect_command: str | None = None,
-    backend: str = "print-plan",
-    command: str | None = None,
-    dilation_radius: int = DEFAULT_DILATION_RADIUS,
-    mask_output: Path | None = None,
-    prompt: str = "Remove watermark, fill with background",
+    plan: VisiblePlan,
 ) -> dict[str, Any]:
-    _validate_visible_paths(path, dest, mask_path, mask_output)
+    if not isinstance(plan, VisiblePlan):
+        raise TypeError("plan must be a VisiblePlan")
+    _validate_visible_paths(path, dest, plan.mask_path, plan.mask_output)
     data = _read_bounded(path)
     fmt = detect_format(data)
     raster = decode_png(data) if fmt == "png" else None
     dims = (raster.width, raster.height) if raster else _jpeg_dimensions(data)
     actions: list[str] = []
 
-    if mask_path:
-        initial = load_mask(mask_path)
-        source = f"mask:{mask_path}"
-    elif box:
-        if not dims:
-            raise ValueError("cannot derive dimensions for --box; provide --mask")
-        initial = box_mask(*dims, box)
-        source = f"box:{','.join(map(str, box))}"
-    elif detect_command:
-        with tempfile.TemporaryDirectory(prefix="wm-mask-") as td:
-            detected = Path(td) / "detected.pgm"
-            _run_template(
-                detect_command,
-                input=str(path),
-                mask=str(detected),
-                prompt=prompt,
-            )
-            if not detected.is_file():
-                raise RuntimeError("detector command did not create {mask}")
-            initial = load_mask(detected)
-        source = "external-detector"
-    else:
+    has_source = any(
+        source is not None for source in (plan.mask_path, plan.box, plan.detect_command)
+    )
+    if not has_source:
         return {
             "status": "plan-only",
             "input": str(path),
             "output": None,
             "format": fmt,
-            "backend": backend,
+            "backend": plan.backend,
             "actions": [
                 "supply --mask, --box, or --detect-command",
                 "then refine/fill holes, dilate d=3, inpaint, restore original outside mask",
             ],
             "note": "No blind segmenter is bundled; no image bytes were changed.",
         }
+    if raster is None and plan.backend in ("texture", "simple"):
+        raise ValueError(f"{plan.backend} backend supports PNG only; use --backend external")
+    if plan.backend != "print-plan" and dest is None:
+        raise ValueError("output required for an inpainting backend")
+
+    if plan.mask_path is not None:
+        initial = load_mask(plan.mask_path)
+        source = f"mask:{plan.mask_path}"
+    elif plan.box is not None:
+        if not dims:
+            raise ValueError("cannot derive dimensions for --box; provide --mask")
+        initial = box_mask(*dims, plan.box)
+        source = f"box:{','.join(map(str, plan.box))}"
+    else:
+        assert plan.detect_command is not None
+        with tempfile.TemporaryDirectory(prefix="wm-mask-") as temp_dir:
+            detected = Path(temp_dir) / "detected.pgm"
+            _run_template(
+                plan.detect_command,
+                input=str(path),
+                mask=str(detected),
+                prompt=plan.prompt,
+            )
+            if not detected.is_file():
+                raise RuntimeError("detector command did not create {mask}")
+            initial = load_mask(detected)
+        source = "external-detector"
 
     if dims and (initial.width, initial.height) != dims:
         raise ValueError(f"mask dimensions {(initial.width, initial.height)} != image {dims}")
-    refined = refine_mask(initial, dilation_radius)
+    refined = refine_mask(initial, plan.dilation_radius)
+    mask_output = plan.mask_output
     if mask_output is None:
         base = dest or path.with_name(f"{path.stem}.visible.cleaned{path.suffix}")
         mask_output = base.with_name(f"{base.stem}.mask.pgm")
-        _validate_visible_paths(path, dest, mask_path, mask_output)
+        _validate_visible_paths(path, dest, plan.mask_path, mask_output)
     write_pgm(refined, mask_output)
     actions.extend(
         [
             f"mask source: {source}",
-            f"fill holes + dilate radius={dilation_radius}: {initial.marked}->{refined.marked} pixels",
+            "fill holes + dilate "
+            f"radius={plan.dilation_radius}: {initial.marked}->{refined.marked} pixels",
             f"wrote refined mask: {mask_output}",
         ]
     )
 
-    if backend == "print-plan":
+    if plan.backend == "print-plan":
         status = "mask-ready"
         output = None
         actions.append("no inpainting run (print-plan backend)")
-    elif backend == "texture":
-        if raster is None:
-            raise ValueError("texture backend supports PNG only; use --backend external")
-        if dest is None:
-            raise ValueError("-o/--output required for an inpainting backend")
+    elif plan.backend == "texture":
+        assert raster is not None
+        assert dest is not None
         restored, match = texture_patch_inpaint(raster, refined, feather=0)
         atomic_write_bytes(dest, encode_png(restored))
         status, output = "completed", str(dest)
@@ -784,30 +770,27 @@ def remove_visible(
             f"source=({match.x},{match.y},{match.width},{match.height}) "
             f"edge_mse={match.score:.2f}"
         )
-    elif backend == "simple":
-        if raster is None:
-            raise ValueError("simple backend supports PNG only; use --backend external")
-        if dest is None:
-            raise ValueError("-o/--output required for an inpainting backend")
+    elif plan.backend == "simple":
+        assert raster is not None
+        assert dest is not None
         filled = simple_inpaint(raster, refined)
         restored = composite(raster, filled, refined)
         atomic_write_bytes(dest, encode_png(restored))
         status, output = "completed", str(dest)
         actions.append("nearest-boundary inpaint + restore (uniform-background fallback)")
-    elif backend == "external":
-        if not command:
-            raise ValueError("--command required for external backend")
-        if dest is None:
-            raise ValueError("-o/--output required for external backend")
+    else:
+        assert plan.backend == "external"
+        assert plan.command is not None
+        assert dest is not None
         dest.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="wm-inpaint-") as td:
-            external_out = Path(td) / ("inpainted.png" if fmt == "png" else path.name)
+        with tempfile.TemporaryDirectory(prefix="wm-inpaint-") as temp_dir:
+            external_out = Path(temp_dir) / ("inpainted.png" if fmt == "png" else path.name)
             _run_template(
-                command,
+                plan.command,
                 input=str(path),
                 mask=str(mask_output),
                 output=str(external_out),
-                prompt=prompt,
+                prompt=plan.prompt,
             )
             if not external_out.is_file():
                 raise RuntimeError("inpaint command did not create {output}")
@@ -819,19 +802,17 @@ def remove_visible(
                 atomic_write_bytes(dest, _read_bounded(external_out))
                 actions.append("external backend output copied (backend owns JPEG compositing)")
         status, output = "completed", str(dest)
-    else:
-        raise ValueError(f"unknown backend: {backend}")
 
     return {
         "status": status,
         "input": str(path),
         "output": output,
         "format": fmt,
-        "backend": backend,
+        "backend": plan.backend,
         "mask": str(mask_output),
         "initial_mask_pixels": initial.marked,
         "refined_mask_pixels": refined.marked,
-        "dilation_radius": dilation_radius,
+        "dilation_radius": plan.dilation_radius,
         "actions": actions,
         "note": (
             "MorphoMod-inspired pipeline; CVPR paper metrics are not this run's metrics. "
@@ -851,35 +832,33 @@ def _parse_box(value: str) -> tuple[int, int, int, int]:
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("path", type=Path)
-    p.add_argument("-o", "--output", type=Path)
-    source = p.add_mutually_exclusive_group()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("path", type=Path)
+    parser.add_argument("-o", "--output", type=Path)
+    source = parser.add_mutually_exclusive_group()
     source.add_argument("--mask", type=Path, help="Binary PGM or PNG mask (white=remove)")
     source.add_argument("--box", type=_parse_box, help="Manual x,y,w,h mask")
     source.add_argument(
         "--detect-command",
         help="External detector template; placeholders: {input} {mask} {prompt}",
     )
-    p.add_argument("--dilation", type=int, default=DEFAULT_DILATION_RADIUS)
-    p.add_argument(
+    parser.add_argument("--dilation", type=int, default=DEFAULT_DILATION_RADIUS)
+    parser.add_argument(
         "--backend",
-        choices=("print-plan", "texture", "simple", "external"),
+        choices=VISIBLE_BACKENDS,
         default="print-plan",
     )
-    p.add_argument(
+    parser.add_argument(
         "--command",
         help="External inpainter template; placeholders: {input} {mask} {output} {prompt}",
     )
-    p.add_argument("--mask-output", type=Path)
-    p.add_argument("--prompt", default="Remove watermark, fill with background")
-    p.add_argument("--json", action="store_true")
-    args = p.parse_args()
+    parser.add_argument("--mask-output", type=Path)
+    parser.add_argument("--prompt", default="Remove watermark, fill with background")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
 
     try:
-        report = remove_visible(
-            args.path,
-            args.output,
+        plan = VisiblePlan(
             mask_path=args.mask,
             box=args.box,
             detect_command=args.detect_command,
@@ -889,8 +868,9 @@ def main() -> int:
             mask_output=args.mask_output,
             prompt=args.prompt,
         )
-    except Exception as e:
-        eprint(f"error: {e}")
+        report = remove_visible(args.path, args.output, plan)
+    except Exception as error:
+        eprint(f"error: {error}")
         return 1
     if args.json:
         print(json.dumps(report, indent=2, ensure_ascii=False))

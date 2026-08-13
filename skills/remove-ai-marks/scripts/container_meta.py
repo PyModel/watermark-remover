@@ -8,12 +8,12 @@ from __future__ import annotations
 
 import io
 import re
-import subprocess
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import external_command
 from common import atomic_write_bytes, atomic_write_text, which
 from image_meta import AI_META_HINTS, C2PA_MARKERS, run_optional_tools
 
@@ -91,9 +91,11 @@ def detect_container_format(path: Path, data: bytes | None = None) -> str:
         if data[:100].lstrip().startswith(b"<") and b"svg" in data[:500].lower():
             return "svg"
         if data[:2] == b"PK":
-            # zip-based; sniff
+            # Prefer the file-backed archive so callers can pass a bounded prefix;
+            # ZIP central directories live at the end of the file.
+            archive_source = path if path.is_file() else io.BytesIO(data)
             try:
-                with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                with zipfile.ZipFile(archive_source) as zf:
                     _validate_zip(zf)
                     names = set(zf.namelist())
                     if "word/document.xml" in names:
@@ -603,19 +605,20 @@ def clean_pdf_pypdf(path: Path, dest: Path) -> tuple[list[str], dict]:
     if exiftool:
         dest.write_bytes(data)
         try:
-            r = subprocess.run(
+            result = external_command.run_command(
                 [exiftool, "-all=", "-overwrite_original", str(dest)],
-                capture_output=True,
-                text=True,
                 timeout=60,
-                check=False,
+                output_limit=2 * 1024 * 1024,
             )
-            actions.append(f"exiftool -all= (rc={r.returncode})")
-            if r.returncode == 0:
+            actions.append(f"exiftool -all= (rc={result.returncode})")
+            if result.returncode == 0 and not (result.stdout_truncated or result.stderr_truncated):
                 return actions, {"mode": "exiftool", "degraded": False}
-            actions.append(f"exiftool degraded (rc={r.returncode}); trying pypdf")
-        except Exception as e:
-            actions.append(f"exiftool failed: {e}; trying pypdf")
+            if result.stdout_truncated or result.stderr_truncated:
+                actions.append("exiftool output exceeded safety limit; trying pypdf")
+            else:
+                actions.append(f"exiftool degraded (rc={result.returncode}); trying pypdf")
+        except Exception as error:
+            actions.append(f"exiftool failed: {error}; trying pypdf")
 
     # Strategy 2: clone the complete document graph, then remove only metadata.
     # Copying pages alone loses outlines, forms, attachments, labels, and viewer state.

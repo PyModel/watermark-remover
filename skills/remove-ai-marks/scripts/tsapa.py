@@ -23,14 +23,17 @@ Everything except the two HTTP scorers is pure stdlib and offline-testable.
 
 from __future__ import annotations
 
-import json
 import math
 import random
 import re
-import urllib.request
 from dataclasses import dataclass
 
-from common import read_json_object_bounded
+import layer_b_http
+
+
+class TSAPAAdapterError(RuntimeError):
+    """Expected scorer response incompatibility."""
+
 
 # ---------------------------------------------------------------------------
 # Text utilities
@@ -212,29 +215,34 @@ def http_pll(
     }
     if model:
         payload["model"] = model
-    headers = {"Content-Type": "application/json"}
+    headers = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    req = urllib.request.Request(
-        base_url.rstrip("/") + "/v1/completions",
-        data=json.dumps(payload).encode(),
+    data = layer_b_http.request_json(
+        base_url,
+        "/v1/completions",
+        payload,
         headers=headers,
-        method="POST",
+        timeout=timeout,
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = read_json_object_bounded(resp, label="PLL response")
     choices = data.get("choices")
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
-        raise RuntimeError("invalid choices in PLL response")
+        raise TSAPAAdapterError("invalid choices in PLL response")
     logprobs = choices[0].get("logprobs")
     if not isinstance(logprobs, dict):
-        raise RuntimeError("invalid logprobs in PLL response")
+        raise TSAPAAdapterError("invalid logprobs in PLL response")
     token_logprobs = logprobs.get("token_logprobs")
     if not isinstance(token_logprobs, list):
-        raise RuntimeError("invalid token_logprobs in PLL response")
-    toks = [value for value in token_logprobs if isinstance(value, (int, float))]
+        raise TSAPAAdapterError("invalid token_logprobs in PLL response")
+    toks = [
+        float(value)
+        for value in token_logprobs
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    ]
     if not toks:
-        raise RuntimeError("no token_logprobs in response")
+        raise TSAPAAdapterError("no token_logprobs in response")
+    if not all(math.isfinite(value) for value in toks):
+        raise TSAPAAdapterError("token_logprobs contains a non-finite value")
     return sum(toks) / len(toks)
 
 
@@ -250,29 +258,28 @@ def http_embed(
     payload: dict = {"input": text[:8000]}
     if model:
         payload["model"] = model
-    headers = {"Content-Type": "application/json"}
+    headers = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    req = urllib.request.Request(
-        base_url.rstrip("/") + "/v1/embeddings",
-        data=json.dumps(payload).encode(),
+    data = layer_b_http.request_json(
+        base_url,
+        "/v1/embeddings",
+        payload,
         headers=headers,
-        method="POST",
+        timeout=timeout,
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = read_json_object_bounded(resp, label="embedding response")
     items = data.get("data")
     if not isinstance(items, list) or not items or not isinstance(items[0], dict):
-        raise RuntimeError("invalid data in embedding response")
+        raise TSAPAAdapterError("invalid data in embedding response")
     embedding = items[0].get("embedding")
     if not isinstance(embedding, list) or not embedding:
-        raise RuntimeError("no embedding in response")
+        raise TSAPAAdapterError("no embedding in response")
     try:
         values = [float(value) for value in embedding]
     except (TypeError, ValueError) as error:
-        raise RuntimeError("embedding contains a non-numeric value") from error
+        raise TSAPAAdapterError("embedding contains a non-numeric value") from error
     if not all(math.isfinite(value) for value in values):
-        raise RuntimeError("embedding contains a non-finite value")
+        raise TSAPAAdapterError("embedding contains a non-finite value")
     return values
 
 
@@ -310,10 +317,16 @@ def evaluate(
     )
     if embed is not None and orig_emb is not None:
         try:
-            cand.f_fid = max(0.0, min(1.0, cosine(embed(cand.text), orig_emb)))
-            return
-        except Exception:
+            candidate_emb = embed(cand.text)
+        except (layer_b_http.LayerBHTTPError, TSAPAAdapterError):
             pass
+        else:
+            try:
+                cand.f_fid = max(0.0, min(1.0, cosine(candidate_emb, orig_emb)))
+            except ValueError:
+                pass
+            else:
+                return
     cand.f_fid = shingle_similarity(cand.text, original)
 
 
@@ -388,8 +401,7 @@ def crossover(a: Candidate, b: Candidate, rng: random.Random) -> Candidate:
     """Sentence-level multi-point crossover."""
     sa, sb = _SENT_RE.split(a.text), _SENT_RE.split(b.text)
     if len(sa) < 2 or len(sb) < 2:
-        child = a.text if rng.random() < 0.5 else b.text
-        return Candidate(text=child)
+        return Candidate(text=a.text if rng.random() < 0.5 else b.text)
     cuts = sorted(
         rng.sample(range(1, min(len(sa), len(sb)) + 1), k=min(2, min(len(sa), len(sb)) - 1))
     )
@@ -465,9 +477,13 @@ def tsapa(
     weights: tuple[float, float, float] = (0.6, 0.2, 0.2),
     seed: int | None = None,
 ) -> dict:
-    """Run the evolutionary attack. llm(prompt)->str is required.
+    """Run the evolutionary attack. ``llm(prompt) -> str`` is required.
 
-    Returns dict with rewritten text and per-chunk stats.
+    Expected transport failures may raise ``LayerBHTTPError``; scorer callbacks
+    must raise ``TSAPAAdapterError`` for expected provider incompatibility.
+    Unexpected callback errors propagate.
+
+    Returns a dictionary with rewritten text and per-chunk statistics.
     """
     if not text.strip():
         raise ValueError("text must not be empty")
@@ -492,7 +508,7 @@ def tsapa(
         if embed is not None:
             try:
                 orig_emb = embed(chunk)
-            except Exception:
+            except (layer_b_http.LayerBHTTPError, TSAPAAdapterError):
                 orig_emb = None
 
         # 1. initialize population with diverse paraphrases

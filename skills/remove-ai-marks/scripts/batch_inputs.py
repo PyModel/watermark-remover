@@ -7,10 +7,16 @@ from dataclasses import dataclass
 from pathlib import Path, PurePath
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class InputItem:
     path: Path
     relative: Path  # stable output path below a batch output root
+
+
+@dataclass(frozen=True, slots=True)
+class InputSelection:
+    items: tuple[InputItem, ...]
+    batch: bool
 
 
 def is_generated(path: Path) -> bool:
@@ -50,28 +56,34 @@ def safe_output_path(root: Path, relative: Path) -> Path:
     return candidate
 
 
-def collect_inputs(
+def select_inputs(
     sources: Iterable[Path],
     *,
     recursive: bool,
     pattern: str,
     extensions: set[str] | frozenset[str],
-) -> list[InputItem]:
-    """Discover unique supported files and assign collision-resistant relative paths.
-
-    A single directory keeps paths relative to that directory. Multiple roots
-    are namespaced by each root's basename. Explicit files retain their name.
-    Missing sources are ignored; the CLI reports them before calling here.
-    """
+    excluded_roots: Iterable[Path] = (),
+) -> InputSelection:
+    """Validate sources, discover supported files, and determine batch mode."""
     _validate_pattern(pattern)
-    roots = list(sources)
+    roots = tuple(sources)
+    invalid = [
+        source
+        for source in roots
+        if source.is_symlink() or not source.exists() or not (source.is_file() or source.is_dir())
+    ]
+    if invalid:
+        rendered = ", ".join(str(source) for source in invalid)
+        raise ValueError(f"not a regular file or directory: {rendered}")
+    if not roots:
+        raise ValueError("no input sources")
+
     multiple_roots = len(roots) > 1
-    allowed = {e.lower() for e in extensions}
+    allowed = {extension.lower() for extension in extensions}
+    excluded = tuple(root.resolve() for root in excluded_roots)
     seen: set[Path] = set()
     items: list[InputItem] = []
     for source in roots:
-        if source.is_symlink():
-            continue
         if source.is_dir():
             iterator = source.rglob(pattern) if recursive else source.glob(pattern)
             for path in sorted(iterator):
@@ -82,6 +94,7 @@ def collect_inputs(
                     or path.suffix.lower() not in allowed
                     or is_generated(path)
                     or resolved in seen
+                    or any(resolved.is_relative_to(root) for root in excluded)
                 ):
                     continue
                 relative = path.relative_to(source)
@@ -89,9 +102,15 @@ def collect_inputs(
                     relative = Path(source.name) / relative
                 items.append(InputItem(path, relative))
                 seen.add(resolved)
-        elif source.is_file() and not source.is_symlink():
+        else:
             resolved = source.resolve()
             if resolved not in seen:
                 items.append(InputItem(source, Path(source.name)))
                 seen.add(resolved)
-    return items
+
+    if not items:
+        raise ValueError("no matching input files")
+    return InputSelection(
+        items=tuple(items),
+        batch=len(items) > 1 or any(source.is_dir() for source in roots),
+    )
