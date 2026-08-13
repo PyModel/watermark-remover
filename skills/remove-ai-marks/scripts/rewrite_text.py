@@ -26,8 +26,8 @@ from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from common import cleaned_path, eprint, read_text_input, write_text_output  # noqa: E402
-from text_unicode import clean_text  # noqa: E402
+from common import cleaned_path, eprint, read_text_input, write_text_output
+from text_unicode import clean_text
 
 PROMPTS = {
     "paraphrase": (
@@ -51,6 +51,22 @@ PROMPTS = {
         "Do not omit any bullet. Output only the document.\n\n---\n{TEXT}"
     ),
 }
+
+
+TSAPA_PACK = (
+    "Run an evolutionary paraphrase attack on the text below (TSAPA-style, ACL 2026).\n"
+    "1. Split the text into chunks of ~1200 characters.\n"
+    "2. For each chunk, generate {POP} diverse paraphrase candidates (vary register, "
+    "conciseness, and sentence structure).\n"
+    "3. Iterate for {GEN} generations:\n"
+    "   - Score every candidate on attack fitness (fluency/perplexity + n-gram diversity "
+    "+ lexical diversity vs. the original) AND fidelity (semantic similarity).\n"
+    "   - Keep the Pareto front (maximize both objectives); prefer uncrowded candidates.\n"
+    "   - Crossover: swap sentences between candidate pairs.\n"
+    "   - Mutate: rewrite ONLY the most machine-like (lowest-perplexity) sentences.\n"
+    "4. Pick the knee point (closest to ideal on both objectives) per chunk.\n"
+    "Output only the final rewritten text.\n\n---\n{TEXT}"
+)
 
 
 def _env(name: str, default: str | None = None) -> str | None:
@@ -158,16 +174,33 @@ def rewrite(
     original_lang: str,
     timeout: float,
     layer_a_after: bool,
+    generations: int = 5,
+    population: int = 12,
 ) -> tuple[str, dict]:
-    prompt = build_prompt(strength, text, lang=lang, original_lang=original_lang)
     info: dict = {
         "backend": backend,
         "strength": strength,
         "model": model,
         "base_url": base_url,
-        "prompt_chars": len(prompt),
         "input_chars": len(text),
     }
+
+    if strength == "tsapa":
+        return _rewrite_tsapa(
+            text,
+            backend=backend,
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
+            timeout=timeout,
+            layer_a_after=layer_a_after,
+            generations=generations,
+            population=population,
+            info=info,
+        )
+
+    prompt = build_prompt(strength, text, lang=lang, original_lang=original_lang)
+    info["prompt_chars"] = len(prompt)
 
     if backend == "print-prompt":
         info["mode"] = "print-prompt"
@@ -200,6 +233,93 @@ def rewrite(
     return out, info
 
 
+def _rewrite_tsapa(
+    text: str,
+    *,
+    backend: str,
+    model: str | None,
+    base_url: str | None,
+    api_key: str | None,
+    timeout: float,
+    layer_a_after: bool,
+    generations: int,
+    population: int,
+    info: dict,
+) -> tuple[str, dict]:
+    from tsapa import heuristic_pll, http_embed, http_pll, tsapa
+
+    if backend == "print-prompt":
+        prompt = (
+            TSAPA_PACK.replace("{GEN}", str(generations))
+            .replace("{POP}", str(population))
+            .replace("{TEXT}", text)
+        )
+        info.update(
+            mode="print-prompt",
+            prompt_chars=len(prompt),
+            note="TSAPA operator pack for agent execution (no model called).",
+        )
+        return prompt, info
+
+    if not model or not base_url:
+        raise SystemExit("error: --model and --base-url required for tsapa with live backends")
+    _warn_remote(base_url)
+
+    if backend == "ollama":
+
+        def llm(prompt: str) -> str:
+            return call_ollama(base_url, model, prompt, timeout)
+    elif backend == "openai-compatible":
+
+        def llm(prompt: str) -> str:
+            return call_openai_compatible(base_url, model, prompt, api_key, timeout)
+    else:
+        raise SystemExit(f"unknown backend: {backend}")
+
+    pll_model = os.environ.get("WATERMARKS_PLL_MODEL", model or "")
+    embed_model = os.environ.get("WATERMARKS_EMBED_MODEL", model or "")
+    fallbacks = {"pll": 0, "embedding": 0}
+
+    def pll(t: str) -> float:
+        try:
+            return http_pll(base_url, t, model=pll_model, api_key=api_key, timeout=timeout)
+        except Exception:
+            fallbacks["pll"] += 1
+            return heuristic_pll(t)  # labeled fallback
+
+    def embed(t: str) -> list[float]:
+        try:
+            return http_embed(base_url, t, model=embed_model, api_key=api_key, timeout=timeout)
+        except Exception:
+            fallbacks["embedding"] += 1
+            raise
+
+    result = tsapa(
+        text,
+        llm=llm,
+        pll=pll,
+        embed=embed,
+        generations=generations,
+        population=population,
+    )
+    out = result["text"]
+    if layer_a_after:
+        out, stats = clean_text(out)
+        info["layer_a_after"] = stats
+    info.update(
+        mode="rewritten",
+        output_chars=len(out),
+        tsapa={
+            **{k: result[k] for k in ("chunks", "generations", "population", "stats")},
+            "adapter_fallbacks": fallbacks,
+            "pll_model": pll_model,
+            "embedding_model": embed_model,
+        },
+        note=result["note"],
+    )
+    return out, info
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("path", nargs="?", default="-", help="Input text file, or - for stdin")
@@ -217,9 +337,12 @@ def main() -> int:
     p.add_argument("--api-key", default=_env("WATERMARKS_REWRITE_API_KEY"))
     p.add_argument(
         "--strength",
-        choices=("paraphrase", "backtranslate", "structural"),
+        choices=("paraphrase", "backtranslate", "structural", "tsapa"),
         default="paraphrase",
+        help="tsapa: evolutionary multi-objective attack (ACL 2026 class)",
     )
+    p.add_argument("--generations", type=int, default=5, help="TSAPA generations")
+    p.add_argument("--population", type=int, default=12, help="TSAPA population per chunk")
     p.add_argument("--lang", default="French", help="Pivot language for backtranslate")
     p.add_argument("--original-lang", default="English")
     p.add_argument("--timeout", type=float, default=120.0)
@@ -244,6 +367,8 @@ def main() -> int:
             original_lang=args.original_lang,
             timeout=args.timeout,
             layer_a_after=not args.no_layer_a_after,
+            generations=args.generations,
+            population=args.population,
         )
     except (urllib.error.URLError, TimeoutError, RuntimeError) as e:
         eprint(f"rewrite failed: {e}")

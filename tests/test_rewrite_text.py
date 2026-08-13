@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from rewrite_text import build_prompt, rewrite  # noqa: E402
+from rewrite_text import build_prompt, rewrite
 
 
 def test_build_prompt_paraphrase_contains_text():
