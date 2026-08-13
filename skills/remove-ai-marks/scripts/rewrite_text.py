@@ -11,12 +11,14 @@ Env (optional):
   WATERMARKS_REWRITE_BASE_URL
   WATERMARKS_REWRITE_MODEL
   WATERMARKS_REWRITE_API_KEY
+  WATERMARKS_REWRITE_DISABLE_THINKING  — true/false; OpenAI-compatible extension
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import urllib.error
@@ -26,7 +28,15 @@ from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from common import cleaned_path, eprint, read_text_input, write_text_output
+from common import (
+    cleaned_path,
+    eprint,
+    read_bool_env,
+    read_json_object_bounded,
+    read_text_input,
+    validate_output_path,
+    write_text_output,
+)
 from text_unicode import clean_text
 
 PROMPTS = {
