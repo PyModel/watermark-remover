@@ -264,12 +264,12 @@ def _item_extent_bytes(
             continue  # idat-relative extents not supported for editing
         for off, ln in exts:
             if 0 <= off < len(data) and off + ln <= len(data):
-                out.append((off, ln, itype))
+                out.append((off, ln, itype, content_type))
     return out
 
 
-def _is_xmp_item(itype: bytes, payload: bytes) -> bool:
-    return XMP_MIME in payload[:200] or payload.lstrip()[:1] == b"<"
+def _is_xmp_item(itype: bytes, content_type: str) -> bool:
+    return itype == b"mime" and content_type.casefold() == XMP_MIME.decode("ascii")
 
 
 def _neutralize_runs(buf: bytearray, start: int, length: int, pad: int) -> list[str]:
@@ -319,10 +319,26 @@ def inspect_heif(data: bytes) -> tuple[bool, bool, list[str], dict[str, Any]]:
                 "malformed": True,
             },
         )
-    for off, ln, itype in _item_extent_bytes(data, items, extents, (b"Exif", b"mime")):
+    supported_item_ids = {item_id for item_id, (method, _extents) in extents.items() if method == 0}
+    unsupported_provenance = [
+        (item_id, method)
+        for item_id, (itype, _name, content_type) in items.items()
+        if (itype == b"Exif" or _is_xmp_item(itype, content_type))
+        and item_id not in supported_item_ids
+        and (method := extents.get(item_id, (-2, []))[0]) != 0
+    ]
+    for item_id, method in unsupported_provenance:
+        findings.append(f"unsupported external/idat metadata item {item_id} (method={method})")
+        has_ai = True
+
+    for off, ln, itype, content_type in _item_extent_bytes(
+        data, items, extents, (b"Exif", b"mime")
+    ):
+        if itype == b"mime" and not _is_xmp_item(itype, content_type):
+            continue
         payload = data[off : off + ln]
         hits = _contains_any(payload, AI_META_HINTS + C2PA_MARKERS)
-        label = "Exif item" if itype == b"Exif" else "XMP/mime item"
+        label = "Exif item" if itype == b"Exif" else "XMP item"
         if hits:
             has_ai = True
             if any(h.lower() in ("c2pa", "contentcredentials", "jumb", "aigc") for h in hits):
@@ -354,25 +370,35 @@ def neutralize_heif(data: bytes, *, strip_all_metadata: bool = True) -> tuple[by
         buf[box.header_start + 4 : box.header_start + 8] = b"free"
         for i in range(box.payload_start, box.end):
             buf[i] = 0
-        actions.append(f"neutralized '{name}' box -> free (zeroed {box.size - 8} bytes)")
+        actions.append(
+            f"neutralized '{name}' box -> free (zeroed {box.end - box.payload_start} payload bytes)"
+        )
 
     # 2. Exif / XMP item extents.
     items, extents = _provenance_items(bytes(buf))
+    unsupported = [
+        (item_id, extents.get(item_id, (-2, []))[0])
+        for item_id, (itype, _name, content_type) in items.items()
+        if (itype == b"Exif" or _is_xmp_item(itype, content_type))
+        and extents.get(item_id, (-2, []))[0] != 0
+    ]
+    if unsupported:
+        details = ", ".join(f"item {item_id} method={method}" for item_id, method in unsupported)
+        raise ValueError(f"unsupported HEIF metadata extent layout: {details}")
     item_exts = _item_extent_bytes(bytes(buf), items, extents, (b"Exif", b"mime"))
-    for off, ln, itype in item_exts:
-        payload = bytes(buf[off : off + ln])
-        label = "Exif item" if itype == b"Exif" else "XMP/mime item"
-        # HEIF `mime` items are generic. Only XML/XMP payloads are metadata;
-        # never zero an arbitrary MIME item merely because its item_type is mime.
-        if itype == b"mime" and not _is_xmp_item(itype, payload):
+    for off, ln, itype, content_type in item_exts:
+        label = "Exif item" if itype == b"Exif" else "XMP item"
+        # HEIF `mime` items are generic. Only a declared RDF/XML item is XMP;
+        # XML/SVG/application content must never be inferred from payload bytes.
+        if itype == b"mime" and not _is_xmp_item(itype, content_type):
             continue
         if strip_all_metadata:
-            pad = 0x20 if _is_xmp_item(itype, payload) else 0x00
+            pad = 0x20 if _is_xmp_item(itype, content_type) else 0x00
             for i in range(off, off + ln):
                 buf[i] = pad
             actions.append(f"zeroed entire {label} payload ({ln} bytes, offsets preserved)")
         else:
-            pad = 0x20 if _is_xmp_item(itype, payload) else 0x00
+            pad = 0x20 if _is_xmp_item(itype, content_type) else 0x00
             hits = _neutralize_runs(buf, off, ln, pad)
             if hits:
                 actions.append(f"neutralized AI tokens in {label}: {', '.join(hits[:8])}")
