@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -9,7 +10,9 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from rewrite_text import build_prompt, rewrite
+import rewrite_text
+from common import read_bool_env
+from rewrite_text import build_prompt, call_openai_compatible, rewrite
 
 
 def test_build_prompt_paraphrase_contains_text():
