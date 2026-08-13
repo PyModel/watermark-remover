@@ -224,28 +224,36 @@ def _provenance_items(
     return items, extents
 
 
+def _is_c2pa_box(data: bytes, box: Box) -> bool:
+    return box.type in C2PA_BOX_TYPES or (
+        box.type == b"uuid"
+        and box.payload_start + len(C2PA_BMFF_UUID) <= box.end
+        and data[box.payload_start : box.payload_start + len(C2PA_BMFF_UUID)] == C2PA_BMFF_UUID
+    )
+
+
 def _c2pa_boxes(data: bytes) -> list[Box]:
     """JUMBF/C2PA boxes at top level or inside meta."""
     found: list[Box] = []
     for box in _iter_boxes(data, 0, len(data)):
-        if box.type in C2PA_BOX_TYPES:
+        if _is_c2pa_box(data, box):
             found.append(box)
         if box.type == b"meta":
             for child in _iter_boxes(data, box.payload_start + 4, box.end):
-                if child.type in C2PA_BOX_TYPES:
+                if _is_c2pa_box(data, child):
                     found.append(child)
     return found
 
 
 def _item_extent_bytes(
     data: bytes,
-    items: dict[int, tuple[bytes, str]],
+    items: dict[int, tuple[bytes, str, str]],
     extents: dict[int, tuple[int, list[tuple[int, int]]]],
     wanted_types: tuple[bytes, ...],
-) -> list[tuple[int, int, bytes]]:
-    """(offset, length, item_type) for file-offset extents of wanted item types."""
-    out: list[tuple[int, int, bytes]] = []
-    for item_id, (itype, _name) in items.items():
+) -> list[tuple[int, int, bytes, str]]:
+    """(offset, length, item_type, content_type) for editable file extents."""
+    out: list[tuple[int, int, bytes, str]] = []
+    for item_id, (itype, _name, content_type) in items.items():
         if itype not in wanted_types:
             continue
         loc = extents.get(item_id)
