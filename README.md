@@ -386,3 +386,13 @@ MIT, see [LICENSE](LICENSE).
 
 [![Stars](https://img.shields.io/github/stars/Pythoughts-labs/watermark-remover?label=stars&color=e8a33d&labelColor=0f1110)](https://github.com/Pythoughts-labs/watermark-remover)
 [![Visitors](https://hits.sh/github.com/Pythoughts-labs/watermark-remover.svg?label=visitors&color=e8a33d&labelColor=0f1110)](https://hits.sh/github.com/Pythoughts-labs/watermark-remover/)
+
+## Star history
+
+<a href="https://www.star-history.com/#Pythoughts-labs/watermark-remover&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Pythoughts-labs/watermark-remover&type=Date&theme=dark">
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Pythoughts-labs/watermark-remover&type=Date">
+    <img alt="Star history chart for Pythoughts-labs/watermark-remover" src="https://api.star-history.com/svg?repos=Pythoughts-labs/watermark-remover&type=Date">
+  </picture>
+</a>
