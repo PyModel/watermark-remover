@@ -862,7 +862,11 @@ def main() -> int:
         help="External detector template; placeholders: {input} {mask} {prompt}",
     )
     p.add_argument("--dilation", type=int, default=DEFAULT_DILATION_RADIUS)
-    p.add_argument("--backend", choices=("print-plan", "simple", "external"), default="print-plan")
+    p.add_argument(
+        "--backend",
+        choices=("print-plan", "texture", "simple", "external"),
+        default="print-plan",
+    )
     p.add_argument(
         "--command",
         help="External inpainter template; placeholders: {input} {mask} {output} {prompt}",
