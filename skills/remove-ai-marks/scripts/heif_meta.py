@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from common import atomic_write_bytes
 from image_meta import AI_META_HINTS, C2PA_MARKERS, _contains_any
 
 HEIF_BRANDS = {
@@ -30,6 +31,7 @@ HEIF_BRANDS = {
 AVIF_BRANDS = {b"avif", b"avis"}
 
 C2PA_BOX_TYPES = (b"jumb", b"JUMB", b"c2pa", b"C2PA", b"cabx", b"caBX")
+C2PA_BMFF_UUID = bytes.fromhex("d8fec3d61b0e483c92975828877ec481")
 XMP_MIME = b"application/rdf+xml"
 
 
