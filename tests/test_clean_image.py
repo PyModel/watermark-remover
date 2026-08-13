@@ -64,6 +64,28 @@ def test_strip_png_removes_text_c2pa(tmp_path: Path):
     assert b"IEND" in cleaned
 
 
+def test_strip_png_discards_trailing_payload():
+    payload = b"HIDDEN-PAYLOAD"
+
+    cleaned, _ = strip_png(_minimal_png_with_text() + payload)
+
+    assert payload not in cleaned
+    assert cleaned.endswith(_png_chunk(b"IEND", b""))
+
+
+def test_clean_image_discards_trailing_payload_at_public_entry_point(tmp_path: Path):
+    payload = b"HIDDEN-PAYLOAD"
+    src = tmp_path / "input.png"
+    src.write_bytes(_minimal_png_with_text() + payload)
+    dest = tmp_path / "output.png"
+
+    clean_image(src, dest)
+
+    cleaned = dest.read_bytes()
+    assert payload not in cleaned
+    assert cleaned.endswith(_png_chunk(b"IEND", b""))
+
+
 def test_strip_jpeg_removes_app11():
     data = _minimal_jpeg_with_app11()
     cleaned, actions = strip_jpeg(data)

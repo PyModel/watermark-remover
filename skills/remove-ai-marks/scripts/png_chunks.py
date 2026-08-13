@@ -17,12 +17,14 @@ class PNGChunk:
     raw: memoryview
 
 
-def iter_png_chunks(data: bytes) -> Iterator[PNGChunk]:
+def iter_png_chunks(data: bytes, *, allow_trailing_data: bool = False) -> Iterator[PNGChunk]:
     """Yield CRC-validated chunks and require one complete terminal IEND.
 
-    Per-chunk bounds and CRC checks run as chunks are produced. The IHDR and
-    terminal IEND requirements are enforced only when the caller consumes the
-    whole iterator; a caller that stops early gets no whole-file guarantee.
+    Per-chunk bounds and CRC checks run as chunks are produced. The IHDR, IDAT,
+    and terminal IEND requirements are enforced only when the caller consumes
+    the whole iterator; a caller that stops early gets no whole-file guarantee.
+    When allow_trailing_data is true, data after IEND is discarded rather than
+    preserved.
     """
     if not data.startswith(PNG_SIGNATURE):
         raise ValueError("not PNG")
@@ -31,6 +33,8 @@ def iter_png_chunks(data: bytes) -> Iterator[PNGChunk]:
     position = len(PNG_SIGNATURE)
     saw_ihdr = False
     saw_iend = False
+    saw_idat = False
+    idat_interrupted = False
     while position < len(view):
         if len(view) - position < 12:
             raise ValueError("truncated PNG chunk header or payload")
@@ -55,10 +59,16 @@ def iter_png_chunks(data: bytes) -> Iterator[PNGChunk]:
             if length != 13:
                 raise ValueError("PNG IHDR payload must be 13 bytes")
             saw_ihdr = True
+        elif kind == b"IDAT":
+            if idat_interrupted:
+                raise ValueError("PNG IDAT chunks must be consecutive")
+            saw_idat = True
+        elif saw_idat:
+            idat_interrupted = True
         if kind == b"IEND":
             if length != 0:
                 raise ValueError("PNG IEND chunk must be empty")
-            if chunk_end != len(view):
+            if not allow_trailing_data and chunk_end != len(view):
                 raise ValueError("PNG has trailing bytes after IEND")
             saw_iend = True
 
@@ -71,3 +81,5 @@ def iter_png_chunks(data: bytes) -> Iterator[PNGChunk]:
         raise ValueError("PNG has no IHDR chunk")
     if not saw_iend:
         raise ValueError("PNG has no complete IEND chunk")
+    if not saw_idat:
+        raise ValueError("PNG has no IDAT chunk")
