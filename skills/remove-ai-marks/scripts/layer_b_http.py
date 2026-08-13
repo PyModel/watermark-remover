@@ -60,6 +60,7 @@ def _parse_route(route: str) -> str:
         or "?" in route
         or "#" in route
         or "\\" in route
+        or any(segment in {".", ".."} for segment in route.split("/"))
         or any(ord(char) < 32 or ord(char) == 127 for char in route)
     ):
         raise LayerBHTTPError("invalid Layer B HTTP route")
@@ -123,11 +124,23 @@ class SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
         if _origin(original) != _origin(target):
             raise LayerBHTTPError("Layer B HTTP cross-origin redirect refused")
         forwarded = {**req.headers, **req.unredirected_hdrs}
+        method = req.get_method()
+        data = req.data
+        if code in {301, 302, 303} and method == "POST":
+            # RFC 9110 follows these redirects with a bodyless GET; 307/308
+            # preserve the original method and body.
+            method = "GET"
+            data = None
+            forwarded = {
+                name: value
+                for name, value in forwarded.items()
+                if name.lower() not in {"content-length", "content-type"}
+            }
         return urllib.request.Request(
             newurl,
-            data=req.data,
+            data=data,
             headers=forwarded,
-            method=req.get_method(),
+            method=method,
             origin_req_host=req.origin_req_host,
             unverifiable=True,
         )
@@ -216,9 +229,17 @@ def _read_json_object(response: Any, limit: int) -> dict[str, Any]:
         ):
             raise LayerBHTTPError("Layer B HTTP response has unexpected content type")
 
-    raw = response.read(limit + 1)
-    if not isinstance(raw, bytes):
-        raise LayerBHTTPError("Layer B HTTP response body must be bytes")
+    chunks: list[bytes] = []
+    remaining = limit + 1
+    while remaining > 0:
+        chunk = response.read(remaining)
+        if not isinstance(chunk, bytes):
+            raise LayerBHTTPError("Layer B HTTP response body must be bytes")
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    raw = b"".join(chunks)
     if len(raw) > limit:
         raise LayerBHTTPError(f"Layer B HTTP response exceeds safety limit of {limit:,} bytes")
     if declared is not None and declared != len(raw):

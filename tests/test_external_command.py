@@ -117,7 +117,7 @@ def test_parent_exit_cannot_leave_inherited_output_pipes_running(tmp_path: Path)
     marker = tmp_path / "descendant-survived"
     child = (
         "import sys, time; from pathlib import Path; "
-        "time.sleep(1.0); Path(sys.argv[1]).write_text('survived')"
+        "time.sleep(0.7); Path(sys.argv[1]).write_text('survived')"
     )
     parent = (
         "import subprocess, sys; subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]])"
@@ -130,7 +130,9 @@ def test_parent_exit_cannot_leave_inherited_output_pipes_running(tmp_path: Path)
             output_limit=1024,
         )
 
-    time.sleep(0.4)
+    # Outlast the descendant's own delay: a surviving descendant would write the
+    # marker at 0.7s, so 1.0s is the earliest a pass means cleanup worked.
+    time.sleep(1.0)
     assert not marker.exists()
 
 
@@ -139,7 +141,7 @@ def test_normal_exit_allows_minimum_pipe_drain_grace(monkeypatch: pytest.MonkeyP
         sys.executable,
         "-c",
         "import subprocess, sys; subprocess.Popen([sys.executable, '-c', "
-        "'import time; time.sleep(0.25)'])",
+        "'import time; time.sleep(0.05)'])",
     ]
     calls = iter((0.0, 0.0))
     monkeypatch.setattr(
@@ -201,7 +203,7 @@ def test_interrupt_during_reader_start_terminates_command_process_group(
     def interrupt(_reader) -> None:
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(external_command.threading.Thread, "start", interrupt)
+    monkeypatch.setattr(external_command, "_start_thread", interrupt)
     with pytest.raises(KeyboardInterrupt):
         run_command(
             [
@@ -230,3 +232,42 @@ def test_invalid_bounds_fail_before_execution(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         run_command(["not-executed"], timeout=timeout, output_limit=output_limit)
+
+
+@pytest.mark.parametrize(
+    ("argv", "timeout", "output_limit"),
+    [
+        ("echo hi", 1, 1024),
+        (["ok"], True, 1024),
+        (["ok"], "1", 1024),
+        (["ok"], 1, True),
+        (["ok"], 1, 1.0),
+    ],
+)
+def test_invalid_types_raise_type_error_before_execution(argv, timeout, output_limit) -> None:
+    with pytest.raises(TypeError):
+        run_command(argv, timeout=timeout, output_limit=output_limit)
+
+
+def test_read_error_raises_runtime_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FailingReader:
+        def read(self, _size: int) -> bytes:
+            raise OSError("simulated read failure")
+
+        def close(self) -> None:
+            pass
+
+    class FakePopen:
+        pid = 1 << 30  # beyond any pid_max, so cleanup killpg is a no-op
+
+        def __init__(self, *_args, **_kwargs):
+            self.stdout = FailingReader()
+            self.stderr = FailingReader()
+
+        def wait(self, *, timeout: float) -> int:
+            return 0
+
+    monkeypatch.setattr(external_command.subprocess, "Popen", FakePopen)
+
+    with pytest.raises(RuntimeError, match="failed to read external command output"):
+        run_command(["ok"], timeout=5, output_limit=1024)
