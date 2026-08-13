@@ -79,8 +79,13 @@ def _try_c2pa_lib(path: Path) -> dict[str, Any] | None:
     except ImportError:
         return None
     try:
-        reader = c2pa.Reader(str(path))
-        manifest = json.loads(reader.json())
+        reader = c2pa.Reader.try_create(path)
+        if reader is None:
+            return {"available": True, "soft_binding_labels": []}
+        with reader:
+            manifest = json.loads(reader.json())
+            embedded = reader.is_embedded() if hasattr(reader, "is_embedded") else None
+            remote_url = reader.get_remote_url() if hasattr(reader, "get_remote_url") else None
     except Exception as e:
         return {"available": True, "error": str(e)[:300]}
     labels: list[str] = []
@@ -89,18 +94,27 @@ def _try_c2pa_lib(path: Path) -> dict[str, Any] | None:
             label = str(assertion.get("label", ""))
             if "soft" in label.lower() or "remote" in label.lower():
                 labels.append(label)
-    return {"available": True, "soft_binding_labels": labels}
+    return {
+        "available": True,
+        "soft_binding_labels": labels,
+        "embedded": embedded,
+        "remote_url": remote_url,
+    }
 
 
 def inspect_soft_binding(path: Path) -> dict[str, Any]:
-    data = path.read_bytes()
+    data = read_bytes_bounded(path, MAX_SCAN_BYTES, label="soft-binding scan file")
     scan = _scan_bytes(data)
     lib = _try_c2pa_lib(path)
-    if lib and lib.get("soft_binding_labels"):
-        for lbl in lib["soft_binding_labels"]:
-            if lbl not in scan["labels"]:
-                scan["labels"].append(lbl)
-        scan["has_c2pa"] = True
+    if lib:
+        for label in lib.get("soft_binding_labels") or []:
+            if label not in scan["labels"]:
+                scan["labels"].append(label)
+        remote_url = lib.get("remote_url")
+        if remote_url and remote_url not in scan["urls"]:
+            scan["urls"].append(remote_url)
+        if lib.get("soft_binding_labels") or remote_url:
+            scan["has_c2pa"] = True
 
     found = bool(scan["has_c2pa"] and (scan["labels"] or scan["urls"]))
     return {
