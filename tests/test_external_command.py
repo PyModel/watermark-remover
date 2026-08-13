@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -116,7 +117,7 @@ def test_parent_exit_cannot_leave_inherited_output_pipes_running(tmp_path: Path)
     marker = tmp_path / "descendant-survived"
     child = (
         "import sys, time; from pathlib import Path; "
-        "time.sleep(0.3); Path(sys.argv[1]).write_text('survived')"
+        "time.sleep(1.0); Path(sys.argv[1]).write_text('survived')"
     )
     parent = (
         "import subprocess, sys; subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]])"
@@ -131,6 +132,25 @@ def test_parent_exit_cannot_leave_inherited_output_pipes_running(tmp_path: Path)
 
     time.sleep(0.4)
     assert not marker.exists()
+
+
+def test_normal_exit_allows_minimum_pipe_drain_grace(monkeypatch: pytest.MonkeyPatch) -> None:
+    command = [
+        sys.executable,
+        "-c",
+        "import subprocess, sys; subprocess.Popen([sys.executable, '-c', "
+        "'import time; time.sleep(0.25)'])",
+    ]
+    calls = iter((0.0, 0.0))
+    monkeypatch.setattr(
+        external_command,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(calls, 5.0)),
+    )
+
+    result = run_command(command, timeout=5.0, output_limit=4096)
+
+    assert result.returncode == 0
 
 
 @pytest.mark.skipif(os.name != "posix", reason="process-group semantics are POSIX-specific")

@@ -10,6 +10,8 @@ import sys
 import zlib
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
 
@@ -236,43 +238,43 @@ def test_clean_residual_marker_exit_1(tmp_path: Path):
     assert "residual" in r.stderr
 
 
-def test_image_tsapa_flag_does_not_resolve_text_backend(tmp_path: Path):
-    for name, remote in (("unset", False), ("remote", True)):
-        source = tmp_path / f"{name}.png"
-        source.write_bytes(_png())
-        destination = tmp_path / f"{name}.cleaned.png"
-        env = os.environ.copy()
-        for key in (
-            "WATERMARKS_REWRITE_BACKEND",
-            "WATERMARKS_REWRITE_MODEL",
-            "WATERMARKS_REWRITE_BASE_URL",
-            "WATERMARKS_REWRITE_API_KEY",
-        ):
-            env.pop(key, None)
-        if remote:
-            env.update(
-                WATERMARKS_REWRITE_BACKEND="openai-compatible",
-                WATERMARKS_REWRITE_MODEL="must-not-be-used",
-                WATERMARKS_REWRITE_BASE_URL="https://example.test",
-            )
-
-        result = subprocess.run(
-            [
-                sys.executable,
-                str(SCRIPTS / "clean_file.py"),
-                str(source),
-                "-o",
-                str(destination),
-                "--tsapa",
-            ],
-            capture_output=True,
-            text=True,
-            env=env,
+@pytest.mark.parametrize(("name", "remote"), [("unset", False), ("remote", True)])
+def test_image_tsapa_flag_does_not_resolve_text_backend(tmp_path: Path, name: str, remote: bool):
+    source = tmp_path / f"{name}.png"
+    source.write_bytes(_png())
+    destination = tmp_path / f"{name}.cleaned.png"
+    env = os.environ.copy()
+    for key in (
+        "WATERMARKS_REWRITE_BACKEND",
+        "WATERMARKS_REWRITE_MODEL",
+        "WATERMARKS_REWRITE_BASE_URL",
+        "WATERMARKS_REWRITE_API_KEY",
+    ):
+        env.pop(key, None)
+    if remote:
+        env.update(
+            WATERMARKS_REWRITE_BACKEND="openai-compatible",
+            WATERMARKS_REWRITE_MODEL="must-not-be-used",
+            WATERMARKS_REWRITE_BASE_URL="https://example.test",
         )
 
-        assert result.returncode == 0, result.stderr
-        assert destination.is_file()
-        assert "rewrite base URL" not in result.stderr
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS / "clean_file.py"),
+            str(source),
+            "-o",
+            str(destination),
+            "--tsapa",
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert destination.is_file()
+    assert "rewrite base URL" not in result.stderr
 
 
 def test_image_ignores_invalid_text_perturb_policy(tmp_path: Path):

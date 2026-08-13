@@ -48,6 +48,11 @@ def test_iterator_rejects_crc_mismatch() -> None:
         list(iter_png_chunks(bytes(data)))
 
 
+def test_iterator_rejects_missing_signature() -> None:
+    with pytest.raises(ValueError, match="not PNG"):
+        list(iter_png_chunks(b"\xff\xd8\xff\xd9" + _chunk(b"IHDR", _ihdr())))
+
+
 def test_iterator_rejects_truncated_chunk() -> None:
     data = PNG_SIGNATURE + struct.pack(">I", 20) + b"tEXt" + b"short"
 

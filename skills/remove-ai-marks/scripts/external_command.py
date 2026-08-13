@@ -124,8 +124,9 @@ def run_command(
             timed_out = True
 
         if not timed_out:
+            drain_deadline = time.monotonic() + max(_TERMINATION_GRACE, deadline - time.monotonic())
             for reader in readers:
-                reader.join(max(0.0, deadline - time.monotonic()))
+                reader.join(max(0.0, drain_deadline - time.monotonic()))
             timed_out = any(reader.is_alive() for reader in readers)
     finally:
         if process is not None:

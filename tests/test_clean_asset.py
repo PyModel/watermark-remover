@@ -15,6 +15,7 @@ sys.path.insert(0, str(SCRIPTS))
 import clean_asset as clean_asset_module
 import rewrite_text
 from clean_asset import CleanPlan, TextCleanPlan, clean_asset
+from morphomod import VisiblePlan
 from rewrite_text import RewritePlan
 
 
@@ -122,6 +123,23 @@ def test_clean_asset_raises_failures_without_serializing_them(tmp_path: Path) ->
         clean_asset(source, destination, CleanPlan())
 
     assert not destination.exists()
+
+
+def test_clean_asset_preflights_derived_mask_output_alias(tmp_path: Path) -> None:
+    source = tmp_path / "a.mask.pgm"
+    source.write_bytes(b"preserve")
+
+    with pytest.raises(ValueError, match="mask output aliases input"):
+        clean_asset(
+            source,
+            tmp_path / "a.pgm",
+            CleanPlan(
+                forced_kind="image",
+                visible=VisiblePlan(box=(0, 0, 1, 1), backend="texture"),
+            ),
+        )
+
+    assert source.read_bytes() == b"preserve"
 
 
 def test_clean_plans_are_immutable() -> None:

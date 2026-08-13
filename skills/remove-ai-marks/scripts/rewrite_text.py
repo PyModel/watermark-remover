@@ -146,13 +146,13 @@ class RewritePlan:
     ) -> RewritePlan:
         backend = os.environ.get("WATERMARKS_REWRITE_BACKEND", "print-prompt")
         if backend not in ("ollama", "openai-compatible"):
-            raise ValueError(
+            raise RewriteConfigurationError(
                 "--tsapa requires a live backend; set "
                 "WATERMARKS_REWRITE_BACKEND=ollama|openai-compatible"
             )
         model = os.environ.get("WATERMARKS_REWRITE_MODEL")
         if not model:
-            raise ValueError("--tsapa requires WATERMARKS_REWRITE_MODEL")
+            raise RewriteConfigurationError("--tsapa requires WATERMARKS_REWRITE_MODEL")
         return cls(
             backend=backend,
             model=model,

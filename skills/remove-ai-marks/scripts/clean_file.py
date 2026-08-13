@@ -200,7 +200,8 @@ def _plan_work(
 
         if plan.visible is not None:
             mask_output = plan.visible.mask_output
-            assert mask_output is not None
+            if mask_output is None:
+                raise ValueError("visible plan is missing a mask output path")
             if mask_output.is_symlink():
                 raise ValueError(f"mask output is a symlink: {mask_output}")
             if any(paths_alias(mask_output, source) for source in all_inputs):

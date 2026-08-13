@@ -143,11 +143,23 @@ def _validate_operation(path: Path, dest: Path, plan: CleanPlan) -> None:
         if (
             plan.visible is not None
             and plan.visible.mask_output is not None
+            and paths_alias(plan.visible.mask_output, path)
+        ):
+            raise ValueError(f"mask output aliases input: {plan.visible.mask_output}")
+        if (
+            plan.visible is not None
+            and plan.visible.mask_output is not None
             and paths_alias(plan.visible.mask_output, backup)
         ):
             raise ValueError(f"mask output aliases backup: {plan.visible.mask_output}")
     else:
         validate_output_path(path, dest)
+        if (
+            plan.visible is not None
+            and plan.visible.mask_output is not None
+            and paths_alias(plan.visible.mask_output, path)
+        ):
+            raise ValueError(f"mask output aliases input: {plan.visible.mask_output}")
         if (
             plan.visible is not None
             and plan.visible.mask_output is not None
@@ -185,15 +197,9 @@ def _clean_image_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
     soft = inspect_soft_binding(path) if plan.inspect_soft_binding else None
     visible_report = None
     if plan.visible is not None:
-        visible_plan = plan.visible
-        if visible_plan.mask_output is None:
-            visible_plan = replace(
-                visible_plan,
-                mask_output=dest.with_name(f"{dest.stem}.mask.pgm"),
-            )
         with tempfile.TemporaryDirectory(prefix="wm-visible-") as temp_dir:
             visible_dest = Path(temp_dir) / f"visible{path.suffix}"
-            visible_report = remove_visible(path, visible_dest, visible_plan)
+            visible_report = remove_visible(path, visible_dest, plan.visible)
             if visible_report["status"] != "completed":
                 raise RuntimeError("visible pipeline did not produce an output")
             if plan.in_place:
@@ -227,6 +233,14 @@ def _clean_container_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResu
 
 def clean_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
     """Clean one asset; raise failures and leave presentation to the caller."""
+    if plan.visible is not None and plan.visible.mask_output is None:
+        plan = replace(
+            plan,
+            visible=replace(
+                plan.visible,
+                mask_output=dest.with_name(f"{dest.stem}.mask.pgm"),
+            ),
+        )
     _validate_operation(path, dest, plan)
     kind = classify_asset(path, forced_kind=plan.forced_kind)
     if plan.visible is not None and kind != "image":

@@ -277,6 +277,9 @@ def test_cli_preserves_missing_model_exit_message(tmp_path: Path):
 def test_cli_rejects_non_positive_timeout_without_traceback(tmp_path: Path):
     source = tmp_path / "source.txt"
     source.write_text("preserve", encoding="utf-8")
+    env = os.environ.copy()
+    for name in ("WATERMARKS_REWRITE_BACKEND", "WATERMARKS_REWRITE_MODEL"):
+        env.pop(name, None)
     result = subprocess.run(
         [
             sys.executable,
@@ -287,6 +290,7 @@ def test_cli_rejects_non_positive_timeout_without_traceback(tmp_path: Path):
         ],
         capture_output=True,
         text=True,
+        env=env,
     )
 
     assert result.returncode == 1
@@ -296,6 +300,9 @@ def test_cli_rejects_non_positive_timeout_without_traceback(tmp_path: Path):
 def test_cli_rejects_output_alias(tmp_path: Path):
     source = tmp_path / "source.txt"
     source.write_text("preserve", encoding="utf-8")
+    env = os.environ.copy()
+    for name in ("WATERMARKS_REWRITE_BACKEND", "WATERMARKS_REWRITE_MODEL"):
+        env.pop(name, None)
     result = subprocess.run(
         [
             sys.executable,
@@ -306,6 +313,7 @@ def test_cli_rejects_output_alias(tmp_path: Path):
         ],
         capture_output=True,
         text=True,
+        env=env,
     )
     assert result.returncode == 2
     assert source.read_text(encoding="utf-8") == "preserve"

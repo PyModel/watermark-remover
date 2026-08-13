@@ -60,3 +60,34 @@ def test_select_inputs_marks_single_directory_match_as_batch(tmp_path: Path) -> 
     assert len(selection.items) == 1
     assert selection.items[0].path == child
     assert selection.items[0].relative == Path("only.txt")
+
+
+def test_select_inputs_excludes_roots(tmp_path: Path) -> None:
+    source = tmp_path / "input"
+    excluded = source / "excluded"
+    excluded.mkdir(parents=True)
+    included_file = source / "included.txt"
+    excluded_file = excluded / "excluded.txt"
+    included_file.write_text("included", encoding="utf-8")
+    excluded_file.write_text("excluded", encoding="utf-8")
+
+    selection = select_inputs(
+        [source],
+        recursive=True,
+        pattern="*",
+        extensions={".txt"},
+        excluded_roots=[excluded],
+    )
+
+    assert included_file in [item.path for item in selection.items]
+    assert excluded_file not in [item.path for item in selection.items]
+
+
+def test_select_inputs_rejects_parent_traversal_pattern(tmp_path: Path) -> None:
+    source = tmp_path / "input"
+    source.mkdir()
+
+    with pytest.raises(
+        ValueError, match="glob must be a non-empty relative pattern without '\\.\\.'"
+    ):
+        select_inputs([source], recursive=False, pattern="../*", extensions={".txt"})

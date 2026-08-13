@@ -204,6 +204,15 @@ def test_response_rejects_invalid_content_length():
         call(opener)
 
 
+def test_response_rejects_conflicting_content_length_values():
+    response = FakeResponse(b'{"ok":true}', content_length=11)
+    response.headers["Content-Length"] = "12"
+    opener = RecordingOpener(response)
+
+    with pytest.raises(LayerBHTTPError, match="conflicting Content-Length"):
+        call(opener)
+
+
 def test_response_rejects_huge_numeric_content_length_without_integer_conversion():
     opener = RecordingOpener(FakeResponse(b'{"ok":true}', content_length="9" * 5000))
 

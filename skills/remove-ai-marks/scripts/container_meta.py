@@ -102,7 +102,7 @@ def detect_container_format(path: Path, data: bytes | None = None) -> str:
                         return "docx"
                     if "content.xml" in names and "meta.xml" in names:
                         return "odt"
-            except (zipfile.BadZipFile, ValueError, RuntimeError):
+            except (zipfile.BadZipFile, ValueError, RuntimeError, OSError):
                 pass
     return "unknown"
 

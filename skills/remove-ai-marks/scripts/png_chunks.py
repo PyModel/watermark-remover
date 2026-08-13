@@ -18,7 +18,12 @@ class PNGChunk:
 
 
 def iter_png_chunks(data: bytes) -> Iterator[PNGChunk]:
-    """Yield CRC-validated chunks and require one complete terminal IEND."""
+    """Yield CRC-validated chunks and require one complete terminal IEND.
+
+    Per-chunk bounds and CRC checks run as chunks are produced. The IHDR and
+    terminal IEND requirements are enforced only when the caller consumes the
+    whole iterator; a caller that stops early gets no whole-file guarantee.
+    """
     if not data.startswith(PNG_SIGNATURE):
         raise ValueError("not PNG")
 

@@ -10,6 +10,7 @@ SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 import image_meta
+from conftest import fake_command_result
 
 MANIFEST_OUTPUT = """{
   "active_manifest": "urn:c2pa:0000",
@@ -23,17 +24,6 @@ MANIFEST_OUTPUT = """{
 """
 
 
-class _Completed:
-    def __init__(self, returncode: int, stdout: str = "", stderr: str = "") -> None:
-        self.returncode = returncode
-        self.stdout = stdout.encode()
-        self.stderr = stderr.encode()
-        self.stdout_text = stdout
-        self.stderr_text = stderr
-        self.stdout_truncated = False
-        self.stderr_truncated = False
-
-
 def _fake_c2patool(monkeypatch, output: str, returncode: int, on_stderr: bool = False):
     """Pretend c2patool exists and emits `output`; hide every other tool."""
 
@@ -42,8 +32,8 @@ def _fake_c2patool(monkeypatch, output: str, returncode: int, on_stderr: bool = 
 
     def fake_run(cmd, **kwargs):
         if on_stderr:
-            return _Completed(returncode, stderr=output)
-        return _Completed(returncode, stdout=output)
+            return fake_command_result(returncode, stderr=output)
+        return fake_command_result(returncode, stdout=output)
 
     monkeypatch.setattr(image_meta, "which", fake_which)
     monkeypatch.setattr(image_meta.external_command, "run_command", fake_run)

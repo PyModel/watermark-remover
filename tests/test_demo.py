@@ -59,6 +59,13 @@ def test_demo_routes_unknown_suffix_container_from_content(tmp_path: Path):
     assert prompt == "Layer B is available only for plain-text uploads."
 
 
+def test_demo_classification_failure_uses_error_report(tmp_path: Path):
+    report, output, _prompt = clean_upload(tmp_path / "ghost.zzz", False, False, "paraphrase")
+
+    assert report.startswith("**Error cleaning")
+    assert output is None
+
+
 def test_demo_image_handler(tmp_path: Path):
     src = tmp_path / "image.png"
     src.write_bytes(encode_png(Raster(2, 2, 3, bytearray([1, 2, 3] * 4))))

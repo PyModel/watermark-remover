@@ -67,6 +67,8 @@ def select_inputs(
     """Validate sources, discover supported files, and determine batch mode."""
     _validate_pattern(pattern)
     roots = tuple(sources)
+    if not roots:
+        raise ValueError("no input sources")
     invalid = [
         source
         for source in roots
@@ -75,9 +77,6 @@ def select_inputs(
     if invalid:
         rendered = ", ".join(str(source) for source in invalid)
         raise ValueError(f"not a regular file or directory: {rendered}")
-    if not roots:
-        raise ValueError("no input sources")
-
     multiple_roots = len(roots) > 1
     allowed = {extension.lower() for extension in extensions}
     excluded = tuple(root.resolve() for root in excluded_roots)

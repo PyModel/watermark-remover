@@ -8,7 +8,8 @@ import subprocess
 import sys
 import zlib
 from pathlib import Path
-from types import SimpleNamespace
+
+from conftest import fake_command_result
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
@@ -145,13 +146,7 @@ def test_exiftool_nonzero_is_logged_as_failure(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
         image_meta.external_command,
         "run_command",
-        lambda *args, **kwargs: SimpleNamespace(
-            returncode=7,
-            stdout_text="",
-            stderr_text="denied",
-            stdout_truncated=False,
-            stderr_truncated=False,
-        ),
+        lambda *args, **kwargs: fake_command_result(7, stderr="denied"),
     )
     report = clean_image(src, dest)
     assert any("exiftool failed (rc=7)" in action for action in report["actions"])

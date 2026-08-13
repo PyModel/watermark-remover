@@ -33,8 +33,8 @@ def clean_upload(file_obj, keep_non_ai: bool, layer_b: bool, strength: str):
     workdir = Path(tempfile.mkdtemp(prefix="wmr-"))
     dest = workdir / f"{src.stem}.cleaned{src.suffix}"
 
-    kind = classify_asset(src)
     try:
+        kind = classify_asset(src)
         result = clean_asset(
             src, dest, CleanPlan(forced_kind=kind, strip_all_metadata=not keep_non_ai)
         ).to_dict()
