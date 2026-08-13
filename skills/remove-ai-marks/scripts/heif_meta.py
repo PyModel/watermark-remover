@@ -417,8 +417,7 @@ def clean_heif(
     data = path.read_bytes()
     fmt = detect_heif(data)
     cleaned, actions = neutralize_heif(data, strip_all_metadata=strip_all_metadata)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(cleaned)
+    atomic_write_bytes(dest, cleaned)
 
     has_c2pa, has_ai, post_findings, _ = inspect_heif(cleaned)
     return {
