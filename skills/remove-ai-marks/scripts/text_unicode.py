@@ -186,9 +186,7 @@ _BIDI_CPS: frozenset[int] = frozenset(
 )
 
 # Zero-width family (common edit-based carriers)
-_ZW_FAMILY: frozenset[int] = frozenset(
-    {0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF, 0x180E}
-)
+_ZW_FAMILY: frozenset[int] = frozenset({0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF, 0x180E})
 
 
 def _is_strip_cp(cp: int) -> bool:
@@ -197,9 +195,7 @@ def _is_strip_cp(cp: int) -> bool:
     if cp in _VS_SUPPLEMENT:
         return True
     # Tag characters used in some stego schemes (U+E0001–U+E007F)
-    if 0xE0001 <= cp <= 0xE007F:
-        return True
-    return False
+    return 0xE0001 <= cp <= 0xE007F
 
 
 def _strip_kind(cp: int) -> str:
@@ -298,10 +294,71 @@ def inspect_text(text: str, *, aggressive: bool = False) -> TextInspectReport:
         "Layer A only: invisible/format Unicode and space homoglyphs (edit-based carriers).",
         "Statistical (token-sampling) watermarks are not detectable here; use Layer B rewrite.",
         "Inspect kinds: strip, bidi, tag_chars, variation_selector, zwj_family, space, confusable, other_cf.",
+        "Default clean preserves contextually meaningful joiners/selectors/math and balanced bidi controls; aggressive mode can strip them.",
     ]
     if not hits:
         notes.append("No suspicious Unicode characters found.")
     return TextInspectReport(length=len(text), suspicious_total=total, hits=hits, notes=notes)
+
+
+_BIDI_EMBED_OPEN = frozenset({0x202A, 0x202B, 0x202D, 0x202E})
+_BIDI_ISOLATE_OPEN = frozenset({0x2066, 0x2067, 0x2068})
+
+
+def _balanced_bidi_indices(text: str) -> set[int]:
+    """Indices of properly paired bidi embedding/isolate controls."""
+    stack: list[tuple[str, int]] = []
+    balanced: set[int] = set()
+    for i, ch in enumerate(text):
+        cp = ord(ch)
+        if cp in _BIDI_EMBED_OPEN:
+            stack.append(("embed", i))
+        elif cp in _BIDI_ISOLATE_OPEN:
+            stack.append(("isolate", i))
+        elif (cp == 0x202C and stack and stack[-1][0] == "embed") or (
+            cp == 0x2069 and stack and stack[-1][0] == "isolate"
+        ):  # PDF
+            _, start = stack.pop()
+            balanced.update((start, i))
+    return balanced
+
+
+def _visible_neighbor(ch: str) -> bool:
+    return bool(ch) and not ch.isspace() and not unicodedata.category(ch).startswith("C")
+
+
+def _contextually_meaningful(text: str, i: int, balanced_bidi: set[int]) -> bool:
+    """Conservative preservation for format characters with documented semantics."""
+    cp = ord(text[i])
+    prev = text[i - 1] if i else ""
+    nxt = text[i + 1] if i + 1 < len(text) else ""
+
+    if i in balanced_bidi:
+        return True
+    # ZWNJ/ZWJ and invisible math/word operators are meaningful between
+    # visible characters (scripts, emoji sequences, mathematical notation).
+    if cp in {0x200C, 0x200D, 0x2060, 0x2061, 0x2062, 0x2063, 0x2064}:
+        return _visible_neighbor(prev) and _visible_neighbor(nxt)
+    # Standard + supplementary variation selectors and Mongolian selectors
+    # modify the immediately preceding base character.
+    if cp in _VS_SUPPLEMENT or 0xFE00 <= cp <= 0xFE0F or 0x180B <= cp <= 0x180D:
+        return _visible_neighbor(prev)
+    # Combining grapheme joiner is meaningful next to combining marks.
+    if cp == 0x034F:
+        return (bool(prev) and unicodedata.category(prev).startswith("M")) or (
+            bool(nxt) and unicodedata.category(nxt).startswith("M")
+        )
+    # LRM/RLM/ALM can disambiguate a transition between strong LTR/RTL runs.
+    if cp in {0x061C, 0x200E, 0x200F} and _visible_neighbor(prev) and _visible_neighbor(nxt):
+        left = unicodedata.bidirectional(prev)
+        right = unicodedata.bidirectional(nxt)
+        rtl = {"R", "AL", "AN"}
+        ltr = {"L", "EN"}
+        return (left in rtl and right in ltr) or (left in ltr and right in rtl)
+    # Deprecated but still meaningful in Mongolian text.
+    if cp == 0x180E:
+        return "MONGOLIAN" in unicodedata.name(prev, "") or "MONGOLIAN" in unicodedata.name(nxt, "")
+    return False
 
 
 def clean_text(
@@ -310,15 +367,27 @@ def clean_text(
     nfkc: bool = False,
     aggressive_homoglyphs: bool = False,
     normalize_spaces: bool = True,
+    preserve_semantic: bool = True,
 ) -> tuple[str, dict]:
-    """Return cleaned text and a stats dict."""
+    """Return cleaned text and stats.
+
+    preserve_semantic keeps contextual ZWJ/ZWNJ, variation selectors, invisible
+    math operators, and balanced bidi controls. Set False only for an aggressive
+    forensic scrub that accepts rendering/meaning changes.
+    """
     removed: Counter[str] = Counter()
     replaced: Counter[str] = Counter()
+    preserved: Counter[str] = Counter()
     out_chars: list[str] = []
+    balanced_bidi = _balanced_bidi_indices(text) if preserve_semantic else set()
 
-    for ch in text:
+    for i, ch in enumerate(text):
         cp = ord(ch)
         if _is_strip_cp(cp):
+            if preserve_semantic and _contextually_meaningful(text, i, balanced_bidi):
+                preserved[_char_label(ch)] += 1
+                out_chars.append(ch)
+                continue
             removed[_char_label(ch)] += 1
             continue
         if normalize_spaces and cp in SPACE_HOMOGLYPHS:
@@ -349,8 +418,10 @@ def clean_text(
         "output_length": len(result),
         "removed": dict(removed),
         "replaced": dict(replaced),
+        "preserved_semantic": dict(preserved),
         "removed_count": sum(removed.values()),
         "replaced_count": sum(v for k, v in replaced.items() if k != "NFKC_normalize"),
+        "preserved_count": sum(preserved.values()),
     }
     return result, stats
 

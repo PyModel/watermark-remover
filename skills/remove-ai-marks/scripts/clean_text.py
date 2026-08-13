@@ -10,8 +10,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from common import cleaned_path, eprint, read_text_input, write_text_output  # noqa: E402
-from text_unicode import clean_text  # noqa: E402
+from common import cleaned_path, eprint, read_text_input, write_text_output
+from text_unicode import clean_text
 
 
 def main() -> int:
@@ -29,6 +29,11 @@ def main() -> int:
         action="store_true",
         help="Do not rewrite exotic spaces to U+0020",
     )
+    p.add_argument(
+        "--strip-semantic-format",
+        action="store_true",
+        help="Aggressive: also strip contextual ZWJ/ZWNJ, variation selectors, math and balanced bidi controls",
+    )
     p.add_argument("--stats", action="store_true", help="Print stats JSON to stderr")
     p.add_argument(
         "--in-place",
@@ -43,6 +48,7 @@ def main() -> int:
         nfkc=args.nfkc,
         aggressive_homoglyphs=args.aggressive_homoglyphs,
         normalize_spaces=not args.no_normalize_spaces,
+        preserve_semantic=not args.strip_semantic_format,
     )
 
     out = args.output
@@ -52,7 +58,7 @@ def main() -> int:
             return 2
         src = Path(args.path)
         bak = src.with_suffix(src.suffix + ".bak")
-        bak.write_text(text, encoding="utf-8")
+        bak.write_bytes(src.read_bytes())  # byte-exact, including invalid UTF-8
         out = str(src)
     elif out is None and args.path not in (None, "-"):
         out = str(cleaned_path(Path(args.path)))
@@ -64,6 +70,7 @@ def main() -> int:
     else:
         eprint(
             f"removed={stats['removed_count']} replaced={stats['replaced_count']} "
+            f"preserved={stats['preserved_count']} "
             f"len {stats['input_length']}->{stats['output_length']}"
         )
     return 0

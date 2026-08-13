@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -9,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from text_unicode import clean_text, inspect_text  # noqa: E402
+from text_unicode import clean_text, inspect_text
 
 
 def test_strips_zero_width_and_soft_hyphen():
@@ -52,11 +53,58 @@ def test_inspect_bidi():
     assert "\u202e" not in cleaned
 
 
+def test_preserves_contextual_zwj_and_variation_selector_by_default():
+    raw = "👩‍💻 ❤️"
+    cleaned, stats = clean_text(raw)
+    assert cleaned == raw
+    assert stats["preserved_count"] == 2  # ZWJ + VS16
+
+    aggressive, _ = clean_text(raw, preserve_semantic=False)
+    assert "‍" not in aggressive
+    assert "️" not in aggressive
+
+
+def test_preserves_script_zwnj_and_balanced_bidi():
+    persian = "می‌روم"  # meaningful ZWNJ
+    bidi = "\u202babc\u202c"  # balanced RLE/PDF
+    cleaned, stats = clean_text(f"{persian} {bidi}")
+    assert cleaned == f"{persian} {bidi}"
+    assert stats["preserved_count"] == 3
+
+
+def test_removes_orphan_joiner_and_unbalanced_bidi():
+    raw = "\u200dstart ab\u202eef"
+    cleaned, _ = clean_text(raw)
+    assert "\u200d" not in cleaned
+    assert "\u202e" not in cleaned
+
+
+def test_preserves_invisible_math_operator_in_context():
+    raw = "f\u2061(x)"
+    cleaned, stats = clean_text(raw)
+    assert cleaned == raw
+    assert stats["preserved_count"] == 1
+
+
 def test_clean_preserves_normal_text():
     raw = "Normal ASCII and café — fine."
     cleaned, stats = clean_text(raw)
     assert cleaned == raw
     assert stats["removed_count"] == 0
+
+
+def test_cli_roundtrips_invalid_utf8_and_backup_is_byte_exact(tmp_path: Path):
+    src = tmp_path / "mixed.txt"
+    original = b"abc\xffdef\xe2\x80\x8b"
+    src.write_bytes(original)
+    script = SCRIPTS / "clean_text.py"
+    r = subprocess.run(
+        [sys.executable, str(script), str(src), "--in-place"],
+        capture_output=True,
+    )
+    assert r.returncode == 0, r.stderr
+    assert src.with_suffix(".txt.bak").read_bytes() == original
+    assert src.read_bytes() == b"abc\xffdef"
 
 
 def test_aggressive_confusable():

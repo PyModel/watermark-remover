@@ -26,7 +26,7 @@ def write_text_output(text: str, path: str | None) -> None:
         return
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(text, encoding="utf-8")
+    out.write_text(text, encoding="utf-8", errors="surrogateescape")
 
 
 def emit_json(data: Any) -> None:
