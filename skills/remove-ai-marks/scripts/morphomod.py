@@ -209,7 +209,7 @@ def refine_mask(mask: Mask, radius: int = DEFAULT_DILATION_RADIUS) -> Mask:
 
 
 def read_pgm(path: Path) -> Mask:
-    raw = path.read_bytes()
+    raw = _read_bounded(path)
     if not raw.startswith(b"P5"):
         raise ValueError("only binary PGM (P5) masks are supported")
     pos = 2
@@ -247,8 +247,10 @@ def read_pgm(path: Path) -> Mask:
 
 
 def write_pgm(mask: Mask, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(f"P5\n{mask.width} {mask.height}\n255\n".encode() + bytes(mask.data))
+    atomic_write_bytes(
+        path,
+        f"P5\n{mask.width} {mask.height}\n255\n".encode() + bytes(mask.data),
+    )
 
 
 def _png_chunk(kind: bytes, payload: bytes) -> bytes:
@@ -345,7 +347,7 @@ def encode_png(raster: Raster) -> bytes:
 def load_mask(path: Path) -> Mask:
     if path.suffix.lower() == ".pgm":
         return read_pgm(path)
-    raster = decode_png(path.read_bytes())
+    raster = decode_png(_read_bounded(path))
     data = bytearray(raster.width * raster.height)
     for i in range(raster.width * raster.height):
         start = i * raster.channels
