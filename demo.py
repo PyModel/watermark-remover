@@ -5,9 +5,9 @@
     python3 demo.py            # serves on http://127.0.0.1:7860
 
 Text runs Layer A (deterministic Unicode scrub). Images/containers run the
-metadata strippers. Layer B shows the rewrite prompt (print-prompt backend —
-no model required); point WATERMARKS_REWRITE_* env vars at a local model to
-make it live.
+metadata strippers. For plain-text uploads, Layer B emits a rewrite prompt
+(print-prompt backend; no model or network call). Binary document rewriting is
+intentionally unavailable because it requires format-aware text extraction.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parent
 SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+from common import atomic_write_text
 from container_meta import clean_container, detect_container_format
 from image_meta import clean_image
 from image_meta import detect_format as detect_image_format
@@ -58,7 +59,7 @@ def clean_upload(file_obj, keep_non_ai: bool, layer_b: bool, strength: str):
         if kind == "text":
             text = src.read_text(encoding="utf-8", errors="surrogateescape")
             cleaned, stats = clean_text(text)
-            dest.write_text(cleaned, encoding="utf-8", errors="surrogateescape")
+            atomic_write_text(dest, cleaned)
             result = {
                 "kind": "text",
                 "input": str(src),
@@ -76,11 +77,8 @@ def clean_upload(file_obj, keep_non_ai: bool, layer_b: bool, strength: str):
         return f"**Error cleaning {src.name}:** `{e}`", None, ""
 
     prompt = ""
-    if layer_b and kind in ("text", "container"):
-        try:
-            body = dest.read_text(encoding="utf-8", errors="surrogateescape")
-        except Exception:
-            body = ""
+    if layer_b and kind == "text":
+        body = dest.read_text(encoding="utf-8", errors="surrogateescape")
         if body.strip():
             prompt, _ = rewrite(
                 body,
@@ -94,6 +92,8 @@ def clean_upload(file_obj, keep_non_ai: bool, layer_b: bool, strength: str):
                 timeout=120.0,
                 layer_a_after=False,
             )
+    elif layer_b:
+        prompt = "Layer B is available only for plain-text uploads."
 
     report = (
         f"**Kind:** `{result.get('kind')}`  \n"
