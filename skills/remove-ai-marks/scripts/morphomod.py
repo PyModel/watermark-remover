@@ -771,6 +771,19 @@ def remove_visible(
         status = "mask-ready"
         output = None
         actions.append("no inpainting run (print-plan backend)")
+    elif backend == "texture":
+        if raster is None:
+            raise ValueError("texture backend supports PNG only; use --backend external")
+        if dest is None:
+            raise ValueError("-o/--output required for an inpainting backend")
+        restored, match = texture_patch_inpaint(raster, refined, feather=0)
+        atomic_write_bytes(dest, encode_png(restored))
+        status, output = "completed", str(dest)
+        actions.append(
+            "texture-patch inpaint "
+            f"source=({match.x},{match.y},{match.width},{match.height}) "
+            f"edge_mse={match.score:.2f}"
+        )
     elif backend == "simple":
         if raster is None:
             raise ValueError("simple backend supports PNG only; use --backend external")
