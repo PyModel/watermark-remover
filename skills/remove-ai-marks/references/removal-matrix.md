@@ -2,37 +2,42 @@
 
 | Target | Method | Script / action | Side effects | Verifiable today? |
 | --- | --- | --- | --- | --- |
-| Invisible Unicode / exotic spaces / bidi / tags | Strip / normalize | `inspect_text.py`, `clean_text.py`, `clean_file.py` | Minimal | Yes (codepoint report) |
-| Statistical text watermark (SynthID-class / Kirchenbauer) | Multi-pass paraphrase / back-translate / structural | Agent Layer B + optional `rewrite_text.py` | Meaning/style drift | No without vendor key/detector |
-| C2PA on PNG/JPEG | Drop APP11 / text chunks / exiftool | `clean_image.py` | Loses provenance metadata | Yes |
-| SVG metadata / XMP | Drop `<metadata>`, xmpmeta | `clean_file.py` | Loses SVG metadata | Yes (re-inspect) |
-| PDF XMP / info | exiftool `-all=` preferred | `clean_file.py` | Loses PDF metadata; degraded without exiftool | Partial |
-| DOCX props / customXml | Rewrite OOXML zip | `clean_file.py` | Loses doc properties | Yes |
-| ODT meta:generator | Scrub `meta.xml` | `clean_file.py` | Loses generator tag | Yes |
-| HTML generator / JSON-LD provenance | Strip tags | `clean_file.py` | Loses meta | Yes |
-| Markdown AI frontmatter keys | Drop keys | `clean_file.py` | Loses YAML keys | Yes |
-| Pixel / audio / video watermarks (SynthID-media) | — | Out of scope | — | — |
-| C2PA soft binding (in-content link to manifest) | — | Out of scope (survives our metadata strip) | — | Vendor detector only |
+| Hidden Unicode / exotic spaces / orphan controls | Context-aware strip / normalize | `inspect_text.py`, `clean_text.py`, `clean_file.py` | Default preserves semantic controls; aggressive mode can alter rendering | Yes (codepoint report) |
+| Statistical text watermark | Paraphrase / back-translate / structural / TSAPA-style evolution | `rewrite_text.py` | Meaning, style, precision, and model-call cost | No without vendor key/detector |
+| Character-level text perturbation | Seeded ZWSP/space/confusable/case changes | `perturb_text.py` | Deliberately reduces text hygiene; some modes irreversible | Transform yes; detector effect no |
+| Visible image mark | Explicit/external mask → hole fill → dilate → inpaint → restore | `morphomod.py` | Texture artifacts; mask miss/overreach | Region action yes; fidelity best-effort |
+| C2PA / metadata on PNG/JPEG | Drop `caBX`, APP/JUMBF, EXIF/XMP/text metadata | `clean_image.py` | Loses selected/all metadata | Yes (re-inspect) |
+| HEIC/HEIF/AVIF provenance | Offset-preserving ISO-BMFF neutralization | `clean_image.py` | Selected/all Exif/XMP item content may be cleared | Yes (re-inspect) |
+| SVG metadata / XMP | Drop `<metadata>`, xmpmeta | `clean_file.py` | Loses SVG metadata | Yes |
+| PDF XMP / info | exiftool → full-document pypdf clone → unchanged copy | `clean_file.py` | Loses metadata when structural cleaner succeeds; otherwise explicit residual | Partial to yes |
+| DOCX props / customXml | Scrub known docProps; inspect/preserve customXml | `clean_file.py` | Custom XML residual may remain to avoid business-data loss | Partial |
+| ODT `meta:generator` | Scrub `meta.xml` | `clean_file.py` | Loses generator tag | Yes |
+| HTML generator / JSON-LD provenance | Strip tags/attributes | `clean_file.py` | Loses matching metadata | Yes |
+| Markdown AI frontmatter keys | Drop keys + Layer A body | `clean_file.py` | Loses matching YAML keys | Yes |
+| C2PA soft binding / remote manifest | Detect and warn | `inspect_soft_binding.py` | No mutation | Detection only; removal out of scope |
+| Pixel/audio/video watermarks | Optional external image score only | `score_synthid.py` | External-license/version limits | No universal verification |
 | Data-driven model backdoors | — | Out of scope | — | — |
 
 ## Default pipeline
 
-1. **Inspect** (`inspect_file.py` or specific inspect_*).
-2. **Deterministic clean** — Layer A text and/or container/image metadata.
-3. **Always offer Layer B** rewrite for prose (paraphrase → optional strong pass).
-4. Prefer a **non-origin** rewrite model when available (avoid re-stamping).
-5. Layer A again after rewrite.
-6. Report: Layer B is best-effort; residual risk remains.
+1. Inspect with unified or channel-specific inspector.
+2. Run deterministic Layer A / metadata cleaning.
+3. For visible marks, require a mask/box/localizer; never guess.
+4. Offer Layer B for prose; prefer a non-origin model.
+5. Run Layer A again after rewrite.
+6. Character perturbation is separate, explicit, and last.
+7. Report verifiable actions, best-effort actions, output paths, and residual risk.
 
 ## Code vs prose
 
-- **Prose / Markdown / HTML body:** full A + B.
-- **Code:** Layer A + formatter; statistical marks are weak; light rewrite only with user OK.
+- **Prose / Markdown / HTML body:** Layer A; offer Layer B.
+- **Code:** Layer A + formatter; semantic rewrite only with explicit approval.
 
 ## Layer B strengths
 
 | Strength | When |
 | --- | --- |
-| `paraphrase` | Default |
+| `paraphrase` | Default, least orchestration |
 | `backtranslate` | Stronger token reshuffle |
-| `structural` | Strongest; most drift |
+| `structural` | High drift |
+| `tsapa` | Multi-objective evolutionary search; highest cost; requires live backend to execute |

@@ -2,9 +2,9 @@
 
 ## 1. Edit-based text (Unicode / rules)
 
-Invisible or near-invisible characters, exotic spaces, bidi controls, tag characters, synonym tables.
+Invisible or near-invisible characters, exotic spaces, bidi controls, tag characters, and rule-based substitutions.
 
-| Inspect kinds (Layer A) | Examples |
+| Inspect kind | Examples |
 | --- | --- |
 | `zwj_family` | ZWSP, ZWNJ, ZWJ, WJ, BOM |
 | `bidi` | LRE/RLO/LRI/… |
@@ -13,49 +13,48 @@ Invisible or near-invisible characters, exotic spaces, bidi controls, tag charac
 | `space` | NBSP, em space, ideographic space |
 | `confusable` | Cyrillic/fullwidth Latin (aggressive) |
 
-**Removal:** `clean_text.py` / Layer A — deterministic, verifiable.
-
-Maps to Nature paper “edit-based watermarking.”
+**Cleaning:** Layer A is deterministic and reports every action. Contextual ZWJ/ZWNJ, variation selectors, invisible math operators, and balanced bidi controls are preserved by default because removing them can change rendering or meaning. `--strip-semantic-format` is explicitly aggressive.
 
 ## 2. Generative / statistical text (token sampling)
 
-Bias next-token sampling toward a pseudo-random green list / score (Kirchenbauer, SynthID-Text / Tournament sampling, etc.). Signal lives in **word choice**, not metadata.
+Next-token sampling is biased toward a pseudo-random set/score (Kirchenbauer, SynthID-Text/tournament sampling, etc.). The signal lives in wording, not metadata.
 
-**Removal:** Layer B rewrite (paraphrase → back-translate → structural). Best-effort; no gold cert without vendor detector/key.
+**Attack:** Layer B rewrite—paraphrase, back-translation, structural regeneration, or TSAPA-style evolutionary optimization. Best-effort; no gold certification without the vendor detector/key.
 
-Maps to Nature paper primary method (SynthID-Text).
+Character perturbation is a separate opt-in attack. It is not Unicode hygiene.
 
 ## 3. Data-driven / backdoor
 
-Model trained or fine-tuned so trigger prompts produce marked or identifiable behavior.
-
-**Out of scope** for this skill (model-side).
+A model is trained/fine-tuned so trigger prompts produce marked behavior. **Out of scope** (model-side).
 
 ## 4. File provenance metadata (C2PA / EXIF / XMP / props)
 
-Signed Content Credentials and AI generator tags in containers (hard-bound to the file: JUMBF/APP11, PNG chunks, XMP packets, OOXML props, etc.).
-
-Industry framing (C2PA + SynthID two-layer model; see Institute of AI PM guide in README references):
+C2PA Manifest Stores use JUMBF/BMFF structures with claims, assertions, and COSE signatures. Assertions may contain JSON/JSON-LD, CBOR, or embedded content.
 
 | Layer | Mechanism | Survives metadata strip? | This project |
 | --- | --- | --- | --- |
-| **Hard-bound C2PA** | Signed manifest *in* the file | No — strip/re-encode drops it | **In scope** — `clean_file` / `clean_image` |
-| **Soft binding** | Imperceptible watermark *in content* that can resolve to a remote manifest | Yes (by design) | **Out of scope** — pixel/audio/video signal |
-| **Standalone SynthID-class** | Pixel / waveform / token watermark without needing C2PA | Yes for media; text is weaker | Media OOS; text → Layer B best-effort |
+| Hard-bound C2PA | Signed manifest in the file | No | Clean + re-inspect |
+| Soft binding | In-content signal that can resolve a remote manifest | Yes | Detect/warn only; removal out of scope |
+| Standalone SynthID-class | Pixel/waveform/token watermark | Media: often; text: scheme-dependent | Media score only; text Layer B |
 
 | Format | Support |
 | --- | --- |
-| PNG / JPEG | Full strip (stdlib + optional exiftool) |
-| SVG | Drop metadata/XMP blocks |
-| PDF | Prefer exiftool; degraded stdlib XMP strip |
-| DOCX / ODT | Scrub zip XML props / customXml |
-| HTML | Meta generator / JSON-LD / data-ai* |
-| Markdown | YAML frontmatter AI keys |
+| PNG | `caBX`, EXIF/text/XMP chunks |
+| JPEG | APP11/JUMBF and selected/all APP metadata |
+| HEIC/HEIF/AVIF | ISO-BMFF JUMBF + Exif/XMP item extents, offsets preserved |
+| SVG | Metadata/XMP blocks |
+| PDF | exiftool → full-document pypdf clone → unchanged-copy warning |
+| DOCX/ODT | Known properties cleaned; DOCX customXml preserved and reported |
+| HTML/Markdown | Provenance metadata + Layer A text |
 
-**Removal:** `clean_file.py` / `clean_image.py` — usually verifiable by re-inspect.
+Stripping hard-bound metadata does not clear soft binding, fingerprints, or pixel watermarks.
 
-**Honest report:** after a successful C2PA strip, soft-bound / pixel SynthID (if the generator used them) may still be detectable by vendor tools (e.g. SynthID Detector, Content Credentials verify sites).
+## 5. Visible image marks
 
-## 5. Pixel-domain image (and audio/video) watermarks
+Logos, text stamps, or overlays live in rendered pixels.
 
-Invisible media marks (e.g. SynthID for images/audio/video) and C2PA **soft binding** that lives in the signal, not the metadata. **Out of scope.**
+**Pipeline:** explicit/external localization → mask hole fill → morphological dilation → inpaint → restore original outside the mask. `morphomod.py` requires a mask, box, or detector adapter and never guesses a location. Region removal is observable; visual fidelity is best-effort.
+
+## 6. Pixel-domain image/audio/video watermarks
+
+Invisible media marks (including SynthID-class schemes) live in the signal. This project provides an optional external image score, not pixel/audio/video removal or a vendor-failure guarantee.
