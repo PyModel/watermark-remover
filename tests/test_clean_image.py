@@ -124,6 +124,14 @@ def test_cleaners_fail_closed_on_truncated_binary():
     else:
         raise AssertionError("expected truncated JPEG rejection")
 
+    without_eoi = _minimal_jpeg_with_app11()[:-2]
+    try:
+        strip_jpeg(without_eoi)
+    except ValueError as error:
+        assert "EOI" in str(error)
+    else:
+        raise AssertionError("expected missing EOI rejection")
+
 
 def test_exiftool_nonzero_is_logged_as_failure(tmp_path: Path, monkeypatch):
     src = tmp_path / "input.png"
@@ -142,6 +150,39 @@ def test_exiftool_nonzero_is_logged_as_failure(tmp_path: Path, monkeypatch):
     report = clean_image(src, dest)
     assert any("exiftool failed (rc=7)" in action for action in report["actions"])
     assert not any(action == "exiftool -all= pass" for action in report["actions"])
+
+
+def test_clean_image_preserves_preexisting_backup_on_rejection(tmp_path: Path):
+    src = tmp_path / "input.png"
+    src.write_bytes(_minimal_png_with_text())
+    backup = src.with_suffix(".png.bak")
+    backup.write_bytes(b"old backup")
+    script = SCRIPTS / "clean_image.py"
+    result = subprocess.run(
+        [sys.executable, str(script), str(src), "--in-place"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert backup.read_bytes() == b"old backup"
+    assert src.read_bytes() == _minimal_png_with_text()
+
+
+def test_clean_image_in_place_rejects_backup_symlink(tmp_path: Path):
+    src = tmp_path / "input.png"
+    src.write_bytes(_minimal_png_with_text())
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"preserve")
+    src.with_suffix(".png.bak").symlink_to(outside)
+    script = SCRIPTS / "clean_image.py"
+    result = subprocess.run(
+        [sys.executable, str(script), str(src), "--in-place"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert outside.read_bytes() == b"preserve"
+    assert src.read_bytes() == _minimal_png_with_text()
 
 
 def test_clean_image_json_preserves_residual_exit_code(tmp_path: Path):
