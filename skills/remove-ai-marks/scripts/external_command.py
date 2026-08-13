@@ -16,6 +16,10 @@ from dataclasses import dataclass
 _READ_SIZE = 64 * 1024
 _TERMINATION_GRACE = 0.5
 
+# Module-local seam so tests can interrupt reader startup without patching the
+# global threading.Thread.start for the whole interpreter.
+_start_thread = threading.Thread.start
+
 
 class ExternalCommandTimeout(RuntimeError):
     """Raised after a command exceeds its configured execution deadline."""
@@ -85,8 +89,10 @@ def run_command(
     read_errors: list[BaseException] = []
     readers: list[threading.Thread] = []
     process: subprocess.Popen[bytes] | None = None
+    process_group_id: int | None = None
     deadline = time.monotonic() + timeout
     timed_out = False
+    drain_stalled = False
     returncode: int | None = None
 
     def drain(name: str, stream) -> None:
@@ -110,13 +116,18 @@ def run_command(
             bufsize=0,
             start_new_session=os.name == "posix",
         )
+        if os.name == "posix":
+            try:
+                process_group_id = os.getpgid(process.pid)
+            except ProcessLookupError:
+                process_group_id = None
         if process.stdout is None or process.stderr is None:
             raise RuntimeError("external command output pipes unavailable")
 
         for name, stream in (("stdout", process.stdout), ("stderr", process.stderr)):
             reader = threading.Thread(target=drain, args=(name, stream), daemon=True)
             readers.append(reader)
-            reader.start()
+            _start_thread(reader)
 
         try:
             returncode = process.wait(timeout=max(0.0, deadline - time.monotonic()))
@@ -127,13 +138,21 @@ def run_command(
             drain_deadline = time.monotonic() + max(_TERMINATION_GRACE, deadline - time.monotonic())
             for reader in readers:
                 reader.join(max(0.0, drain_deadline - time.monotonic()))
-            timed_out = any(reader.is_alive() for reader in readers)
+            if any(reader.is_alive() for reader in readers):
+                timed_out = True
+                drain_stalled = True
     finally:
         if process is not None:
-            if os.name == "posix":
-                with suppress(ProcessLookupError):
-                    os.killpg(process.pid, signal.SIGKILL)
-            elif process.poll() is None:
+            readers_alive = any(reader.is_alive() for reader in readers)
+            leader_alive = returncode is None and process.poll() is None
+            group_cleanup_needed = process_group_id is not None and (leader_alive or readers_alive)
+            if os.name == "posix" and group_cleanup_needed:
+                # The PGID was captured while the leader was addressable. An
+                # open descendant pipe keeps that group alive after leader exit,
+                # so a new process cannot reuse the PGID before this signal.
+                with suppress(ProcessLookupError, PermissionError):
+                    os.killpg(process_group_id, signal.SIGKILL)
+            elif os.name != "posix" and process.poll() is None:
                 with suppress(ProcessLookupError):
                     process.kill()
 
@@ -154,6 +173,10 @@ def run_command(
     if any(reader.is_alive() for reader in readers):
         timed_out = True
     if timed_out or returncode is None:
+        if drain_stalled and returncode is not None:
+            raise ExternalCommandTimeout(
+                "external command exited but output pipes are still held by a descendant"
+            )
         raise ExternalCommandTimeout(f"external command timed out after {timeout:g} seconds")
     if read_errors:
         raise RuntimeError(f"failed to read external command output: {read_errors[0]}")

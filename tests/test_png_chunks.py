@@ -26,7 +26,12 @@ def _ihdr() -> bytes:
 
 
 def _png() -> bytes:
-    return PNG_SIGNATURE + _chunk(b"IHDR", _ihdr()) + _chunk(b"IEND", b"")
+    return (
+        PNG_SIGNATURE
+        + _chunk(b"IHDR", _ihdr())
+        + _chunk(b"IDAT", zlib.compress(b"\x00\x00\x00\x00"))
+        + _chunk(b"IEND", b"")
+    )
 
 
 def test_iterator_yields_validated_memory_views() -> None:
@@ -34,7 +39,7 @@ def test_iterator_yields_validated_memory_views() -> None:
 
     chunks = list(iter_png_chunks(data))
 
-    assert [chunk.kind for chunk in chunks] == [b"IHDR", b"IEND"]
+    assert [chunk.kind for chunk in chunks] == [b"IHDR", b"IDAT", b"IEND"]
     assert bytes(chunks[0].payload) == _ihdr()
     assert bytes(chunks[0].raw) == _chunk(b"IHDR", _ihdr())
     assert isinstance(chunks[0].payload, memoryview)
@@ -70,6 +75,29 @@ def test_iterator_requires_iend() -> None:
 def test_iterator_rejects_trailing_bytes() -> None:
     with pytest.raises(ValueError, match="trailing bytes"):
         list(iter_png_chunks(_png() + b"unexpected"))
+
+
+@pytest.mark.parametrize(
+    ("data", "message"),
+    [
+        (
+            PNG_SIGNATURE + _chunk(b"IHDR", _ihdr()) + _chunk(b"IEND", b""),
+            "no IDAT",
+        ),
+        (
+            PNG_SIGNATURE
+            + _chunk(b"IHDR", _ihdr())
+            + _chunk(b"IDAT", b"a")
+            + _chunk(b"tEXt", b"x")
+            + _chunk(b"IDAT", b"b")
+            + _chunk(b"IEND", b""),
+            "consecutive",
+        ),
+    ],
+)
+def test_iterator_enforces_idat_structure(data: bytes, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        list(iter_png_chunks(data))
 
 
 @pytest.mark.parametrize(

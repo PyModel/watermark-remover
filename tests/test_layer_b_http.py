@@ -31,6 +31,7 @@ class FakeResponse:
         content_type: str | None = "application/json",
     ) -> None:
         self.body = body
+        self._offset = 0
         self.headers = Message()
         if content_length is not None:
             self.headers["Content-Length"] = str(content_length)
@@ -44,7 +45,14 @@ class FakeResponse:
         return None
 
     def read(self, limit: int = -1) -> bytes:
-        return self.body if limit < 0 else self.body[:limit]
+        if self._offset >= len(self.body):
+            return b""
+        if limit < 0:
+            limit = len(self.body) - self._offset
+        end = min(self._offset + limit, len(self.body))
+        chunk = self.body[self._offset : end]
+        self._offset = end
+        return chunk
 
 
 class RecordingOpener:
@@ -128,7 +136,21 @@ def test_invalid_endpoints_fail_before_network_access(endpoint: str):
     assert FAKE_SECRET not in str(raised.value)
 
 
-@pytest.mark.parametrize("route", ["", "relative", "//other.test/path", "/x?query=1", "/x#part"])
+@pytest.mark.parametrize(
+    "route",
+    [
+        "",
+        "relative",
+        "//other.test/path",
+        "/x?query=1",
+        "/x#part",
+        "/x\\y",
+        "/x\ny",
+        "/x\x7fy",
+        "/x/../y",
+        "/./x",
+    ],
+)
 def test_invalid_provider_routes_fail_before_network_access(route: str):
     opener = RecordingOpener(FakeResponse(b'{"ok":true}'))
 
@@ -227,6 +249,35 @@ def test_response_rejects_present_non_json_content_type():
         call(opener)
 
 
+def test_response_body_reads_until_eof_after_short_reads():
+    class ShortReadResponse(FakeResponse):
+        def __init__(self, body: bytes) -> None:
+            super().__init__(body)
+            self.offset = 0
+
+        def read(self, limit: int = -1) -> bytes:
+            if self.offset >= len(self.body):
+                return b""
+            width = 2 if limit < 0 else min(2, limit)
+            chunk = self.body[self.offset : self.offset + width]
+            self.offset += len(chunk)
+            return chunk
+
+    opener = RecordingOpener(ShortReadResponse(b'{"ok":true}'))
+
+    assert call(opener) == {"ok": True}
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    ["application/json; charset=utf-8", "application/problem+json", "APPLICATION/JSON"],
+)
+def test_response_allows_json_suffix_and_parameterized_content_types(content_type: str):
+    opener = RecordingOpener(FakeResponse(b'{"ok":true}', content_type=content_type))
+
+    assert call(opener) == {"ok": True}
+
+
 def test_response_allows_missing_content_type_for_compatible_local_servers():
     opener = RecordingOpener(FakeResponse(b'{"ok":true}', content_type=None))
 
@@ -237,6 +288,7 @@ def test_response_allows_missing_content_type_for_compatible_local_servers():
     ("failure", "match"),
     [
         (urllib.error.URLError("connection refused"), "connection failed"),
+        (urllib.error.URLError(TimeoutError("timed out")), "timed out"),
         (TimeoutError("timed out"), "timed out"),
         (
             urllib.error.HTTPError(
@@ -270,8 +322,19 @@ def test_unexpected_programming_errors_propagate():
         call(opener)
 
 
-@pytest.mark.parametrize("code", [301, 302, 303, 307, 308])
-def test_redirect_handler_closes_body_without_reading_before_following(code):
+@pytest.mark.parametrize(
+    ("code", "expected_method", "expected_data"),
+    [
+        (301, "GET", None),
+        (302, "GET", None),
+        (303, "GET", None),
+        (307, "POST", b"{}"),
+        (308, "POST", b"{}"),
+    ],
+)
+def test_redirect_handler_closes_body_without_reading_before_following(
+    code, expected_method, expected_data
+):
     class RedirectBody:
         closed = False
 
@@ -307,10 +370,12 @@ def test_redirect_handler_closes_body_without_reading_before_following(code):
     assert body.closed
     redirected, timeout = parent.calls[0]
     assert redirected.full_url == "https://example.test/api/next"
+    assert redirected.get_method() == expected_method
+    assert redirected.data == expected_data
     assert timeout == 3.5
 
 
-def test_redirect_handler_allows_only_same_origin_and_strips_credentials():
+def test_redirect_handler_allows_only_same_origin_and_forwards_credentials():
     handler = layer_b_http.SameOriginRedirectHandler()
     original = urllib.request.Request(
         "https://example.test/api/start",
