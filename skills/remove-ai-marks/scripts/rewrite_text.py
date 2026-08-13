@@ -392,6 +392,19 @@ def main() -> int:
     p.add_argument("--lang", default="French", help="Pivot language for backtranslate")
     p.add_argument("--original-lang", default="English")
     p.add_argument("--timeout", type=float, default=120.0)
+    thinking = p.add_mutually_exclusive_group()
+    thinking.add_argument(
+        "--disable-thinking",
+        action="store_true",
+        default=None,
+        help="OpenAI-compatible: request direct answers from thinking-capable models",
+    )
+    thinking.add_argument(
+        "--allow-thinking",
+        action="store_false",
+        dest="disable_thinking",
+        help="OpenAI-compatible: allow the model's default reasoning mode",
+    )
     p.add_argument(
         "--no-layer-a-after",
         action="store_true",
@@ -402,6 +415,11 @@ def main() -> int:
 
     text = read_text_input(args.path)
     try:
+        disable_thinking = (
+            read_bool_env("WATERMARKS_REWRITE_DISABLE_THINKING")
+            if args.disable_thinking is None
+            else args.disable_thinking
+        )
         result, info = rewrite(
             text,
             backend=args.backend,
