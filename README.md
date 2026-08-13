@@ -1,8 +1,11 @@
 ![watermark-remover](assets/banner.svg)
 
-[![CI](https://github.com/Pythoughts-labs/watermark-remover/actions/workflows/ci.yml/badge.svg)](https://github.com/Pythoughts-labs/watermark-remover/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/Pythoughts-labs/watermark-remover)](https://github.com/Pythoughts-labs/watermark-remover/releases)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+<p align="center">
+  <a href="https://github.com/Pythoughts-labs/watermark-remover/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Pythoughts-labs/watermark-remover/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/Pythoughts-labs/watermark-remover/releases"><img alt="Release" src="https://img.shields.io/github/v/release/Pythoughts-labs/watermark-remover"></a>
+  <a href="https://github.com/Pythoughts-labs/watermark-remover/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/Pythoughts-labs/watermark-remover?style=flat"></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
+</p>
 
 Tools for finding and removing AI provenance signals from files you own. Four channels are covered: hidden Unicode in text, statistical token watermarks, visible marks burned into images, and metadata such as C2PA, EXIF, and XMP.
 
