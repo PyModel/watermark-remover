@@ -186,9 +186,8 @@ def test_batch_rejects_symlinked_output_component(tmp_path: Path):
 
     r = _run("clean_file.py", src, "-o", out, "--recursive", "--json")
 
-    assert r.returncode == 1
-    report = json.loads(r.stdout)
-    assert report["results"][0]["error"].startswith("output path contains a symlink")
+    assert r.returncode == 2
+    assert "output path contains a symlink" in r.stderr
     assert not (outside / "note.txt").exists()
 
 
@@ -211,10 +210,10 @@ def test_missing_input_is_usage_error_even_with_valid_input(tmp_path: Path):
     valid.write_text("ok", encoding="utf-8")
     r = _run("clean_file.py", valid, tmp_path / "missing.txt")
     assert r.returncode == 2
-    assert "not a file or directory" in r.stderr
+    assert "not a regular file or directory" in r.stderr
 
 
-def test_multi_file_output_collision_fails_one_item(tmp_path: Path):
+def test_multi_file_output_collision_fails_before_writes(tmp_path: Path):
     left = tmp_path / "left"
     right = tmp_path / "right"
     left.mkdir()
@@ -224,9 +223,9 @@ def test_multi_file_output_collision_fails_one_item(tmp_path: Path):
     r = _run(
         "clean_file.py", left / "same.txt", right / "same.txt", "-o", tmp_path / "out", "--json"
     )
-    assert r.returncode == 1
-    report = json.loads(r.stdout)
-    assert any(item.get("error") == "batch output collision" for item in report["results"])
+    assert r.returncode == 2
+    assert "batch output collision" in r.stderr
+    assert not (tmp_path / "out" / "same.txt").exists()
 
 
 def test_degraded_container_residual_is_failure(tmp_path: Path, monkeypatch):
