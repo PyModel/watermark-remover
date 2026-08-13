@@ -389,10 +389,10 @@ MIT, see [LICENSE](LICENSE).
 
 ## Star history
 
-<a href="https://www.star-history.com/#Pythoughts-labs/watermark-remover&Date">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Pythoughts-labs/watermark-remover&type=Date&theme=dark">
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Pythoughts-labs/watermark-remover&type=Date">
-    <img alt="Star history chart for Pythoughts-labs/watermark-remover" src="https://api.star-history.com/svg?repos=Pythoughts-labs/watermark-remover&type=Date">
-  </picture>
+<a href="https://www.star-history.com/?type=date&repos=Pythoughts-labs%2Fwatermark-remover">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=Pythoughts-labs/watermark-remover&type=date&theme=dark&legend=top-left&sealed_token=HatSJGVcSh5pDXkB0gP7_TXRxvD9Pu-BrlkjpbdZunNoaSFzwGOdjTpHTq1lPaRXNMok_0gPsWJupxtO2QNhgziZJAIWFatFlBA5QUfGgmCsc0MNJkSC-Mf8srFqV_lsLZq6ynOlRiMd0VGUWlGYoO1jBwceyLV9naxb9NzgeMrVrOnmZMatXENmdiVj" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=Pythoughts-labs/watermark-remover&type=date&legend=top-left&sealed_token=HatSJGVcSh5pDXkB0gP7_TXRxvD9Pu-BrlkjpbdZunNoaSFzwGOdjTpHTq1lPaRXNMok_0gPsWJupxtO2QNhgziZJAIWFatFlBA5QUfGgmCsc0MNJkSC-Mf8srFqV_lsLZq6ynOlRiMd0VGUWlGYoO1jBwceyLV9naxb9NzgeMrVrOnmZMatXENmdiVj" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=Pythoughts-labs/watermark-remover&type=date&legend=top-left&sealed_token=HatSJGVcSh5pDXkB0gP7_TXRxvD9Pu-BrlkjpbdZunNoaSFzwGOdjTpHTq1lPaRXNMok_0gPsWJupxtO2QNhgziZJAIWFatFlBA5QUfGgmCsc0MNJkSC-Mf8srFqV_lsLZq6ynOlRiMd0VGUWlGYoO1jBwceyLV9naxb9NzgeMrVrOnmZMatXENmdiVj" />
+ </picture>
 </a>
