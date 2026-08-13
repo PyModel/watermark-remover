@@ -22,8 +22,10 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from common import eprint
+from common import eprint, read_bytes_bounded
 from image_meta import C2PA_MARKERS
+
+MAX_SCAN_BYTES = 256 * 1024 * 1024
 
 SOFT_BINDING_HINTS = (
     b"c2pa.soft-binding",
@@ -36,20 +38,39 @@ SOFT_BINDING_HINTS = (
 
 _URL_RE = re.compile(rb"https?://[^\s\"'<>\\)\]]+")
 _MANIFESTISH = re.compile(rb"manifest|credential|c2pa|contentauth|verify", re.I)
+_STRUCTURED_LABEL_RE = re.compile(
+    rb"(?:[\"']label[\"']\s*:\s*[\"']|\blabel\s*=\s*[\"'])"
+    rb"(c2pa\.(?:soft-binding|remote-manifest))[\"']",
+    re.I,
+)
 
 
 def _scan_bytes(data: bytes) -> dict[str, Any]:
     lower = data.lower()
     has_c2pa = any(n.lower() in lower for n in C2PA_MARKERS)
-    labels = sorted({h.decode("ascii") for h in SOFT_BINDING_HINTS if h.lower() in lower})
-    urls = sorted(
-        {
-            m.group(0).decode("ascii", errors="replace")
-            for m in _URL_RE.finditer(data)
-            if _MANIFESTISH.search(m.group(0))
-        }
+    labels = sorted(
+        {match.group(1).decode("ascii").lower() for match in _STRUCTURED_LABEL_RE.finditer(data)}
     )
-    return {"has_c2pa": has_c2pa, "labels": labels, "urls": urls[:20]}
+
+    # Ordinary embedded manifests contain certificate, OCSP, vocabulary, and
+    # assertion URLs. Those are not remote-manifest evidence. Only retain URLs
+    # near an explicit soft/remote-binding marker in the raw fallback scanner.
+    urls: set[str] = set()
+    url_hints = [
+        *(b"c2pa.remote-manifest", b"remote-manifest", b"remote_manifest"),
+        *(label.encode("ascii") for label in labels),
+    ]
+    for hint in url_hints:
+        start = 0
+        while (index := lower.find(hint.lower(), start)) >= 0:
+            window = data[max(0, index - 256) : min(len(data), index + 4096)]
+            urls.update(
+                match.group(0).decode("ascii", errors="replace")
+                for match in _URL_RE.finditer(window)
+                if _MANIFESTISH.search(match.group(0))
+            )
+            start = index + len(hint)
+    return {"has_c2pa": has_c2pa, "labels": labels, "urls": sorted(urls)[:20]}
 
 
 def _try_c2pa_lib(path: Path) -> dict[str, Any] | None:
