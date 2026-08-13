@@ -812,11 +812,11 @@ def remove_visible(
             if not external_out.is_file():
                 raise RuntimeError("inpaint command did not create {output}")
             if raster is not None:
-                inpainted = decode_png(external_out.read_bytes())
-                dest.write_bytes(encode_png(composite(raster, inpainted, refined)))
+                inpainted = decode_png(_read_bounded(external_out))
+                atomic_write_bytes(dest, encode_png(composite(raster, inpainted, refined)))
                 actions.append("external inpaint + stdlib restore outside mask")
             else:
-                shutil.copyfile(external_out, dest)
+                atomic_write_bytes(dest, _read_bounded(external_out))
                 actions.append("external backend output copied (backend owns JPEG compositing)")
         status, output = "completed", str(dest)
     else:
