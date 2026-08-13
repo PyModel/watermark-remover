@@ -281,6 +281,7 @@ def _rewrite_tsapa(
     layer_a_after: bool,
     generations: int,
     population: int,
+    disable_thinking: bool,
     info: dict,
 ) -> tuple[str, dict]:
     from tsapa import heuristic_pll, http_embed, http_pll, tsapa
@@ -300,6 +301,7 @@ def _rewrite_tsapa(
 
     if not model or not base_url:
         raise SystemExit("error: --model and --base-url required for tsapa with live backends")
+    _validate_endpoint(base_url)
     _warn_remote(base_url)
 
     if backend == "ollama":
@@ -309,7 +311,14 @@ def _rewrite_tsapa(
     elif backend == "openai-compatible":
 
         def llm(prompt: str) -> str:
-            return call_openai_compatible(base_url, model, prompt, api_key, timeout)
+            return call_openai_compatible(
+                base_url,
+                model,
+                prompt,
+                api_key,
+                timeout,
+                disable_thinking=disable_thinking,
+            )
     else:
         raise SystemExit(f"unknown backend: {backend}")
 
