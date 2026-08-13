@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 300" width="1200" height="300" role="img" aria-labelledby="wr-title wr-desc" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace">
+  <title id="wr-title">watermark-remover</title>
+  <desc id="wr-desc">Wordmark on a dark panel. On the right, a column of Unicode codepoints and metadata block names is being consumed left to right by a scrub line, leaving faint residue behind it.</desc>
+
+  <defs>
+    <clipPath id="wr-field">
+      <rect x="700" y="56" width="436" height="180"/>
+    </clipPath>
+    <clipPath id="wr-live">
+      <rect x="892" y="56" width="244" height="180"/>
+    </clipPath>
+  </defs>
+
+  <rect width="1200" height="300" fill="#0F1110"/>
+
+  <!-- left field: typographic -->
+  <text x="64" y="98" font-size="13" letter-spacing="2.4" fill="#8A8F89">PYTHON 3.10+ &#183; STDLIB CORE &#183; MIT</text>
+  <text x="64" y="168" font-size="58" font-weight="700" letter-spacing="-1" fill="#E8E6E1">watermark-remover</text>
+  <text x="64" y="206" font-size="17" fill="#8A8F89">inspect and clean AI provenance signals you own</text>
+
+  <!-- field divider -->
+  <rect x="676" y="44" width="1" height="192" fill="#232825"/>
+
+  <!-- right field: residue left of the scrub line -->
+  <g clip-path="url(#wr-field)" font-size="15" fill="#333833">
+    <text x="700" y="82">U+200B U+200D U+FEFF U+2060 U+00AD U+180E</text>
+    <text x="700" y="116">c2pa.assertions jumbf urn:uuid cai.claim</text>
+    <text x="700" y="150">xmpMM:History Iptc4xmpCore photoshop:Cred</text>
+    <text x="700" y="184">EXIF.Software EXIF.ImageDescription GPS</text>
+    <text x="700" y="218">PNG caBX tEXt iTXt zTXt / JPEG APP11 APP1</text>
+  </g>
+
+  <!-- right field: live signal right of the scrub line -->
+  <g clip-path="url(#wr-live)" font-size="15" fill="#E8A33D">
+    <text x="700" y="82">U+200B U+200D U+FEFF U+2060 U+00AD U+180E</text>
+    <text x="700" y="116">c2pa.assertions jumbf urn:uuid cai.claim</text>
+    <text x="700" y="150">xmpMM:History Iptc4xmpCore photoshop:Cred</text>
+    <text x="700" y="184">EXIF.Software EXIF.ImageDescription GPS</text>
+    <text x="700" y="218">PNG caBX tEXt iTXt zTXt / JPEG APP11 APP1</text>
+  </g>
+
+  <!-- scrub line -->
+  <rect x="890" y="56" width="2" height="180" fill="#E8A33D"/>
+  <rect x="884" y="52" width="14" height="2" fill="#E8A33D"/>
+  <rect x="884" y="236" width="14" height="2" fill="#E8A33D"/>
+
+  <!-- baseline rule + layer markers -->
+  <rect x="64" y="254" width="1072" height="1" fill="#232825"/>
+  <g font-size="13" fill="#8A8F89">
+    <text x="64" y="280"><tspan fill="#E8A33D">A</tspan>  hidden unicode</text>
+    <text x="332" y="280"><tspan fill="#E8A33D">B</tspan>  token distribution</text>
+    <text x="600" y="280"><tspan fill="#E8A33D">V</tspan>  visible marks</text>
+    <text x="868" y="280"><tspan fill="#E8A33D">M</tspan>  metadata + c2pa</text>
+  </g>
+</svg>
