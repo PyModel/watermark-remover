@@ -224,6 +224,7 @@ def rewrite(
             layer_a_after=layer_a_after,
             generations=generations,
             population=population,
+            disable_thinking=disable_thinking,
             info=info,
         )
 
@@ -239,12 +240,20 @@ def rewrite(
     if not base_url:
         raise SystemExit("error: --base-url required for ollama/openai-compatible backends")
 
+    _validate_endpoint(base_url)
     _warn_remote(base_url)
 
     if backend == "ollama":
         out = call_ollama(base_url, model, prompt, timeout)
     elif backend == "openai-compatible":
-        out = call_openai_compatible(base_url, model, prompt, api_key, timeout)
+        out = call_openai_compatible(
+            base_url,
+            model,
+            prompt,
+            api_key,
+            timeout,
+            disable_thinking=disable_thinking,
+        )
     else:
         raise SystemExit(f"unknown backend: {backend}")
 
