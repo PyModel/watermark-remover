@@ -433,8 +433,9 @@ def main() -> int:
             layer_a_after=not args.no_layer_a_after,
             generations=args.generations,
             population=args.population,
+            disable_thinking=disable_thinking,
         )
-    except (urllib.error.URLError, TimeoutError, RuntimeError) as e:
+    except (urllib.error.URLError, TimeoutError, RuntimeError, ValueError) as e:
         eprint(f"rewrite failed: {e}")
         return 1
 
@@ -444,6 +445,12 @@ def main() -> int:
     elif out is None and args.backend == "print-prompt":
         out = "-"
 
+    if args.path not in (None, "-") and out not in (None, "-"):
+        try:
+            validate_output_path(Path(args.path), Path(out))
+        except ValueError as error:
+            eprint(f"error: {error}")
+            return 2
     write_text_output(result, out)
     if args.json_stats:
         eprint(json.dumps(info, indent=2, ensure_ascii=False))
