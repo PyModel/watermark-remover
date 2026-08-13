@@ -13,6 +13,7 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
 from common import which
 from image_meta import AI_META_HINTS, C2PA_MARKERS, run_optional_tools
 
@@ -45,15 +46,6 @@ AI_META_NAME_RE = re.compile(
     r"generator|ai[-_ ]?generated|claude|anthropic|openai|gemini|synthid|"
     r"c2pa|content.?credential|provenance|digital.?source|aigc",
     re.I,
-)
-
-SVG_DROP_TAGS = frozenset(
-    {
-        "{http://www.w3.org/2000/svg}metadata",
-        "metadata",
-        "{http://www.w3.org/1999/02/22-rdf-syntax-ns#}RDF",
-        "{adobe:ns:meta/}xmpmeta",
-    }
 )
 
 
@@ -102,12 +94,13 @@ def detect_container_format(path: Path, data: bytes | None = None) -> str:
             # zip-based; sniff
             try:
                 with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                    _validate_zip(zf)
                     names = set(zf.namelist())
                     if "word/document.xml" in names:
                         return "docx"
                     if "content.xml" in names and "meta.xml" in names:
                         return "odt"
-            except zipfile.BadZipFile:
+            except (zipfile.BadZipFile, ValueError, RuntimeError):
                 pass
     return "unknown"
 
@@ -181,28 +174,36 @@ def clean_markdown(text: str) -> tuple[str, list[str]]:
     block = m.group(1)
     body = text[m.end() :]
     kept: list[str] = []
+    dropping_parent = False
     for line in block.splitlines():
-        if not line.strip() or line.strip().startswith("#") or line[0] in (" ", "\t", "-"):
-            # drop nested lines only if previous key was dropped — simple approach:
-            # keep nested only if we kept a parent; track with flag
-            if kept and line[0] in (" ", "\t", "-"):
-                kept.append(line)
-            elif not line.strip() or line.strip().startswith("#"):
+        stripped = line.strip()
+        nested = bool(line) and line[0] in (" ", "\t", "-")
+        if nested:
+            if not dropping_parent:
                 kept.append(line)
             continue
+        if not stripped or stripped.startswith("#"):
+            # Comments/blanks do not end a parent's nested block.
+            if not dropping_parent:
+                kept.append(line)
+            continue
+
+        dropping_parent = False
         km = re.match(r"^([A-Za-z0-9_.-]+)\s*:", line)
-        if km:
-            key = km.group(1)
-            if key.lower() in AI_FRONTMATTER_KEYS or AI_META_NAME_RE.search(key):
-                actions.append(f"drop frontmatter key: {key}")
-                continue
-            val = line.split(":", 1)[1] if ":" in line else ""
-            if AI_META_NAME_RE.search(val):
-                actions.append(f"drop frontmatter key (value hit): {key}")
-                continue
+        if not km:
             kept.append(line)
-        else:
-            kept.append(line)
+            continue
+        key = km.group(1)
+        val = line.split(":", 1)[1] if ":" in line else ""
+        if key.lower() in AI_FRONTMATTER_KEYS or AI_META_NAME_RE.search(key):
+            actions.append(f"drop frontmatter key: {key}")
+            dropping_parent = True
+            continue
+        if AI_META_NAME_RE.search(val):
+            actions.append(f"drop frontmatter key (value hit): {key}")
+            dropping_parent = True
+            continue
+        kept.append(line)
     if not actions:
         actions.append("no AI frontmatter keys removed")
     # strip trailing empty nested orphans already handled
@@ -221,10 +222,6 @@ def clean_markdown(text: str) -> tuple[str, list[str]]:
 
 _META_TAG_RE = re.compile(
     r"<meta\b[^>]*>",
-    re.I,
-)
-_META_ATTR_RE = re.compile(
-    r"""(?:name|property|content|generator)\s*=\s*["']([^"']*)["']""",
     re.I,
 )
 _JSONLD_RE = re.compile(
@@ -298,6 +295,7 @@ def clean_html(text: str) -> tuple[str, list[str]]:
 # SVG
 # ---------------------------------------------------------------------------
 
+
 def inspect_svg(data: bytes) -> tuple[bool, bool, list[str], dict]:
     findings: list[str] = []
     has_c2pa, has_ai, hits = _blob_hits(data)
@@ -340,6 +338,7 @@ def clean_svg(data: bytes) -> tuple[bytes, list[str]]:
     if n:
         actions.append(f"drop xmpmeta x{n}")
         text = new
+
     # Drop comments that look like provenance
     def _cmt(m: re.Match[str]) -> str:
         body = m.group(0)
@@ -374,15 +373,27 @@ DOCX_META_PARTS = (
     "docProps/app.xml",
     "docProps/custom.xml",
 )
-DOCX_CUSTOM_PREFIXES = (
-    "customXml/",
-    "docProps/",
-)
+MAX_ZIP_ENTRIES = 5_000
+MAX_ZIP_ENTRY_BYTES = 128 * 1024 * 1024
+MAX_ZIP_TOTAL_BYTES = 512 * 1024 * 1024
+MAX_ZIP_RATIO = 1_000
 
 
-def _zip_namelist(data: bytes) -> list[str]:
-    with zipfile.ZipFile(io.BytesIO(data)) as zf:
-        return zf.namelist()
+def _validate_zip(zf: zipfile.ZipFile) -> None:
+    infos = zf.infolist()
+    if len(infos) > MAX_ZIP_ENTRIES:
+        raise ValueError(f"archive has too many entries ({len(infos)} > {MAX_ZIP_ENTRIES})")
+    total = 0
+    for info in infos:
+        if info.file_size > MAX_ZIP_ENTRY_BYTES:
+            raise ValueError(f"archive entry too large: {info.filename}")
+        total += info.file_size
+        if total > MAX_ZIP_TOTAL_BYTES:
+            raise ValueError("archive uncompressed size exceeds safety limit")
+        if info.file_size and not info.compress_size:
+            raise ValueError(f"invalid zero compressed size: {info.filename}")
+        if info.compress_size and info.file_size / info.compress_size > MAX_ZIP_RATIO:
+            raise ValueError(f"suspicious compression ratio: {info.filename}")
 
 
 def inspect_docx(data: bytes) -> tuple[bool, bool, list[str], dict]:
@@ -392,6 +403,7 @@ def inspect_docx(data: bytes) -> tuple[bool, bool, list[str], dict]:
     parts: list[str] = []
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            _validate_zip(zf)
             parts = zf.namelist()
             for name in parts:
                 raw = zf.read(name)
@@ -406,55 +418,56 @@ def inspect_docx(data: bytes) -> tuple[bool, bool, list[str], dict]:
             custom = [n for n in parts if n.startswith("customXml/")]
             if custom:
                 findings.append(f"customXml parts: {len(custom)}")
-    except zipfile.BadZipFile:
-        return False, False, ["not a valid DOCX zip"], {}
+    except (zipfile.BadZipFile, ValueError, RuntimeError) as error:
+        return False, True, [f"unsafe/invalid DOCX zip: {error}"], {"malformed": True}
     return has_c2pa, has_ai or has_c2pa, findings, {"parts": len(parts)}
 
 
 def clean_docx(data: bytes) -> tuple[bytes, list[str]]:
     actions: list[str] = []
     out_buf = io.BytesIO()
-    with zipfile.ZipFile(io.BytesIO(data)) as zin, zipfile.ZipFile(
-        out_buf, "w", compression=zipfile.ZIP_DEFLATED
-    ) as zout:
+    with (
+        zipfile.ZipFile(io.BytesIO(data)) as zin,
+        zipfile.ZipFile(out_buf, "w", compression=zipfile.ZIP_DEFLATED) as zout,
+    ):
+        _validate_zip(zin)
         for info in zin.infolist():
             name = info.filename
             raw = zin.read(name)
-            # Drop entire customXml trees (often provenance injects)
-            if name.startswith("customXml/"):
-                # Drop customXml — often used for provenance injects; body stays in word/
-                actions.append(f"drop part {name}")
-                continue
+            # customXml can back content controls/business data. Preserve it; the
+            # post-clean inspection reports any provenance-like residue.
             if name in DOCX_META_PARTS or name.startswith("docProps/"):
                 text = raw.decode("utf-8", errors="replace")
                 # Scrub known AI generator fields via simple regex on XML text nodes
                 new = text
-                for pat, repl, label in (
+                for pattern, label in (
                     (
                         r"(<dc:creator[^>]*>)(.*?)(</dc:creator>)",
-                        None,
                         "dc:creator",
                     ),
                     (
                         r"(<cp:lastModifiedBy[^>]*>)(.*?)(</cp:lastModifiedBy>)",
-                        None,
                         "cp:lastModifiedBy",
                     ),
                     (
                         r"(<Application[^>]*>)(.*?)(</Application>)",
-                        None,
                         "Application",
                     ),
                     (
                         r"(<AppVersion[^>]*>)(.*?)(</AppVersion>)",
-                        None,
                         "AppVersion",
                     ),
                 ):
-                    def _sub(m: re.Match[str], _label=label) -> str:
+
+                    def _sub(
+                        m: re.Match[str],
+                        *,
+                        _label: str = label,
+                        _part_name: str = name,
+                    ) -> str:
                         inner = m.group(2)
                         if AI_META_NAME_RE.search(inner) or AI_META_NAME_RE.search(_label):
-                            actions.append(f"scrub {name} field {_label}")
+                            actions.append(f"scrub {_part_name} field {_label}")
                             return m.group(1) + m.group(3)
                         # Always clear Application if it looks like AI
                         if _label in ("Application", "AppVersion") and re.search(
@@ -462,29 +475,12 @@ def clean_docx(data: bytes) -> tuple[bytes, list[str]]:
                             inner,
                             re.I,
                         ):
-                            actions.append(f"scrub {name} field {_label}")
+                            actions.append(f"scrub {_part_name} field {_label}")
                             return m.group(1) + m.group(3)
                         return m.group(0)
 
-                    new = re.sub(pat, _sub, new, flags=re.I | re.DOTALL)
-                # Drop custom.xml entirely if AI-ish
-                if name.endswith("custom.xml") and (
-                    _blob_hits(raw)[1] or AI_META_NAME_RE.search(text)
-                ):
-                    actions.append(f"drop part {name}")
-                    continue
+                    new = re.sub(pattern, _sub, new, flags=re.I | re.DOTALL)
                 raw = new.encode("utf-8")
-            # content types: leave as-is (removing overrides for dropped customXml is nice-to-have)
-            if name == "[Content_Types].xml":
-                text = raw.decode("utf-8", errors="replace")
-                new, n = re.subn(
-                    r'<Override\b[^>]*PartName="/customXml/[^"]*"[^>]*/>',
-                    "",
-                    text,
-                )
-                if n:
-                    actions.append(f"drop Content_Types customXml overrides x{n}")
-                    raw = new.encode("utf-8")
             zout.writestr(info, raw)
     if not actions:
         actions.append("no DOCX metadata parts removed")
@@ -497,6 +493,7 @@ def inspect_odt(data: bytes) -> tuple[bool, bool, list[str], dict]:
     has_ai = False
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            _validate_zip(zf)
             for name in zf.namelist():
                 raw = zf.read(name)
                 c2, ai, hits = _blob_hits(raw)
@@ -511,17 +508,19 @@ def inspect_odt(data: bytes) -> tuple[bool, bool, list[str], dict]:
                 if re.search(r"generator|claude|openai|anthropic|gemini", meta, re.I):
                     has_ai = True
                     findings.append("meta.xml generator-like fields")
-    except zipfile.BadZipFile:
-        return False, False, ["not a valid ODT zip"], {}
+    except (zipfile.BadZipFile, ValueError, RuntimeError) as error:
+        return False, True, [f"unsafe/invalid ODT zip: {error}"], {"malformed": True}
     return has_c2pa, has_ai or has_c2pa, findings, {}
 
 
 def clean_odt(data: bytes) -> tuple[bytes, list[str]]:
     actions: list[str] = []
     out_buf = io.BytesIO()
-    with zipfile.ZipFile(io.BytesIO(data)) as zin, zipfile.ZipFile(
-        out_buf, "w", compression=zipfile.ZIP_DEFLATED
-    ) as zout:
+    with (
+        zipfile.ZipFile(io.BytesIO(data)) as zin,
+        zipfile.ZipFile(out_buf, "w", compression=zipfile.ZIP_DEFLATED) as zout,
+    ):
+        _validate_zip(zin)
         for info in zin.infolist():
             name = info.filename
             raw = zin.read(name)
@@ -536,6 +535,7 @@ def clean_odt(data: bytes) -> tuple[bytes, list[str]]:
                 if n:
                     actions.append("drop meta:generator")
                     text = new
+
                 # scrub creator-like if AI
                 def _creator(m: re.Match[str]) -> str:
                     if AI_META_NAME_RE.search(m.group(0)):
@@ -570,6 +570,7 @@ def clean_odt(data: bytes) -> tuple[bytes, list[str]]:
 # PDF
 # ---------------------------------------------------------------------------
 
+
 def inspect_pdf(path: Path, data: bytes) -> tuple[bool, bool, list[str], dict]:
     findings: list[str] = []
     has_c2pa, has_ai, hits = _blob_hits(data)
@@ -592,62 +593,89 @@ def inspect_pdf(path: Path, data: bytes) -> tuple[bool, bool, list[str], dict]:
     return has_c2pa, has_ai or has_c2pa, findings, {"tools": tools}
 
 
-def clean_pdf(path: Path, dest: Path) -> tuple[list[str], dict]:
-    """Best-effort PDF clean. Prefers exiftool; falls back to XMP strip warning."""
+def clean_pdf_pypdf(path: Path, dest: Path) -> tuple[list[str], dict]:
+    """Clean PDF metadata. exiftool > full-document pypdf clone > unchanged copy."""
     actions: list[str] = []
     data = path.read_bytes()
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     exiftool = which("exiftool")
+
+    # Strategy 1: exiftool (most reliable)
     if exiftool:
         dest.write_bytes(data)
         try:
             r = subprocess.run(
-                [
-                    exiftool,
-                    "-all=",
-                    "-overwrite_original",
-                    str(dest),
-                ],
+                [exiftool, "-all=", "-overwrite_original", str(dest)],
                 capture_output=True,
                 text=True,
                 timeout=60,
                 check=False,
             )
             actions.append(f"exiftool -all= (rc={r.returncode})")
+            if r.returncode == 0:
+                return actions, {"mode": "exiftool", "degraded": False}
+            actions.append(f"exiftool degraded (rc={r.returncode}); trying pypdf")
         except Exception as e:
-            actions.append(f"exiftool failed: {e}")
-        c2patool = which("c2patool")
-        # c2patool does not always strip; leave note
-        if c2patool:
-            actions.append("c2patool available for inspect; strip via exiftool/re-export")
-        return actions, {"mode": "exiftool"}
+            actions.append(f"exiftool failed: {e}; trying pypdf")
 
-    # Degraded: strip obvious XMP packets between <?xpacket begin and end
-    text = data
-    new, n = re.subn(
-        rb"<\?xpacket begin.*?<\?xpacket end[^?]*\?>",
-        b"",
-        text,
-        flags=re.I | re.DOTALL,
-    )
-    if n:
-        actions.append(f"stripped XMP xpacket x{n} (degraded; may leave offsets broken)")
-        # PDF structural risk: document degraded mode clearly
-        dest.write_bytes(new)
-        actions.append("warning: pure-stdlib PDF strip is best-effort; prefer exiftool")
-        return actions, {"mode": "stdlib-xmp", "degraded": True}
+    # Strategy 2: clone the complete document graph, then remove only metadata.
+    # Copying pages alone loses outlines, forms, attachments, labels, and viewer state.
+    try:
+        from pypdf import PdfReader, PdfWriter
+    except ImportError:
+        PdfReader = None  # type: ignore[assignment]
+    if PdfReader is not None:
+        try:
+            reader = PdfReader(str(path))
+            if reader.is_encrypted:
+                if reader.decrypt("") == 0:
+                    actions.append("encrypted PDF (password required); copied as-is")
+                    dest.write_bytes(data)
+                    return actions, {"mode": "copy-encrypted", "degraded": True}
+                actions.append("decrypted with empty password")
+            writer = PdfWriter()
+            writer.clone_document_from_reader(reader)
+            page_metadata = 0
+            for page in writer.pages:
+                if "/Metadata" in page:
+                    del page["/Metadata"]
+                    page_metadata += 1
+            if page_metadata:
+                actions.append(f"pypdf: drop per-page /Metadata x{page_metadata}")
+            if reader.metadata:
+                actions.append("pypdf: drop document info dictionary")
+            if reader.xmp_metadata is not None or "/Metadata" in writer.root_object:
+                actions.append("pypdf: drop catalog XMP packet")
+            writer.metadata = None
+            writer.xmp_metadata = None
+            if "/Metadata" in writer.root_object:
+                del writer.root_object["/Metadata"]
+            buf = io.BytesIO()
+            writer.write(buf)
+            # Publish only after a complete in-memory rewrite.
+            dest.write_bytes(buf.getvalue())
+            actions.append("pypdf: cloned full document graph; removed docinfo/XMP")
+            return actions, {"mode": "pypdf", "degraded": False}
+        except Exception as e:
+            actions.append(f"pypdf failed: {e}; copied unchanged")
+    else:
+        actions.append("pypdf not installed; copied unchanged")
 
+    # Never delete bytes from a PDF without rebuilding xref/object offsets.
     dest.write_bytes(data)
-    actions.append(
-        "no PDF cleaner available (install exiftool for reliable metadata strip); copied as-is"
-    )
+    actions.append("no structural PDF cleaner succeeded; copied unchanged")
     return actions, {"mode": "copy", "degraded": True}
+
+
+def clean_pdf(path: Path, dest: Path) -> tuple[list[str], dict]:
+    return clean_pdf_pypdf(path, dest)
 
 
 # ---------------------------------------------------------------------------
 # Unified API
 # ---------------------------------------------------------------------------
+
 
 def inspect_container(path: Path) -> ContainerInspectReport:
     data = path.read_bytes()
@@ -724,7 +752,7 @@ def clean_container(
                     f"layer A text: removed={stats['removed_count']} replaced={stats['replaced_count']}"
                 )
                 text = text2
-        dest.write_text(text, encoding="utf-8")
+        dest.write_text(text, encoding="utf-8", errors="surrogateescape")
     elif fmt == "markdown":
         text = data.decode("utf-8", errors="surrogateescape")
         text, actions = clean_markdown(text)
@@ -735,7 +763,7 @@ def clean_container(
                     f"layer A text: removed={stats['removed_count']} replaced={stats['replaced_count']}"
                 )
                 text = text2
-        dest.write_text(text, encoding="utf-8")
+        dest.write_text(text, encoding="utf-8", errors="surrogateescape")
     else:
         raise ValueError(f"unsupported container format: {fmt}")
 
