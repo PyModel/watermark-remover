@@ -120,9 +120,7 @@ def run_command(
             try:
                 process_group_id = os.getpgid(process.pid)
             except ProcessLookupError:
-                # start_new_session makes the initial PGID equal to pid even if
-                # the leader exits before this lookup.
-                process_group_id = process.pid
+                process_group_id = None
         if process.stdout is None or process.stderr is None:
             raise RuntimeError("external command output pipes unavailable")
 
@@ -145,13 +143,13 @@ def run_command(
                 drain_stalled = True
     finally:
         if process is not None:
-            group_cleanup_needed = process_group_id is not None and (
-                returncode is None or timed_out or any(reader.is_alive() for reader in readers)
-            )
+            readers_alive = any(reader.is_alive() for reader in readers)
+            leader_alive = returncode is None and process.poll() is None
+            group_cleanup_needed = process_group_id is not None and (leader_alive or readers_alive)
             if os.name == "posix" and group_cleanup_needed:
-                # Use the PGID captured while the session leader existed. If
-                # descendants still hold the pipes, that group remains alive;
-                # if it is gone, no signal is needed.
+                # The PGID was captured while the leader was addressable. An
+                # open descendant pipe keeps that group alive after leader exit,
+                # so a new process cannot reuse the PGID before this signal.
                 with suppress(ProcessLookupError, PermissionError):
                     os.killpg(process_group_id, signal.SIGKILL)
             elif os.name != "posix" and process.poll() is None:

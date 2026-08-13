@@ -289,6 +289,7 @@ def test_response_allows_missing_content_type_for_compatible_local_servers():
     [
         (urllib.error.URLError("connection refused"), "connection failed"),
         (urllib.error.URLError(TimeoutError("timed out")), "timed out"),
+        (TimeoutError("timed out"), "timed out"),
         (
             urllib.error.HTTPError(
                 "https://example.test/secret",
