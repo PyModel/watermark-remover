@@ -403,6 +403,196 @@ def simple_inpaint(raster: Raster, mask: Mask) -> Raster:
     return Raster(w, h, ch, data)
 
 
+def _mask_bounds(mask: Mask) -> tuple[int, int, int, int]:
+    min_x = mask.width
+    min_y = mask.height
+    max_x = -1
+    max_y = -1
+    for index, value in enumerate(mask.data):
+        if not value:
+            continue
+        x, y = index % mask.width, index // mask.width
+        min_x = min(min_x, x)
+        min_y = min(min_y, y)
+        max_x = max(max_x, x)
+        max_y = max(max_y, y)
+    if max_x < 0:
+        raise ValueError("mask contains no marked pixels")
+    return min_x, min_y, max_x + 1, max_y + 1
+
+
+def _texture_edge_score(
+    raster: Raster,
+    bounds: tuple[int, int, int, int],
+    source_x: int,
+    source_y: int,
+) -> float:
+    x0, y0, x1, y1 = bounds
+    width, height = x1 - x0, y1 - y0
+    channels = min(raster.channels, 3)
+    perimeter = 2 * (width + height)
+    sample_step = max(1, perimeter // 1024)
+    squared_error = 0
+    samples = 0
+
+    def add_error(source_index: int, target_index: int) -> None:
+        nonlocal squared_error, samples
+        for channel in range(channels):
+            difference = raster.data[source_index + channel] - raster.data[target_index + channel]
+            squared_error += difference * difference
+            samples += 1
+
+    if y0 > 0:
+        for offset in range(0, width, sample_step):
+            add_error(
+                (source_y * raster.width + source_x + offset) * raster.channels,
+                ((y0 - 1) * raster.width + x0 + offset) * raster.channels,
+            )
+    if y1 < raster.height:
+        for offset in range(0, width, sample_step):
+            add_error(
+                ((source_y + height - 1) * raster.width + source_x + offset) * raster.channels,
+                (y1 * raster.width + x0 + offset) * raster.channels,
+            )
+    if x0 > 0:
+        for offset in range(0, height, sample_step):
+            add_error(
+                ((source_y + offset) * raster.width + source_x) * raster.channels,
+                ((y0 + offset) * raster.width + x0 - 1) * raster.channels,
+            )
+    if x1 < raster.width:
+        for offset in range(0, height, sample_step):
+            add_error(
+                ((source_y + offset) * raster.width + source_x + width - 1) * raster.channels,
+                ((y0 + offset) * raster.width + x1) * raster.channels,
+            )
+    if not samples:
+        raise ValueError("texture patch has no surrounding pixels to match")
+    return squared_error / samples
+
+
+def _candidate_axis(start: int, stop: int, step: int) -> list[int]:
+    values = list(range(start, stop + 1, step))
+    if values and values[-1] != stop:
+        values.append(stop)
+    return values
+
+
+def _find_texture_match(raster: Raster, mask: Mask, feather: int) -> TextureMatch:
+    bounds = _mask_bounds(mask)
+    x0, y0, x1, y1 = bounds
+    width, height = x1 - x0, y1 - y0
+    if width * height > MAX_TEXTURE_PATCH_PIXELS:
+        raise ValueError(
+            f"texture patch exceeds safety limit of {MAX_TEXTURE_PATCH_PIXELS:,} pixels"
+        )
+
+    radius = max(256, 6 * max(width, height))
+    min_x = max(0, x0 - radius)
+    max_x = min(raster.width - width, x0 + radius)
+    min_y = max(0, y0 - radius)
+    max_y = min(raster.height - height, y0 + radius)
+    step = max(1, min(width, height) // 16)
+    estimated = ((max_x - min_x) // step + 1) * ((max_y - min_y) // step + 1)
+    if estimated > MAX_TEXTURE_CANDIDATES:
+        step *= math.ceil(math.sqrt(estimated / MAX_TEXTURE_CANDIDATES))
+
+    best: tuple[float, int, int, int] | None = None
+    gap = max(2, feather)
+    for source_y in _candidate_axis(min_y, max_y, step):
+        for source_x in _candidate_axis(min_x, max_x, step):
+            overlaps = not (
+                source_x + width + gap <= x0
+                or source_x >= x1 + gap
+                or source_y + height + gap <= y0
+                or source_y >= y1 + gap
+            )
+            if overlaps:
+                continue
+            score = _texture_edge_score(raster, bounds, source_x, source_y)
+            distance = abs(source_x - x0) + abs(source_y - y0)
+            candidate = (score, distance, source_x, source_y)
+            if best is None or candidate < best:
+                best = candidate
+    if best is None:
+        raise ValueError("no non-overlapping texture patch candidate found")
+    score, _distance, source_x, source_y = best
+    return TextureMatch(source_x, source_y, width, height, score)
+
+
+def _mask_depths(mask: Mask) -> bytearray:
+    depths = bytearray(mask.width * mask.height)
+    queue: deque[int] = deque()
+    for index, marked in enumerate(mask.data):
+        if not marked:
+            continue
+        x, y = index % mask.width, index // mask.width
+        if any(
+            nx < 0
+            or nx >= mask.width
+            or ny < 0
+            or ny >= mask.height
+            or not mask.data[ny * mask.width + nx]
+            for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1))
+        ):
+            depths[index] = 1
+            queue.append(index)
+    while queue:
+        index = queue.popleft()
+        depth = depths[index]
+        x, y = index % mask.width, index // mask.width
+        for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+            if 0 <= nx < mask.width and 0 <= ny < mask.height:
+                neighbor = ny * mask.width + nx
+                if mask.data[neighbor] and not depths[neighbor]:
+                    depths[neighbor] = min(255, depth + 1)
+                    queue.append(neighbor)
+    return depths
+
+
+def texture_patch_inpaint(
+    raster: Raster,
+    mask: Mask,
+    *,
+    feather: int = 0,
+) -> tuple[Raster, TextureMatch]:
+    """Fill a small marked region from the best matching nearby texture patch.
+
+    The source patch is selected by edge error against known pixels surrounding
+    the mask. Optional distance-based feathering can hide seams; the default fully replaces
+    the refined mask while preserving every pixel outside it exactly.
+    """
+    if (raster.width, raster.height) != (mask.width, mask.height):
+        raise ValueError("mask/image dimensions differ")
+    if feather < 0 or feather > 254:
+        raise ValueError("texture feather must be in [0, 254]")
+    if mask.marked == raster.width * raster.height:
+        raise ValueError("cannot inpaint a mask covering the entire image")
+
+    match = _find_texture_match(raster, mask, feather)
+    x0, y0, _x1, _y1 = _mask_bounds(mask)
+    depths = _mask_depths(mask)
+    output = bytearray(raster.data)
+    for index, marked in enumerate(mask.data):
+        if not marked:
+            continue
+        x, y = index % raster.width, index // raster.width
+        source_x = match.x + x - x0
+        source_y = match.y + y - y0
+        source_index = (source_y * raster.width + source_x) * raster.channels
+        dest_index = index * raster.channels
+        if feather == 0:
+            blend = 1.0
+        else:
+            normalized = min(1.0, max(0.0, (depths[index] - 1) / feather))
+            blend = normalized * normalized * (3.0 - 2.0 * normalized)
+        for channel in range(raster.channels):
+            original = raster.data[dest_index + channel]
+            texture = raster.data[source_index + channel]
+            output[dest_index + channel] = round(original * (1.0 - blend) + texture * blend)
+    return Raster(raster.width, raster.height, raster.channels, output), match
+
+
 def composite(original: Raster, inpainted: Raster, mask: Mask) -> Raster:
     if (
         original.width != inpainted.width
