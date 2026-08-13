@@ -96,11 +96,11 @@ def _read_uint(data: bytes, pos: int, size: int, end: int, label: str) -> tuple[
     return (int.from_bytes(data[pos : pos + size], "big") if size else 0, pos + size)
 
 
-def _parse_iinf(data: bytes, start: int, end: int) -> dict[int, tuple[bytes, str]]:
-    """item_id -> (item_type, name). Supports infe v0-v3."""
+def _parse_iinf(data: bytes, start: int, end: int) -> dict[int, tuple[bytes, str, str]]:
+    """item_id -> (item_type, name, content_type). Supports infe v0-v3."""
     if start < 0 or end > len(data) or start + 4 > end:
         raise ValueError("truncated iinf full-box header")
-    items: dict[int, tuple[bytes, str]] = {}
+    items: dict[int, tuple[bytes, str, str]] = {}
     version = data[start]
     pos = start + 4
     count, pos = _read_uint(data, pos, 2 if version == 0 else 4, end, "iinf count")
@@ -136,7 +136,14 @@ def _parse_iinf(data: bytes, start: int, end: int) -> dict[int, tuple[bytes, str
         if nul < 0:
             raise ValueError("unterminated infe item name")
         name = data[q:nul].decode("utf-8", errors="replace")
-        items[item_id] = (item_type, name)
+        content_type = ""
+        if item_version >= 2 and item_type == b"mime":
+            content_start = nul + 1
+            content_end = data.find(b"\x00", content_start, box.end)
+            if content_end < 0:
+                raise ValueError("unterminated infe MIME content type")
+            content_type = data[content_start:content_end].decode("ascii", errors="replace")
+        items[item_id] = (item_type, name, content_type)
     if seen < count:
         raise ValueError(f"truncated iinf entries ({seen} < {count})")
     return items
