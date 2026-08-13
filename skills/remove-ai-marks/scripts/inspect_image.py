@@ -9,8 +9,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from common import emit_json  # noqa: E402
-from image_meta import inspect_image  # noqa: E402
+from common import emit_json
+from image_meta import inspect_image
 
 
 def main() -> int:

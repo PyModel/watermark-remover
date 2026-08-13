@@ -10,8 +10,8 @@ from pathlib import Path
 # Allow running as script from any cwd
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from common import emit_json, read_text_input  # noqa: E402
-from text_unicode import human_report, inspect_text  # noqa: E402
+from common import emit_json, read_text_input
+from text_unicode import human_report, inspect_text
 
 
 def main() -> int:

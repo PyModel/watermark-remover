@@ -14,8 +14,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-import image_meta  # noqa: E402
-from image_meta import ImageInspectReport, run_synthid_score  # noqa: E402
+import image_meta
+from image_meta import ImageInspectReport, run_synthid_score
 
 SCORE_SCRIPT = SCRIPTS / "score_synthid.py"
 

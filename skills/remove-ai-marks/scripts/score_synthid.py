@@ -76,9 +76,9 @@ def main() -> int:
 
     sys.path.insert(0, str(extraction))
     try:
-        import cv2  # noqa: E402
-        from robust_extractor import RobustSynthIDExtractor  # noqa: E402
-        from synthid_bypass_v4 import SpectralCodebookV4  # noqa: E402
+        import cv2
+        from robust_extractor import RobustSynthIDExtractor
+        from synthid_bypass_v4 import SpectralCodebookV4
     except ImportError as e:
         print(f"optional scorer dependencies missing: {e}", file=sys.stderr)
         return 3
@@ -94,9 +94,7 @@ def main() -> int:
         codebook_v4.load(str(codebook))
 
         extractor = RobustSynthIDExtractor()
-        result = extractor.detect_from_v4_codebook(
-            rgb, codebook_v4, model=args.model
-        )
+        result = extractor.detect_from_v4_codebook(rgb, codebook_v4, model=args.model)
     except Exception as e:
         print(f"scorer error: {e}", file=sys.stderr)
         return 1
