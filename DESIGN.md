@@ -30,10 +30,10 @@ Each module exposes one small interface; implementation complexity stays local.
 
 A seam exists only where at least two adapters are real:
 
-- **LLM rewrite:** Ollama and OpenAI-compatible HTTP; offline tests inject a fake callable.
+- **LLM rewrite:** Ollama and OpenAI-compatible HTTP; offline tests inject a fake callable. Thinking suppression is an explicit Qwen/Transformers-compatible option, never an assumed extension.
 - **PLL:** OpenAI-compatible token logprobs and a labeled heuristic fallback.
 - **Semantic similarity:** `/v1/embeddings` and shingle-Jaccard fallback.
-- **Visible inpainting:** stdlib nearest-boundary fallback and an external command adapter (LaMa/MI-GAN/diffusion tools).
+- **Visible inpainting:** stdlib texture-patch (default), nearest-boundary uniform-background fallback, and an external command adapter (LaMa/MI-GAN/diffusion tools).
 - **Visible localization:** user mask/box and an external detector command.
 - **PDF:** exiftool, full-document pypdf clone, and unchanged-copy fallback.
 - **SynthID scoring:** unavailable/no-op default and external `reverse-SynthID` checkout.
@@ -67,7 +67,7 @@ The CLI modules orchestrate these interfaces; they do not contain alternate impl
 ### Binary formats
 
 - PNG/JPEG critical pixel data is never removed because a payload contains marker-like bytes.
-- HEIF/AVIF cleaning preserves file length and item offsets: matching JUMBF boxes become `free`; targeted item bytes are overwritten at equal length.
+- HEIF/AVIF cleaning preserves file length and item offsets: matching JUMBF/C2PA UUID boxes become `free`; targeted item bytes are overwritten at equal length. Unsupported external/idat metadata extents fail closed.
 - Camera/editor EXIF is preserved when `--keep-non-ai-metadata` is selected.
 - PDFs are never byte-deleted without rebuilding cross-reference/object offsets; absent a structural cleaner, input is copied unchanged and reported residual.
 - Encrypted PDFs are never regex-edited.
