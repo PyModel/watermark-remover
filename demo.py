@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""Optional Gradio demo UI for watermark-remover.
+
+    pip install gradio
+    python3 demo.py            # serves on http://127.0.0.1:7860
+
+Text runs Layer A (deterministic Unicode scrub). Images/containers run the
+metadata strippers. Layer B shows the rewrite prompt (print-prompt backend —
+no model required); point WATERMARKS_REWRITE_* env vars at a local model to
+make it live.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
+sys.path.insert(0, str(SCRIPTS))
+
+from container_meta import clean_container, detect_container_format
+from image_meta import clean_image
+from image_meta import detect_format as detect_image_format
+from rewrite_text import rewrite
+from text_unicode import clean_text
+
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".heic", ".heif", ".avif"}
+TEXT_EXTS = {".txt", ".text", ".csv", ".json"}
+
+
+def _classify(path: Path) -> str:
+    ext = path.suffix.lower()
+    if ext in IMAGE_EXTS:
+        return "image"
+    if ext in TEXT_EXTS:
+        return "text"
+    if detect_container_format(path) != "unknown":
+        return "container"
+    data = path.read_bytes()[:4096]
+    if detect_image_format(data) in ("png", "jpeg", "heif", "avif"):
+        return "image"
+    return "text"
+
+
+def clean_upload(file_obj, keep_non_ai: bool, layer_b: bool, strength: str):
+    """Gradio handler. Returns (report markdown, cleaned file path, rewrite prompt)."""
+    if file_obj is None:
+        return "Upload a file first.", None, ""
+    src = Path(file_obj.name if hasattr(file_obj, "name") else str(file_obj))
+    workdir = Path(tempfile.mkdtemp(prefix="wmr-"))
+    dest = workdir / f"{src.stem}.cleaned{src.suffix}"
+
+    kind = _classify(src)
+    try:
+        if kind == "text":
+            text = src.read_text(encoding="utf-8", errors="surrogateescape")
+            cleaned, stats = clean_text(text)
+            dest.write_text(cleaned, encoding="utf-8", errors="surrogateescape")
+            result = {
+                "kind": "text",
+                "input": str(src),
+                "output": str(dest),
+                "stats": stats,
+            }
+        elif kind == "image":
+            result = {
+                "kind": "image",
+                **clean_image(src, dest, strip_all_metadata=not keep_non_ai),
+            }
+        else:
+            result = {"kind": "container", **clean_container(src, dest)}
+    except Exception as e:
+        return f"**Error cleaning {src.name}:** `{e}`", None, ""
+
+    prompt = ""
+    if layer_b and kind in ("text", "container"):
+        try:
+            body = dest.read_text(encoding="utf-8", errors="surrogateescape")
+        except Exception:
+            body = ""
+        if body.strip():
+            prompt, _ = rewrite(
+                body,
+                backend="print-prompt",
+                model=None,
+                base_url=None,
+                api_key=None,
+                strength=strength,
+                lang="French",
+                original_lang="English",
+                timeout=120.0,
+                layer_a_after=False,
+            )
+
+    report = (
+        f"**Kind:** `{result.get('kind')}`  \n"
+        f"**Output:** `{result.get('output')}`  \n"
+        f"```json\n{json.dumps(result, indent=2, ensure_ascii=False)[:4000]}\n```"
+    )
+    return report, str(dest), prompt
+
+
+def main() -> None:
+    try:
+        import gradio as gr
+    except ImportError:
+        sys.exit("gradio not installed: pip install gradio")
+
+    with gr.Blocks(title="watermark-remover") as demo:
+        gr.Markdown(
+            "# watermark-remover\n"
+            "Strip AI provenance marks — Layer A Unicode, file metadata (C2PA/EXIF/XMP), "
+            "optional Layer B rewrite prompt. For content **you own**."
+        )
+        with gr.Row():
+            with gr.Column():
+                file_in = gr.File(label="Upload file", type="filepath")
+                keep_non_ai = gr.Checkbox(label="Images: keep non-AI metadata", value=False)
+                layer_b = gr.Checkbox(label="Layer B: show rewrite prompt", value=False)
+                strength = gr.Dropdown(
+                    ["paraphrase", "backtranslate", "structural", "tsapa"],
+                    value="paraphrase",
+                    label="Layer B strength",
+                )
+                go = gr.Button("Clean", variant="primary")
+            with gr.Column():
+                report = gr.Markdown()
+                file_out = gr.File(label="Download cleaned file")
+                prompt_out = gr.Textbox(
+                    label="Layer B prompt (paste into a non-origin model)", lines=8
+                )
+        go.click(
+            clean_upload,
+            [file_in, keep_non_ai, layer_b, strength],
+            [report, file_out, prompt_out],
+        )
+
+    demo.launch()
+
+
+if __name__ == "__main__":
+    main()
