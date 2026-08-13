@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from common import which
+from common import atomic_write_bytes, atomic_write_text, which
 from image_meta import AI_META_HINTS, C2PA_MARKERS, run_optional_tools
 
 # Frontmatter / meta keys that often carry AI provenance
