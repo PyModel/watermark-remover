@@ -24,7 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from common import cleaned_path, eprint, read_text_input, write_text_output
+from common import cleaned_path, eprint, read_text_input, validate_output_path, write_text_output
 
 MODES = ("zero-width", "space-swap", "confusable", "case")
 
@@ -130,6 +130,12 @@ def main() -> int:
     out = args.output
     if out is None and args.path not in (None, "-"):
         out = str(cleaned_path(Path(args.path), suffix=".perturbed"))
+    if args.path not in (None, "-") and out not in (None, "-"):
+        try:
+            validate_output_path(Path(args.path), Path(out))
+        except ValueError as error:
+            eprint(f"error: {error}")
+            return 2
     write_text_output(result, out)
     if args.json:
         eprint(json.dumps(stats, indent=2, ensure_ascii=False))
