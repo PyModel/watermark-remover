@@ -46,6 +46,16 @@ def test_perturb_deterministic_with_seed():
     assert a != c
 
 
+def test_perturb_rejects_non_finite_strength():
+    for strength in (float("nan"), float("inf"), -0.1, 1.1):
+        try:
+            perturb_text(SAMPLE, strength=strength)
+        except ValueError as error:
+            assert "finite" in str(error)
+        else:
+            raise AssertionError("expected strength rejection")
+
+
 def test_perturb_zero_strength_noop():
     out, stats = perturb_text(SAMPLE, mode="confusable", strength=0.0, seed=1)
     assert out == SAMPLE
@@ -57,6 +67,24 @@ def test_perturb_confusable_not_reversible():
     assert stats["reversible_by_layer_a"] is False
     assert out != SAMPLE
     assert "а" in out  # Cyrillic a
+
+
+def test_perturb_cli_rejects_output_alias(tmp_path: Path):
+    source = tmp_path / "source.txt"
+    source.write_text("preserve", encoding="utf-8")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS / "perturb_text.py"),
+            str(source),
+            "-o",
+            str(source),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert source.read_text(encoding="utf-8") == "preserve"
 
 
 def test_clean_file_character_perturbation(tmp_path: Path):
