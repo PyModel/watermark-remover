@@ -136,22 +136,30 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = _build_parser().parse_args()
-    missing = [source for source in args.path if not source.exists()]
-    if missing:
-        for source in missing:
-            eprint(f"not a file or directory: {source}")
+    invalid = [
+        source
+        for source in args.path
+        if not source.exists() or source.is_symlink() or not (source.is_file() or source.is_dir())
+    ]
+    if invalid:
+        for source in invalid:
+            eprint(f"not a regular file or directory: {source}")
         return 2
     allowed = SUPPORTED_EXTS
     if args.extensions:
         allowed = {
             "." + e.strip().lstrip(".").lower() for e in args.extensions.split(",") if e.strip()
         }
-    items = collect_inputs(
-        args.path,
-        recursive=args.recursive,
-        pattern=args.glob,
-        extensions=allowed,
-    )
+    try:
+        items = collect_inputs(
+            args.path,
+            recursive=args.recursive,
+            pattern=args.glob,
+            extensions=allowed,
+        )
+    except ValueError as error:
+        eprint(f"invalid input selection: {error}")
+        return 2
     if args.output and not args.in_place and any(source.is_dir() for source in args.path):
         output_root = args.output.resolve()
         items = [item for item in items if not item.path.resolve().is_relative_to(output_root)]
@@ -166,44 +174,15 @@ def main() -> int:
         return 2
     if args.in_place and args.output:
         eprint("warning: -o ignored with --in-place")
+    try:
+        work = _plan_work(items, args, batch)
+    except ValueError as error:
+        eprint(f"invalid output selection: {error}")
+        return 2
     if batch and args.output and not args.in_place:
         args.output.mkdir(parents=True, exist_ok=True)
 
-    results: list[dict] = []
-    output_paths: set[Path] = set()
-    for item in items:
-        if args.in_place or not args.output:
-            out = None
-        elif batch:
-            try:
-                out = safe_output_path(args.output, item.relative)
-            except ValueError as error:
-                results.append(
-                    {
-                        "kind": "unknown",
-                        "input": str(item.path),
-                        "output": str(args.output / item.relative),
-                        "error": str(error),
-                        "exit_code": 1,
-                    }
-                )
-                continue
-        else:
-            out = args.output
-        if out and out in output_paths:
-            results.append(
-                {
-                    "kind": "unknown",
-                    "input": str(item.path),
-                    "output": str(out),
-                    "error": "batch output collision",
-                    "exit_code": 1,
-                }
-            )
-            continue
-        if out:
-            output_paths.add(out)
-        results.append(_clean_single_file(item.path, out, args))
+    results = [_clean_single_file(item.path, output, args) for item, output in work]
 
     if args.json:
         payload: dict | list = {"total": len(results), "results": results} if batch else results[0]
@@ -212,6 +191,64 @@ def main() -> int:
         errors = sum(r.get("exit_code", 0) != 0 for r in results)
         eprint(f"done: {len(results)} file(s), {errors} with warnings/errors")
     return 0 if all(r.get("exit_code", 0) == 0 for r in results) else 1
+
+
+def _plan_work(items: list[InputItem], args, batch: bool) -> list[tuple[InputItem, Path | None]]:
+    """Resolve and validate every destination before the first write."""
+    inputs = [item.path for item in items]
+    ancillary_inputs = [candidate for candidate in (args.visible_mask,) if candidate is not None]
+    for ancillary in ancillary_inputs:
+        if not ancillary.is_file() or ancillary.is_symlink():
+            raise ValueError(f"not a regular mask file: {ancillary}")
+    all_inputs = [*inputs, *ancillary_inputs]
+    destinations: list[Path] = []
+    work: list[tuple[InputItem, Path | None]] = []
+
+    for item in items:
+        if args.in_place:
+            backup = backup_path(item.path)
+            if backup.exists() or backup.is_symlink():
+                raise ValueError(f"backup already exists: {backup}")
+            if _visible_requested(args):
+                mask_output = item.path.with_name(f"{item.path.stem}.mask.pgm")
+                if mask_output.is_symlink():
+                    raise ValueError(f"mask output is a symlink: {mask_output}")
+                if any(paths_alias(mask_output, source) for source in all_inputs):
+                    raise ValueError(f"mask output aliases an input: {mask_output}")
+                if any(paths_alias(mask_output, existing) for existing in destinations):
+                    raise ValueError(f"mask output collision: {mask_output}")
+                destinations.append(mask_output)
+            work.append((item, None))
+            continue
+
+        if args.output is None:
+            output = cleaned_path(item.path)
+        elif batch:
+            output = safe_output_path(args.output, item.relative)
+        else:
+            output = args.output
+
+        validate_output_path(item.path, output)
+        for source in all_inputs:
+            if paths_alias(output, source):
+                raise ValueError(f"output aliases an input: {output}")
+        for existing in destinations:
+            if paths_alias(output, existing):
+                raise ValueError(f"batch output collision: {output}")
+        destinations.append(output)
+
+        if _visible_requested(args):
+            mask_output = output.with_name(f"{output.stem}.mask.pgm")
+            if mask_output.is_symlink():
+                raise ValueError(f"mask output is a symlink: {mask_output}")
+            if any(paths_alias(mask_output, source) for source in all_inputs):
+                raise ValueError(f"mask output aliases an input: {mask_output}")
+            if any(paths_alias(mask_output, existing) for existing in destinations):
+                raise ValueError(f"mask/output collision: {mask_output}")
+            destinations.append(mask_output)
+
+        work.append((item, output))
+    return work
 
 
 def _rewrite_tsapa_live(text: str, args) -> tuple[str, dict]:
