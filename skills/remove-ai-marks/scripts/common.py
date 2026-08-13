@@ -42,9 +42,150 @@ def write_text_output(text: str, path: str | None) -> None:
         if text and not text.endswith("\n"):
             sys.stdout.write("\n")
         return
-    out = Path(path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(text, encoding="utf-8", errors="surrogateescape")
+    atomic_write_text(Path(path), text)
+
+
+def paths_alias(left: Path, right: Path) -> bool:
+    """Return whether two paths name the same file, including hard links."""
+    try:
+        return left.samefile(right)
+    except FileNotFoundError:
+        return left.resolve(strict=False) == right.resolve(strict=False)
+
+
+def validate_output_path(source: Path, dest: Path) -> None:
+    """Reject implicit in-place writes and destination symlinks."""
+    if dest.is_symlink():
+        raise ValueError(f"output path is a symlink: {dest}")
+    if paths_alias(source, dest):
+        raise ValueError("output aliases input; use --in-place for a guarded overwrite")
+    if dest.exists() and not dest.is_file():
+        raise ValueError(f"output path is not a regular file: {dest}")
+
+
+def backup_path(source: Path) -> Path:
+    return source.with_suffix(source.suffix + ".bak")
+
+
+def create_backup(source: Path) -> Path:
+    """Create a durable, byte-exact backup without following or replacing links."""
+    dest = backup_path(source)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    read_flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        read_flags |= os.O_NOFOLLOW
+
+    source_fd = os.open(source, read_flags)
+    dest_fd: int | None = None
+    created = False
+    try:
+        source_stat = os.fstat(source_fd)
+        if not stat.S_ISREG(source_stat.st_mode):
+            raise ValueError(f"not a regular file: {source}")
+        dest_fd = os.open(dest, flags, stat.S_IMODE(source_stat.st_mode))
+        created = True
+        with (
+            os.fdopen(source_fd, "rb", closefd=False) as source_file,
+            os.fdopen(dest_fd, "wb", closefd=False) as dest_file,
+        ):
+            while chunk := source_file.read(1024 * 1024):
+                dest_file.write(chunk)
+            dest_file.flush()
+            os.fsync(dest_fd)
+        os.fchmod(dest_fd, stat.S_IMODE(source_stat.st_mode))
+    except Exception:
+        if dest_fd is not None:
+            os.close(dest_fd)
+            dest_fd = None
+        if created:
+            dest.unlink(missing_ok=True)
+        raise
+    finally:
+        os.close(source_fd)
+        if dest_fd is not None:
+            os.close(dest_fd)
+    return dest
+
+
+def atomic_write_bytes(dest: Path, data: bytes) -> None:
+    """Publish bytes atomically without following a destination symlink."""
+    if dest.is_symlink():
+        raise ValueError(f"output path is a symlink: {dest}")
+    existing_mode = stat.S_IMODE(dest.stat().st_mode) if dest.exists() else None
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{dest.name}.", dir=dest.parent)
+    temp = Path(temp_name)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if existing_mode is not None:
+            os.chmod(temp, existing_mode)
+        if dest.is_symlink():
+            raise ValueError(f"output path became a symlink: {dest}")
+        os.replace(temp, dest)
+    except Exception:
+        temp.unlink(missing_ok=True)
+        raise
+
+
+def read_bytes_bounded(path: Path, limit: int, *, label: str = "file") -> bytes:
+    """Read a regular file through one descriptor, rejecting growth past ``limit``."""
+    if limit < 0:
+        raise ValueError("read limit must be non-negative")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags)
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f"not a regular file: {path}")
+        if metadata.st_size > limit:
+            raise ValueError(f"{label} exceeds safety limit of {limit:,} bytes")
+        with os.fdopen(fd, "rb", closefd=False) as stream:
+            data = stream.read(limit + 1)
+        if len(data) > limit:
+            raise ValueError(f"{label} exceeds safety limit of {limit:,} bytes")
+        return data
+    finally:
+        os.close(fd)
+
+
+def atomic_write_text(
+    dest: Path,
+    text: str,
+    *,
+    encoding: str = "utf-8",
+    errors: str = "surrogateescape",
+) -> None:
+    atomic_write_bytes(dest, text.encode(encoding, errors=errors))
+
+
+def read_json_object_bounded(
+    stream: Any,
+    *,
+    limit: int | None = None,
+    label: str = "HTTP response",
+) -> dict[str, Any]:
+    """Decode one bounded UTF-8 JSON object from a binary response stream."""
+    if limit is None:
+        limit = DEFAULT_HTTP_JSON_LIMIT
+    if limit < 0:
+        raise ValueError("JSON response limit must be non-negative")
+    raw = stream.read(limit + 1)
+    if len(raw) > limit:
+        raise RuntimeError(f"{label} exceeds safety limit of {limit:,} bytes")
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"{label} is not valid UTF-8 JSON") from error
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{label} must be a JSON object")
+    return data
 
 
 def emit_json(data: Any) -> None:
