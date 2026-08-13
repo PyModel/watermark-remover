@@ -652,7 +652,7 @@ def clean_pdf_pypdf(path: Path, dest: Path) -> tuple[list[str], dict]:
             buf = io.BytesIO()
             writer.write(buf)
             # Publish only after a complete in-memory rewrite.
-            dest.write_bytes(buf.getvalue())
+            atomic_write_bytes(dest, buf.getvalue())
             actions.append("pypdf: cloned full document graph; removed docinfo/XMP")
             return actions, {"mode": "pypdf", "degraded": False}
         except Exception as e:
@@ -661,7 +661,7 @@ def clean_pdf_pypdf(path: Path, dest: Path) -> tuple[list[str], dict]:
         actions.append("pypdf not installed; copied unchanged")
 
     # Never delete bytes from a PDF without rebuilding xref/object offsets.
-    dest.write_bytes(data)
+    atomic_write_bytes(dest, data)
     actions.append("no structural PDF cleaner succeeded; copied unchanged")
     return actions, {"mode": "copy", "degraded": True}
 
@@ -730,16 +730,16 @@ def clean_container(
 
     if fmt == "svg":
         cleaned, actions = clean_svg(data)
-        dest.write_bytes(cleaned)
+        atomic_write_bytes(dest, cleaned)
     elif fmt == "pdf":
         actions, meta_extra = clean_pdf(path, dest)
         meta.update(meta_extra)
     elif fmt == "docx":
         cleaned, actions = clean_docx(data)
-        dest.write_bytes(cleaned)
+        atomic_write_bytes(dest, cleaned)
     elif fmt == "odt":
         cleaned, actions = clean_odt(data)
-        dest.write_bytes(cleaned)
+        atomic_write_bytes(dest, cleaned)
     elif fmt == "html":
         text = data.decode("utf-8", errors="surrogateescape")
         text, actions = clean_html(text)
@@ -750,7 +750,7 @@ def clean_container(
                     f"layer A text: removed={stats['removed_count']} replaced={stats['replaced_count']}"
                 )
                 text = text2
-        dest.write_text(text, encoding="utf-8", errors="surrogateescape")
+        atomic_write_text(dest, text)
     elif fmt == "markdown":
         text = data.decode("utf-8", errors="surrogateescape")
         text, actions = clean_markdown(text)
@@ -761,7 +761,7 @@ def clean_container(
                     f"layer A text: removed={stats['removed_count']} replaced={stats['replaced_count']}"
                 )
                 text = text2
-        dest.write_text(text, encoding="utf-8", errors="surrogateescape")
+        atomic_write_text(dest, text)
     else:
         raise ValueError(f"unsupported container format: {fmt}")
 
