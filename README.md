@@ -384,13 +384,5 @@ MIT, see [LICENSE](LICENSE).
 - Kirchenbauer et al., [*A Watermark for Large Language Models*](https://arxiv.org/abs/2301.10226)
 
 ---
-
-## Star history
-
-<a href="https://www.star-history.com/?type=date&repos=Pythoughts-labs%2Fwatermark-remover">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=Pythoughts-labs/watermark-remover&type=date&theme=dark&legend=top-left&sealed_token=HatSJGVcSh5pDXkB0gP7_TXRxvD9Pu-BrlkjpbdZunNoaSFzwGOdjTpHTq1lPaRXNMok_0gPsWJupxtO2QNhgziZJAIWFatFlBA5QUfGgmCsc0MNJkSC-Mf8srFqV_lsLZq6ynOlRiMd0VGUWlGYoO1jBwceyLV9naxb9NzgeMrVrOnmZMatXENmdiVj" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=Pythoughts-labs/watermark-remover&type=date&legend=top-left&sealed_token=HatSJGVcSh5pDXkB0gP7_TXRxvD9Pu-BrlkjpbdZunNoaSFzwGOdjTpHTq1lPaRXNMok_0gPsWJupxtO2QNhgziZJAIWFatFlBA5QUfGgmCsc0MNJkSC-Mf8srFqV_lsLZq6ynOlRiMd0VGUWlGYoO1jBwceyLV9naxb9NzgeMrVrOnmZMatXENmdiVj" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=Pythoughts-labs/watermark-remover&type=date&legend=top-left&sealed_token=HatSJGVcSh5pDXkB0gP7_TXRxvD9Pu-BrlkjpbdZunNoaSFzwGOdjTpHTq1lPaRXNMok_0gPsWJupxtO2QNhgziZJAIWFatFlBA5QUfGgmCsc0MNJkSC-Mf8srFqV_lsLZq6ynOlRiMd0VGUWlGYoO1jBwceyLV9naxb9NzgeMrVrOnmZMatXENmdiVj" />
  </picture>
 </a>
