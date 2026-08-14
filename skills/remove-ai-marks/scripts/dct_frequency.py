@@ -296,9 +296,19 @@ def frequency_suppress_from_bytes(
     block_size: int = 8,
     overlap: int = 4,
 ) -> bytearray:
-    """Apply frequency-domain suppression to raw pixel bytes."""
+    """Apply frequency-domain suppression to raw pixel bytes.
+
+    Enforces the same pixel cap as ``degrade_image`` so the pure-Python DCT
+    cannot be asked to churn for hours on a large raster.
+    """
+    _validate_raster(width, height, channels)
     if len(raw) != width * height * channels:
         raise ValueError(f"raw length {len(raw)} != {width}*{height}*{channels}")
+    if width * height > MAX_FREQ_DCT_PIXELS:
+        raise ValueError(
+            f"freq-dct supports at most {MAX_FREQ_DCT_PIXELS:,} pixels "
+            f"({width * height:,} given); downscale the image first"
+        )
 
     pixels: list[list[float]] = []
     for i in range(0, len(raw), channels):

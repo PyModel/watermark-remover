@@ -319,3 +319,18 @@ class TestPixelCaps:
         raw = bytes([128] * (size * size * 3))
         with pytest.raises(ValueError, match="downscale"):
             degrade_image(raw, size, size, 3, strategy="two-stage")
+
+
+class TestFromBytesCap:
+    """frequency_suppress_from_bytes enforces the same DCT pixel cap."""
+
+    def test_from_bytes_rejects_oversized_image(self) -> None:
+        size = 257
+        raw = bytes([128] * (size * size * 3))
+        with pytest.raises(ValueError, match="downscale"):
+            frequency_suppress_from_bytes(raw, size, size, 3)
+
+    def test_from_bytes_accepts_small_image(self) -> None:
+        raw = bytes([128] * (8 * 8))
+        result = frequency_suppress_from_bytes(raw, 8, 8, 1, suppress=0.5)
+        assert len(result) == 8 * 8
