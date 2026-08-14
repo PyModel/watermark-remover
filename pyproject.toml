@@ -1,7 +1,38 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "watermark-remover"
+version = "0.3.0"
+description = "Pure-Python AI watermark remover for text, images, and documents"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "Mohamed Elkholy"}]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Multimedia :: Graphics",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.scripts]
+wm = "skills.remove_ai_marks.scripts.clean_file:main"
+
+[tool.setuptools.packages.find]
+include = ["skills.remove_ai_marks.scripts*"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-extend-exclude = ["research"]
+extend-exclude = ["research", ".venv", "__pycache__", ".pytest_cache"]
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I", "B", "SIM", "UP", "RUF"]
@@ -11,3 +42,21 @@ ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 "demo.py" = ["E402"]
 "skills/remove-ai-marks/scripts/*.py" = ["E402"]
 "tests/*.py" = ["E402"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-q"
+
+[tool.watermark]
+# Default settings — overridden by env vars and .env file.
+max_file_size = 104857600
+max_image_pixels = 40000000
+max_concurrency = 4
+log_level = "INFO"
+rewrite_timeout = 120
+max_rewrite_generations = 5
+max_rewrite_population = 12
+rewrite_backend = "print-prompt"
+rewrite_base_url = "http://127.0.0.1:11434"

@@ -90,6 +90,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--inpaint-command", help="Inpainter template: {input} {mask} {output} {prompt}")
     p.add_argument("--visible-prompt", default="Remove watermark, fill with background")
     p.add_argument("--soft-binding", action="store_true")
+
+    # Frequency / morphological degradation (Layer V extension)
+    degrade = p.add_mutually_exclusive_group()
+    degrade.add_argument("--degrade", choices=["freq-dct", "blur", "median", "jpeg", "rotate", "two-stage"], help="Frequency-domain image degradation")
+    degrade.add_argument("--morpho", choices=["grid", "diagonal", "noise", "quantize"], help="Morphological perturbation")
+    p.add_argument("--degrade-strength", type=float, default=0.6, help="Degradation strength (0-1, for freq-dct)")
+    p.add_argument("--degrade-seed", type=int, default=None, help="Deterministic seed for degradation")
     return p
 
 
@@ -247,6 +254,25 @@ def _build_clean_plan(args, dest: Path, kind: AssetKind) -> CleanPlan:
             mask_output=dest.with_name(f"{dest.stem}.mask.pgm"),
             prompt=args.visible_prompt,
         )
+
+    # Build degradation plan for images
+    degrade_plan = None
+    if kind == "image":
+        from clean_asset import ImageDegradePlan
+
+        if args.degrade:
+            degrade_plan = ImageDegradePlan(
+                strategy=args.degrade,
+                strength=args.degrade_strength,
+                seed=args.degrade_seed,
+            )
+        elif args.morpho:
+            degrade_plan = ImageDegradePlan(
+                strategy=args.morpho,
+                strength=args.degrade_strength,
+                seed=args.degrade_seed,
+            )
+
     return CleanPlan(
         forced_kind=kind,
         in_place=args.in_place,
@@ -254,6 +280,7 @@ def _build_clean_plan(args, dest: Path, kind: AssetKind) -> CleanPlan:
         strip_all_metadata=not args.keep_non_ai_metadata,
         visible=visible_plan,
         inspect_soft_binding=args.soft_binding,
+        degrade=degrade_plan,
     )
 
 

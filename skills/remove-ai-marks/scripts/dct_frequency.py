@@ -1,0 +1,625 @@
+"""Frequency-domain watermark degradation attacks (DCT/FFT).
+
+T1 Tier 1 classical attack — targets mid-frequency bands where spatial
+watermarks and soft logos typically live.  Works on any RGBA/RGB/grayscale
+image via a pure-Python orthonormal DCT-II implementation.
+
+Complexity   : O(width * height * log(width * height)) per pass
+Quality     : Fair–Good (noticeable banding at aggressive settings)
+Legal risk   : High (specific intent to remove frequency-domain marks)
+
+Strategies
+----------
+    freq-dct   — DCT mid-frequency suppression (default)
+    blur       — Gaussian blur (separable)
+    median     — Median filter
+    jpeg       — Simulated JPEG compression
+    rotate     — Nearest-neighbor rotation
+    two-stage  — blur → jpeg → median (95–98% ASR paper-reported)
+
+Usage
+-----
+    from dct_frequency import degrade_image, frequency_suppress_from_bytes
+    result = degrade_image(raw_bytes, w, h, ch, strategy="freq-dct", suppress=0.7)
+    cleaned = result.data          # bytearray in original pixel layout
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+# ---------------------------------------------------------------------------
+# 2D orthonormal DCT-II
+# ---------------------------------------------------------------------------
+
+
+def _dct2_ortho(block: list[list[float]]) -> list[list[float]]:
+    """Compute the orthonormal 2-D DCT-II of a block."""
+    h = len(block)
+    w = len(block[0]) if h else 0
+    result: list[list[float]] = [[0.0] * w for _ in range(h)]
+    for u in range(h):
+        for v in range(w):
+            s = 0.0
+            for x in range(h):
+                for y in range(w):
+                    s += (
+                        block[x][y]
+                        * math.cos(math.pi * u * (2 * x + 1) / (2 * h))
+                        * math.cos(math.pi * v * (2 * y + 1) / (2 * w))
+                    )
+            au = math.sqrt(1.0 / h) if u == 0 else math.sqrt(2.0 / h)
+            av = math.sqrt(1.0 / w) if v == 0 else math.sqrt(2.0 / w)
+            result[u][v] = au * av * s
+    return result
+
+
+def _idct2_ortho(block: list[list[float]]) -> list[list[float]]:
+    """Inverse orthonormal 2-D DCT-II."""
+    h = len(block)
+    w = len(block[0]) if h else 0
+    result: list[list[float]] = [[0.0] * w for _ in range(h)]
+    for x in range(h):
+        for y in range(w):
+            s = 0.0
+            for u in range(h):
+                for v in range(w):
+                    au = math.sqrt(1.0 / h) if u == 0 else math.sqrt(2.0 / h)
+                    av = math.sqrt(1.0 / w) if v == 0 else math.sqrt(2.0 / w)
+                    s += (
+                        au
+                        * av
+                        * block[u][v]
+                        * math.cos(math.pi * u * (2 * x + 1) / (2 * h))
+                        * math.cos(math.pi * v * (2 * y + 1) / (2 * w))
+                    )
+            result[x][y] = s
+    return result
+
+
+def _dct_block(block: list[list[float]], suppress: float) -> list[list[float]]:
+    """DCT → suppress mid-frequencies → IDCT.
+
+    Parameters
+    ----------
+    block : 8 × 8 pixel float block
+    suppress : 0.0 (keep all) → 1.0 (aggressive mid-freq removal)
+    """
+    dct_block = _dct2_ortho(block)
+    h = len(dct_block)
+    w = len(dct_block[0]) if h else 0
+    for u in range(h):
+        for v in range(w):
+            if u == 0 and v == 0:
+                continue  # DC component
+            dist = math.sqrt((u - h / 2) ** 2 + (v - w / 2) ** 2)
+            max_dist = math.sqrt((h / 2) ** 2 + (w / 2) ** 2)
+            mid_start = max_dist * 0.2
+            mid_end = max_dist * 0.6
+            if mid_start <= dist <= mid_end:
+                window = (
+                    1.0
+                    - 0.5
+                    * (1.0 + math.cos(math.pi * (dist - mid_start) / (mid_end - mid_start)))
+                )
+                dct_block[u][v] *= 1.0 - suppress * window
+    return _idct2_ortho(dct_block)
+
+
+# ---------------------------------------------------------------------------
+# Public attack functions
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class FrequencyResult:
+    """Result of a frequency-domain attack."""
+
+    data: bytearray
+    width: int
+    height: int
+    channels: int
+    strategy: str
+    suppress_ratio: float
+    block_size: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "strategy": self.strategy,
+            "suppress_ratio": self.suppress_ratio,
+            "block_size": self.block_size,
+            "width": self.width,
+            "height": self.height,
+            "channels": self.channels,
+        }
+
+
+def frequency_suppress(
+    pixels: list[list[float]],
+    width: int,
+    height: int,
+    channels: int,
+    *,
+    suppress: float = 0.6,
+    block_size: int = 8,
+    overlap: int = 4,
+) -> list[list[float]]:
+    """Apply frequency-domain suppression to per-pixel float data.
+
+    Operates independently on each channel using overlapping DCT blocks.
+    """
+    if channels not in (1, 3, 4):
+        raise ValueError("channels must be 1, 3, or 4")
+
+    # Build per-channel channel data
+    channel_data: list[list[list[float]]] = []
+    for ch in range(channels):
+        channel: list[list[float]] = []
+        for y in range(height):
+            row: list[float] = []
+            for x in range(width):
+                idx = y * width + x
+                row.append(pixels[idx][ch])
+            channel.append(row)
+        channel_data.append(channel)
+
+    # Apply frequency suppression per channel
+    result: list[list[list[float]]] = []
+    for ch in range(channels):
+        channel = channel_data[ch]
+        temp: list[list[float]] = [[0.0] * width for _ in range(height)]
+        count: list[list[float]] = [[0.0] * width for _ in range(height)]
+        for by in range(0, height - block_size + 1, block_size - overlap):
+            for bx in range(0, width - block_size + 1, block_size - overlap):
+                block: list[list[float]] = []
+                for dy in range(block_size):
+                    block.append([channel[by + dy][bx + dx] for dx in range(block_size)])
+                dct_out = _dct_block(block, suppress)
+                for dy in range(block_size):
+                    for dx in range(block_size):
+                        temp[by + dy][bx + dx] += dct_out[dy][dx]
+                        count[by + dy][bx + dx] += 1.0
+
+        channel_out: list[list[float]] = []
+        for y in range(height):
+            row: list[float] = []
+            for x in range(width):
+                if count[y][x] > 0:
+                    row.append(temp[y][x] / count[y][x])
+                else:
+                    row.append(channel[y][x])
+            channel_out.append(row)
+        result.append(channel_out)
+
+    flat: list[list[float]] = []
+    for y in range(height):
+        for x in range(width):
+            flat.append([result[ch][y][x] for ch in range(channels)])
+    return flat
+
+
+def frequency_suppress_from_bytes(
+    raw: bytes,
+    width: int,
+    height: int,
+    channels: int,
+    *,
+    suppress: float = 0.6,
+    block_size: int = 8,
+    overlap: int = 4,
+) -> bytearray:
+    """Apply frequency-domain suppression to raw pixel bytes."""
+    if len(raw) != width * height * channels:
+        raise ValueError(f"raw length {len(raw)} != {width}*{height}*{channels}")
+
+    pixels: list[list[float]] = []
+    for i in range(0, len(raw), channels):
+        pixels.append([float(raw[i + c]) for c in range(channels)])
+
+    result = frequency_suppress(
+        pixels, width, height, channels, suppress=suppress, block_size=block_size, overlap=overlap
+    )
+
+    out = bytearray(len(raw))
+    for i, row in enumerate(result):
+        for c in range(channels):
+            out[i * channels + c] = max(0, min(255, round(row[c])))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Additional signal-domain degradations
+# ---------------------------------------------------------------------------
+
+
+def gaussian_blur_2d(
+    pixels: list[list[float]],
+    width: int,
+    height: int,
+    channels: int,
+    *,
+    sigma: float = 1.0,
+) -> list[list[float]]:
+    """Apply a Gaussian blur (separable 1-D passes) to each channel."""
+    if sigma <= 0:
+        return [list(row) for row in pixels]
+
+    radius = max(1, int(3 * sigma))
+    kernel: list[float] = []
+    kernel_sum = 0.0
+    for i in range(-radius, radius + 1):
+        val = math.exp(-i * i / (2 * sigma * sigma))
+        kernel.append(val)
+        kernel_sum += val
+    kernel = [v / kernel_sum for v in kernel]
+
+    def _blur_row(row: list[float]) -> list[float]:
+        out: list[float] = [0.0] * len(row)
+        for x in range(len(row)):
+            s = 0.0
+            for j, offset in enumerate(range(-radius, radius + 1)):
+                nx = x + offset
+                if 0 <= nx < len(row):
+                    s += row[nx] * kernel[j]
+            out[x] = s
+        return out
+
+    def _blur_column(col_vals: list[list[float]]) -> list[float]:
+        out: list[float] = [0.0] * len(col_vals)
+        for y in range(len(col_vals)):
+            s = 0.0
+            for j, offset in enumerate(range(-radius, radius + 1)):
+                ny = y + offset
+                if 0 <= ny < len(col_vals):
+                    s += col_vals[ny] * kernel[j]
+            out[y] = s
+        return out
+
+    out: list[list[float]] = [[] for _ in range(height * width)]
+    for ch in range(channels):
+        col_data: list[list[float]] = [[0.0] * width for _ in range(height)]
+        for y in range(height):
+            for x in range(width):
+                col_data[y][x] = pixels[y * width + x][ch]
+        row_pass: list[list[float]] = [[0.0] * width for _ in range(height)]
+        for y in range(height):
+            row_pass[y] = _blur_row(col_data[y])
+        for x in range(width):
+            col_vals = [row_pass[y][x] for y in range(height)]
+            blurred = _blur_column(col_vals)
+            for y in range(height):
+                out[y * width + x].append(blurred[y])
+    return out
+
+
+def median_filter_2d(
+    pixels: list[list[float]],
+    width: int,
+    height: int,
+    channels: int,
+    *,
+    kernel_size: int = 3,
+) -> list[list[float]]:
+    """Apply a per-channel median filter."""
+    half = kernel_size // 2
+    out: list[list[float]] = [[] for _ in range(height * width)]
+    for ch in range(channels):
+        vals: list[list[float]] = [[0.0] * width for _ in range(height)]
+        for y in range(height):
+            for x in range(width):
+                vals[y][x] = pixels[y * width + x][ch]
+        for y in range(height):
+            for x in range(width):
+                samples: list[float] = []
+                for dy in range(-half, half + 1):
+                    for dx in range(-half, half + 1):
+                        ny, nx = y + dy, x + dx
+                        if 0 <= ny < height and 0 <= nx < width:
+                            samples.append(vals[ny][nx])
+                samples.sort()
+                mid = len(samples) // 2
+                out[y * width + x].append(samples[mid])
+    return out
+
+
+def jpeg_compress_sim(
+    pixels: list[list[float]],
+    width: int,
+    height: int,
+    channels: int,
+    *,
+    quality: int = 40,
+) -> list[list[float]]:
+    """Simulate JPEG compression via quantized DCT + rounding."""
+    qf = min(100, max(1, quality))
+    if qf < 50:
+        qm = [[max(1, int(5000 / qf)) for _ in range(8)] for _ in range(8)]
+    else:
+        standard = [
+            [16, 11, 10, 16, 24, 40, 51, 61],
+            [12, 12, 14, 19, 26, 58, 60, 55],
+            [14, 13, 16, 24, 40, 57, 69, 56],
+            [14, 17, 22, 29, 51, 87, 80, 62],
+            [18, 22, 37, 56, 68, 109, 103, 77],
+            [24, 35, 55, 64, 81, 104, 113, 92],
+            [49, 64, 78, 87, 103, 121, 120, 101],
+            [72, 92, 95, 98, 112, 100, 103, 99],
+        ]
+        qm = [[max(1, int(s * qf / 50)) for s in row] for row in standard]
+
+    out: list[list[float]] = [[] for _ in range(height * width)]
+    for ch in range(channels):
+        block_data: list[list[float]] = [[0.0] * width for _ in range(height)]
+        for y in range(height):
+            for x in range(width):
+                block_data[y][x] = pixels[y * width + x][ch]
+
+        for by in range(0, height - 7, 8):
+            for bx in range(0, width - 7, 8):
+                blk: list[list[float]] = []
+                for dy in range(8):
+                    blk.append([block_data[by + dy][bx + dx] for dx in range(8)])
+                dct_blk = _dct2_ortho(blk)
+                for u in range(8):
+                    for v in range(8):
+                        dct_blk[u][v] = round(dct_blk[u][v] / qm[u][v]) * qm[u][v]
+                out_blk = _idct2_ortho(dct_blk)
+                for dy in range(8):
+                    for dx in range(8):
+                        block_data[by + dy][bx + dx] = out_blk[dy][dx]
+
+        for y in range(height):
+            for x in range(width):
+                out[y * width + x].append(block_data[y][x])
+
+    return out
+
+
+def rotate_image(
+    pixels: list[list[float]],
+    width: int,
+    height: int,
+    channels: int,
+    *,
+    angle_deg: float = 3.0,
+) -> list[list[float]]:
+    """Rotate pixels by angle (degrees) using nearest-neighbor sampling."""
+    if angle_deg == 0:
+        return [list(row) for row in pixels]
+
+    rad = math.radians(angle_deg)
+    cos_a = math.cos(rad)
+    sin_a = math.sin(rad)
+
+    cx, cy = width / 2, height / 2
+    out: list[list[float]] = [[0.0] * channels for _ in range(height * width)]
+
+    for y in range(height):
+        for x in range(width):
+            rx = cos_a * (x - cx) + sin_a * (y - cy) + cx
+            ry = -sin_a * (x - cx) + cos_a * (y - cy) + cy
+            sx, sy = round(rx), round(ry)
+            if 0 <= sx < width and 0 <= sy < height:
+                out[y * width + x] = list(pixels[sy * width + sx])
+            else:
+                out[y * width + x] = [0.0] * channels
+    return out
+
+
+def two_stage_attack(
+    raw: bytes,
+    width: int,
+    height: int,
+    channels: int,
+    *,
+    blur_sigma: float = 1.0,
+    quality: int = 40,
+) -> FrequencyResult:
+    """Two-stage degradation + soft-restore.
+
+    Stage 1: degrade (blur + low-quality JPEG)
+    Stage 2: soft-restore (median filter to recover edges)
+
+    Paper-reported success rate: 95–98 % for robust spatial marks.
+    """
+    pixels: list[list[float]] = []
+    for i in range(0, len(raw), channels):
+        pixels.append([float(raw[i + c]) for c in range(channels)])
+
+    blurred = gaussian_blur_2d(pixels, width, height, channels, sigma=blur_sigma)
+    jpeg = jpeg_compress_sim(blurred, width, height, channels, quality=quality)
+    restored = median_filter_2d(jpeg, width, height, channels, kernel_size=3)
+
+    out = bytearray(len(raw))
+    for i, row in enumerate(restored):
+        for c in range(channels):
+            out[i * channels + c] = max(0, min(255, round(row[c])))
+
+    return FrequencyResult(
+        data=out,
+        width=width,
+        height=height,
+        channels=channels,
+        strategy="two-stage",
+        suppress_ratio=0.0,
+        block_size=8,
+    )
+
+
+def degrade_image(
+    raw: bytes,
+    width: int,
+    height: int,
+    channels: int,
+    *,
+    strategy: str = "freq-dct",
+    **kwargs: Any,
+) -> FrequencyResult:
+    """Apply one degradation strategy to raw pixel bytes.
+
+    Strategies
+    ----------
+    freq-dct   — frequency suppression via DCT (default)
+    blur       — Gaussian blur
+    median     — median filter
+    jpeg       — Simulated JPEG compression
+    rotate     — Nearest-neighbor rotation
+    two-stage  — blur → jpeg → median (95–98% ASR paper-reported)
+    """
+    if len(raw) != width * height * channels:
+        raise ValueError(f"raw length {len(raw)} != {width}*{height}*{channels}")
+
+    pixels: list[list[float]] = []
+    for i in range(0, len(raw), channels):
+        pixels.append([float(raw[i + c]) for c in range(channels)])
+
+    def _bytes_from_result(result_pixels: list[list[float]]) -> bytearray:
+        out = bytearray(len(raw))
+        for i, row in enumerate(result_pixels):
+            for c in range(channels):
+                out[i * channels + c] = max(0, min(255, round(row[c])))
+        return out
+
+    if strategy == "freq-dct":
+        result = frequency_suppress(pixels, width, height, channels, **kwargs)
+        return FrequencyResult(
+            data=_bytes_from_result(result),
+            width=width,
+            height=height,
+            channels=channels,
+            strategy="freq-dct",
+            suppress_ratio=kwargs.get("suppress", 0.6),
+            block_size=kwargs.get("block_size", 8),
+        )
+
+    if strategy == "blur":
+        result = gaussian_blur_2d(pixels, width, height, channels, **kwargs)
+        return FrequencyResult(
+            data=_bytes_from_result(result),
+            width=width,
+            height=height,
+            channels=channels,
+            strategy="blur",
+            suppress_ratio=0.0,
+            block_size=8,
+        )
+
+    if strategy == "median":
+        result = median_filter_2d(pixels, width, height, channels, **kwargs)
+        return FrequencyResult(
+            data=_bytes_from_result(result),
+            width=width,
+            height=height,
+            channels=channels,
+            strategy="median",
+            suppress_ratio=0.0,
+            block_size=8,
+        )
+
+    if strategy == "jpeg":
+        result = jpeg_compress_sim(pixels, width, height, channels, **kwargs)
+        return FrequencyResult(
+            data=_bytes_from_result(result),
+            width=width,
+            height=height,
+            channels=channels,
+            strategy="jpeg",
+            suppress_ratio=0.0,
+            block_size=8,
+        )
+
+    if strategy == "rotate":
+        result = rotate_image(pixels, width, height, channels, **kwargs)
+        return FrequencyResult(
+            data=_bytes_from_result(result),
+            width=width,
+            height=height,
+            channels=channels,
+            strategy="rotate",
+            suppress_ratio=0.0,
+            block_size=8,
+        )
+
+    if strategy == "two-stage":
+        return two_stage_attack(raw, width, height, channels, **kwargs)
+
+    raise ValueError(f"unknown strategy: {strategy}")
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+
+def main() -> int:
+    """CLI: degrade a PNG image through a frequency attack."""
+    import argparse
+
+    from morphomod import decode_png, encode_png
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("image", type=str, help="Input PNG file")
+    parser.add_argument("-o", "--output", type=str, default=None, help="Output PNG file")
+    parser.add_argument(
+        "--strategy",
+        choices=["freq-dct", "blur", "median", "jpeg", "rotate", "two-stage"],
+        default="freq-dct",
+        help="Degradation strategy",
+    )
+    parser.add_argument("--suppress", type=float, default=0.6, help="DCT suppression ratio (0-1)")
+    parser.add_argument("--sigma", type=float, default=1.0, help="Blur sigma")
+    parser.add_argument("--angle", type=float, default=3.0, help="Rotation angle in degrees")
+    parser.add_argument("--quality", type=int, default=40, help="JPEG quality (1-100)")
+    parser.add_argument("--json", action="store_true", help="Output JSON report")
+    args = parser.parse_args()
+
+    try:
+        raw = open(args.image, "rb").read()  # noqa: SIM115
+        raster = decode_png(raw)
+
+        result = degrade_image(
+            bytes(raster.data),
+            raster.width,
+            raster.height,
+            raster.channels,
+            strategy=args.strategy,
+            suppress=args.suppress,
+            sigma=args.sigma,
+            angle=args.angle,
+            quality=args.quality,
+        )
+
+        if args.output is None:
+            args.output = str(Path(args.image).with_suffix(".degraded.png"))
+
+        out_raster = type(
+            "Raster",
+            (),
+            {
+                "width": result.width,
+                "height": result.height,
+                "channels": result.channels,
+                "data": result.data,
+            },
+        )()
+        with open(args.output, "wb") as f:
+            f.write(encode_png(out_raster))
+
+        report = result.to_dict()
+        if args.json:
+            print(json.dumps(report, indent=2, ensure_ascii=False))
+        else:
+            print(f"wrote {args.output} strategy={result.strategy}")
+        return 0
+    except Exception as e:
+        sys.stderr.write(f"error: {e}\n")
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

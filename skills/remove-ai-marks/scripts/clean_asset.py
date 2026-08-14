@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
@@ -19,6 +20,7 @@ from common import (
     validate_output_path,
 )
 from container_meta import clean_container
+from dct_frequency import degrade_image
 from image_meta import clean_image
 from inspect_soft_binding import inspect_soft_binding
 from morphomod import VISIBLE_CLEAN_BACKENDS, VisiblePlan, remove_visible
@@ -26,6 +28,21 @@ from perturb_text import MODES as PERTURB_MODES
 from perturb_text import perturb_text
 from rewrite_text import RewritePlan, rewrite
 from text_unicode import clean_text
+
+_IMAGE_DEGRADE_STRATEGIES = frozenset(
+    {
+        "freq-dct",
+        "blur",
+        "median",
+        "jpeg",
+        "rotate",
+        "two-stage",
+        "grid",
+        "diagonal",
+        "noise",
+        "quantize",
+    }
+)
 
 
 def _freeze_json(value: Any) -> Any:
@@ -80,6 +97,23 @@ class TextCleanPlan:
 
 
 @dataclass(frozen=True, slots=True)
+class ImageDegradePlan:
+    """Optional frequency/morphological degradation applied after visible clean."""
+
+    strategy: str = "freq-dct"
+    strength: float = 0.6
+    seed: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.strategy not in _IMAGE_DEGRADE_STRATEGIES:
+            raise ValueError(f"unknown degrade strategy: {self.strategy}")
+        if not isinstance(self.strength, (int, float)) or isinstance(self.strength, bool):
+            raise TypeError("strength must be a number")
+        if self.seed is not None and (isinstance(self.seed, bool) or not isinstance(self.seed, int)):
+            raise TypeError("seed must be an integer or None")
+
+
+@dataclass(frozen=True, slots=True)
 class CleanPlan:
     forced_kind: str = "auto"
     in_place: bool = False
@@ -87,6 +121,7 @@ class CleanPlan:
     strip_all_metadata: bool = True
     visible: VisiblePlan | None = None
     inspect_soft_binding: bool = False
+    degrade: ImageDegradePlan | None = None
 
     def __post_init__(self) -> None:
         if self.forced_kind not in ("auto", "text", "image", "container"):
@@ -101,6 +136,8 @@ class CleanPlan:
                 raise TypeError("visible must be a VisiblePlan")
             if self.visible.backend not in VISIBLE_CLEAN_BACKENDS:
                 raise ValueError("visible cleaning requires an inpainting backend")
+        if self.degrade is not None and not isinstance(self.degrade, ImageDegradePlan):
+            raise TypeError("degrade must be an ImageDegradePlan or None")
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,8 +231,12 @@ def _clean_text_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
 
 
 def _clean_image_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
+    from common import read_bytes_bounded
+
     soft = inspect_soft_binding(path) if plan.inspect_soft_binding else None
     visible_report = None
+
+    # Step 1: visible mark removal (inpaint)
     if plan.visible is not None:
         with tempfile.TemporaryDirectory(prefix="wm-visible-") as temp_dir:
             visible_dest = Path(temp_dir) / f"visible{path.suffix}"
@@ -213,13 +254,58 @@ def _clean_image_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
         source = create_backup(path) if plan.in_place else path
         report = clean_image(source, dest, strip_all_metadata=plan.strip_all_metadata)
 
+    # Step 2: frequency/morphological degradation (optional)
+    if plan.degrade is not None:
+        cleaned_data = read_bytes_bounded(dest, limit=256 * 1024 * 1024, label="cleaned image")
+        from morphomod import decode_png, encode_png
+
+        raster = decode_png(bytes(cleaned_data))
+        degrade_result = degrade_image(
+            bytes(raster.data),
+            raster.width,
+            raster.height,
+            raster.channels,
+            strategy=plan.degrade.strategy,
+            suppress=plan.degrade.strength,
+            seed=plan.degrade.seed,
+        )
+
+        out_raster = type(
+            "Raster",
+            (),
+            {
+                "width": degrade_result.width,
+                "height": degrade_result.height,
+                "channels": degrade_result.channels,
+                "data": degrade_result.data,
+            },
+        )()
+        fd, temp_name = tempfile.mkstemp(prefix=".degraded-", dir=str(dest.parent))
+        temp = Path(temp_name)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(encode_png(out_raster))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp, dest)
+        except Exception:
+            temp.unlink(missing_ok=True)
+            raise
+
+        report["degrade"] = degrade_result.to_dict()
+
     report["input"] = str(path)
     if visible_report is not None:
         report["visible"] = visible_report
     if soft is not None:
         report["soft_binding"] = soft
     soft_found = bool(soft and soft["soft_binding"]["found"])
-    residual = bool(report["still_has_c2pa"] or report["still_has_ai_metadata"] or soft_found)
+    residual = bool(
+        report.get("still_has_c2pa", False)
+        or report.get("still_has_ai_metadata", False)
+        or soft_found
+        or plan.degrade is not None
+    )
     return CleanResult("image", path, dest, residual, report)
 
 
