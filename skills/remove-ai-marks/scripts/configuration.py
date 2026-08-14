@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
 from typing import Any
@@ -50,22 +50,26 @@ class ConfigSetting:
 
 @dataclass(frozen=True)
 class ConfigSummary:
-    """Full configuration summary with provenance."""
+    """Full configuration summary with provenance and parse failures."""
 
     settings: dict[str, ConfigSetting]
     pyproject_path: Path | None
     env_file_path: Path | None
+    parse_errors: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             key: {"value": setting.value, "source": setting.source.name}
             for key, setting in self.settings.items()
         }
+        data["parse_errors"] = dict(self.parse_errors)
+        return data
 
 
 # ---------------------------------------------------------------------------
 # TOML reader (stdlib only, Python 3.11+)
 # ---------------------------------------------------------------------------
+
 
 def _read_toml(path: Path) -> dict[str, Any] | None:
     """Minimal TOML reader for pyproject.toml [tool.watermark] section.
@@ -209,23 +213,34 @@ def _bool_from_str(value: str) -> bool:
     raise ValueError(f"not a bool: {value!r}")
 
 
-def _int_from_str(value: str, default: int) -> int:
-    try:
-        return int(value)
-    except (ValueError, TypeError):
-        return default
+def _convert_raw(raw: str, vtype: str) -> Any:
+    """Convert a raw config string to its declared type, raising on failure."""
+    if vtype == "int":
+        return int(raw)
+    if vtype == "float":
+        return float(raw)
+    if vtype == "bool":
+        return _bool_from_str(raw)
+    return raw
 
 
-def _float_from_str(value: str, default: float) -> float:
+def _convert_or_record(parse_errors: dict[str, str], key: str, raw: str, vtype: str) -> Any | None:
+    """Convert a raw value; record failures and return None to keep the default.
+
+    Loaded configuration never crashes on a bad value: the failure is reported
+    through ``ConfigSummary.parse_errors`` instead of being silently absorbed.
+    """
     try:
-        return float(value)
-    except (ValueError, TypeError):
-        return default
+        return _convert_raw(raw, vtype)
+    except ValueError as error:
+        parse_errors.setdefault(key, str(error))
+        return None
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def load_configuration(project_root: Path | None = None) -> ConfigSummary:
     """Load configuration from all sources with provenance tracking.
@@ -249,6 +264,7 @@ def load_configuration(project_root: Path | None = None) -> ConfigSummary:
     env_values = _read_env_file(env_file_path) if env_file_path.is_file() else {}
 
     settings: dict[str, ConfigSetting] = {}
+    parse_errors: dict[str, str] = {}
     env_var_map: dict[str, tuple[str, str]] = {
         "max_file_size": ("WATERMARKS_MAX_FILE_SIZE", "int"),
         "max_image_pixels": ("WATERMARKS_MAX_IMAGE_PIXELS", "int"),
@@ -278,31 +294,21 @@ def load_configuration(project_root: Path | None = None) -> ConfigSummary:
 
         # Check .env file
         if env_var_name and env_var_name[0] in env_values:
-            raw = env_values[env_var_name[0]]
-            vtype = env_var_name[1]
-            if vtype == "int":
-                value = _int_from_str(raw, default_val)
-            elif vtype == "float":
-                value = _float_from_str(raw, default_val)
-            elif vtype == "bool":
-                value = _bool_from_str(raw)
-            else:
-                value = raw
-            source = ConfigSource.ENV_FILE
+            converted = _convert_or_record(
+                parse_errors, key, env_values[env_var_name[0]], env_var_name[1]
+            )
+            if converted is not None:
+                value = converted
+                source = ConfigSource.ENV_FILE
 
         # Check environment variable
         if env_var_name and env_var_name[0] in os.environ:
-            raw = os.environ[env_var_name[0]]
-            vtype = env_var_name[1]
-            if vtype == "int":
-                value = _int_from_str(raw, default_val)
-            elif vtype == "float":
-                value = _float_from_str(raw, default_val)
-            elif vtype == "bool":
-                value = _bool_from_str(raw)
-            else:
-                value = raw
-            source = ConfigSource.ENV_VAR
+            converted = _convert_or_record(
+                parse_errors, key, os.environ[env_var_name[0]], env_var_name[1]
+            )
+            if converted is not None:
+                value = converted
+                source = ConfigSource.ENV_VAR
 
         settings[key] = ConfigSetting(
             value=value,
@@ -314,6 +320,7 @@ def load_configuration(project_root: Path | None = None) -> ConfigSummary:
         settings=settings,
         pyproject_path=pyproject_path if pyproject_path.is_file() else None,
         env_file_path=env_file_path if env_file_path.is_file() else None,
+        parse_errors=parse_errors,
     )
 
 
@@ -326,8 +333,13 @@ def print_config_summary(summary: ConfigSummary) -> None:
     """Print a human-readable configuration summary to stderr."""
     sys.stderr.write("Configuration:\n")
     for key, setting in summary.settings.items():
-        marker = {"pyproject": "toml", "env_file": ".env", "env_var": "env"}.get(
-            setting.source.name.lower(), "?"
-        )
+        marker = {
+            "pyproject": "toml",
+            "env_file": ".env",
+            "env_var": "env",
+            "default": "default",
+        }.get(setting.source.name.lower(), "?")
         sys.stderr.write(f"  {key} = {setting.value!r}  [{marker}]\n")
+    for key, error in summary.parse_errors.items():
+        sys.stderr.write(f"  ! {key}: {error}\n")
     sys.stderr.flush()

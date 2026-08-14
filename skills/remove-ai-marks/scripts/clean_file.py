@@ -20,9 +20,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from asset_kind import SUPPORTED_EXTENSIONS, AssetKind, classify_asset
 from batch_inputs import InputItem, safe_output_path, select_inputs
-from clean_asset import CleanPlan, CleanResult, TextCleanPlan, clean_asset
+from clean_asset import (
+    DEGRADE_CLI_CHOICES,
+    MORPHO_CLI_CHOICES,
+    CleanPlan,
+    CleanResult,
+    TextCleanPlan,
+    clean_asset,
+)
 from common import backup_path, cleaned_path, eprint, paths_alias, validate_output_path
 from morphomod import DEFAULT_DILATION_RADIUS, VISIBLE_CLEAN_BACKENDS, VisiblePlan
+from operation import ExitCode, OperationStatus, status_to_exit_code
 from perturb_text import MODES as PERTURB_MODES
 from rewrite_text import RewritePlan, remote_warning
 
@@ -93,10 +101,25 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # Frequency / morphological degradation (Layer V extension)
     degrade = p.add_mutually_exclusive_group()
-    degrade.add_argument("--degrade", choices=["freq-dct", "blur", "median", "jpeg", "rotate", "two-stage"], help="Frequency-domain image degradation")
-    degrade.add_argument("--morpho", choices=["grid", "diagonal", "noise", "quantize"], help="Morphological perturbation")
-    p.add_argument("--degrade-strength", type=float, default=0.6, help="Degradation strength (0-1, for freq-dct)")
-    p.add_argument("--degrade-seed", type=int, default=None, help="Deterministic seed for degradation")
+    degrade.add_argument(
+        "--degrade",
+        choices=list(DEGRADE_CLI_CHOICES),
+        help="Frequency-domain image degradation",
+    )
+    degrade.add_argument(
+        "--morpho",
+        choices=list(MORPHO_CLI_CHOICES),
+        help="Morphological perturbation",
+    )
+    p.add_argument(
+        "--degrade-strength",
+        type=float,
+        default=0.6,
+        help="Degradation strength (0-1; freq-dct only)",
+    )
+    p.add_argument(
+        "--degrade-seed", type=int, default=None, help="Deterministic seed for degradation"
+    )
     return p
 
 
@@ -124,14 +147,14 @@ def main() -> int:
         )
     except ValueError as error:
         eprint(f"invalid input selection: {error}")
-        return 2
+        return ExitCode.USAGE_ERROR.value
     items = selection.items
     batch = selection.batch
     if batch and (args.visible_mask or args.visible_box):
         eprint(
             "error: --visible-mask/--visible-box are single-file options; use --detect-command for batch"
         )
-        return 2
+        return ExitCode.USAGE_ERROR.value
     if args.in_place and args.output:
         eprint("warning: -o ignored with --in-place")
     try:
@@ -143,10 +166,10 @@ def main() -> int:
             print(json.dumps(payload, indent=2, ensure_ascii=False))
         else:
             eprint(f"error on {error.path}: {error}")
-        return 1
+        return ExitCode.RESIDUAL_OR_ERROR.value
     except ValueError as error:
         eprint(f"invalid output selection: {error}")
-        return 2
+        return ExitCode.USAGE_ERROR.value
     if batch and args.output and not args.in_place:
         args.output.mkdir(parents=True, exist_ok=True)
 
@@ -158,7 +181,9 @@ def main() -> int:
     elif batch:
         errors = sum(r.get("exit_code", 0) != 0 for r in results)
         eprint(f"done: {len(results)} file(s), {errors} with warnings/errors")
-    return 0 if all(r.get("exit_code", 0) == 0 for r in results) else 1
+    if all(r.get("exit_code", 0) == 0 for r in results):
+        return ExitCode.SUCCESS.value
+    return ExitCode.RESIDUAL_OR_ERROR.value
 
 
 def _plan_work(
@@ -304,7 +329,7 @@ def _error_payload(path: Path, output: Path, error: Exception) -> dict:
         "output": str(output),
         "actions": [f"error: {error}"],
         "error": str(error),
-        "exit_code": 1,
+        "exit_code": status_to_exit_code(OperationStatus.FAILED),
     }
 
 
@@ -351,7 +376,8 @@ def _run_clean_item(
         return _error_payload(path, dest, error)
 
     payload = result.to_dict()
-    payload["exit_code"] = 1 if result.residual else 0
+    status = OperationStatus.VERIFIED if not result.residual else OperationStatus.RESIDUAL_RISK
+    payload["exit_code"] = status_to_exit_code(status)
     if not args.json:
         _present_result(result, payload)
     return payload

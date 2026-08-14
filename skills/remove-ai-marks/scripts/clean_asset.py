@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import os
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
@@ -13,6 +12,7 @@ from typing import Any
 
 from asset_kind import AssetKind, classify_asset
 from common import (
+    atomic_write_bytes,
     atomic_write_text,
     backup_path,
     create_backup,
@@ -20,29 +20,26 @@ from common import (
     validate_output_path,
 )
 from container_meta import clean_container
-from dct_frequency import degrade_image
-from image_meta import clean_image
+from dct_frequency import DEGRADE_STRATEGIES, degrade_image
+from image_meta import clean_image, detect_format
 from inspect_soft_binding import inspect_soft_binding
-from morphomod import VISIBLE_CLEAN_BACKENDS, VisiblePlan, remove_visible
+from morpho_perturb import MORPHO_STRATEGIES, MORPHO_STRATEGY_KWARGS, morpho_perturb
+from morphomod import (
+    VISIBLE_CLEAN_BACKENDS,
+    Raster,
+    VisiblePlan,
+    decode_png,
+    encode_png,
+    remove_visible,
+)
 from perturb_text import MODES as PERTURB_MODES
 from perturb_text import perturb_text
 from rewrite_text import RewritePlan, rewrite
 from text_unicode import clean_text
 
-_IMAGE_DEGRADE_STRATEGIES = frozenset(
-    {
-        "freq-dct",
-        "blur",
-        "median",
-        "jpeg",
-        "rotate",
-        "two-stage",
-        "grid",
-        "diagonal",
-        "noise",
-        "quantize",
-    }
-)
+_IMAGE_DEGRADE_STRATEGIES = frozenset((*DEGRADE_STRATEGIES, *MORPHO_STRATEGIES))
+DEGRADE_CLI_CHOICES: tuple[str, ...] = DEGRADE_STRATEGIES
+MORPHO_CLI_CHOICES: tuple[str, ...] = MORPHO_STRATEGIES
 
 
 def _freeze_json(value: Any) -> Any:
@@ -107,9 +104,16 @@ class ImageDegradePlan:
     def __post_init__(self) -> None:
         if self.strategy not in _IMAGE_DEGRADE_STRATEGIES:
             raise ValueError(f"unknown degrade strategy: {self.strategy}")
-        if not isinstance(self.strength, (int, float)) or isinstance(self.strength, bool):
-            raise TypeError("strength must be a number")
-        if self.seed is not None and (isinstance(self.seed, bool) or not isinstance(self.seed, int)):
+        if (
+            isinstance(self.strength, bool)
+            or not isinstance(self.strength, (int, float))
+            or not math.isfinite(self.strength)
+            or not 0.0 <= self.strength <= 1.0
+        ):
+            raise ValueError("strength must be a finite number in [0, 1]")
+        if self.seed is not None and (
+            isinstance(self.seed, bool) or not isinstance(self.seed, int)
+        ):
             raise TypeError("seed must be an integer or None")
 
 
@@ -230,6 +234,40 @@ def _clean_text_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
     return CleanResult("text", path, dest, False, {"stats": stats})
 
 
+def _apply_image_degrade(raster: Raster, degrade: ImageDegradePlan) -> Any:
+    """Run one degradation strategy on a decoded raster.
+
+    Morphological strategies dispatch to ``morpho_perturb``; the rest dispatch
+    to ``dct_frequency.degrade_image``. ``strength`` only configures freq-dct
+    (the documented CLI meaning); other strategies use their own conservative
+    defaults. ``seed`` is forwarded only to strategies that accept one.
+    """
+    strategy = degrade.strategy
+    if strategy in MORPHO_STRATEGIES:
+        kwargs: dict[str, Any] = {}
+        if "seed" in MORPHO_STRATEGY_KWARGS[strategy]:
+            kwargs["seed"] = degrade.seed
+        return morpho_perturb(
+            bytes(raster.data),
+            raster.width,
+            raster.height,
+            raster.channels,
+            strategy=strategy,
+            **kwargs,
+        )
+    kwargs = {}
+    if strategy == "freq-dct":
+        kwargs["suppress"] = degrade.strength
+    return degrade_image(
+        bytes(raster.data),
+        raster.width,
+        raster.height,
+        raster.channels,
+        strategy=strategy,
+        **kwargs,
+    )
+
+
 def _clean_image_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
     from common import read_bytes_bounded
 
@@ -257,41 +295,19 @@ def _clean_image_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
     # Step 2: frequency/morphological degradation (optional)
     if plan.degrade is not None:
         cleaned_data = read_bytes_bounded(dest, limit=256 * 1024 * 1024, label="cleaned image")
-        from morphomod import decode_png, encode_png
-
+        if detect_format(bytes(cleaned_data)) != "png":
+            raise ValueError(
+                "degradation requires PNG output; JPEG/HEIF/AVIF inputs are not supported"
+            )
         raster = decode_png(bytes(cleaned_data))
-        degrade_result = degrade_image(
-            bytes(raster.data),
-            raster.width,
-            raster.height,
-            raster.channels,
-            strategy=plan.degrade.strategy,
-            suppress=plan.degrade.strength,
-            seed=plan.degrade.seed,
+        degrade_result = _apply_image_degrade(raster, plan.degrade)
+        out_raster = Raster(
+            degrade_result.width,
+            degrade_result.height,
+            degrade_result.channels,
+            degrade_result.data,
         )
-
-        out_raster = type(
-            "Raster",
-            (),
-            {
-                "width": degrade_result.width,
-                "height": degrade_result.height,
-                "channels": degrade_result.channels,
-                "data": degrade_result.data,
-            },
-        )()
-        fd, temp_name = tempfile.mkstemp(prefix=".degraded-", dir=str(dest.parent))
-        temp = Path(temp_name)
-        try:
-            with os.fdopen(fd, "wb") as stream:
-                stream.write(encode_png(out_raster))
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temp, dest)
-        except Exception:
-            temp.unlink(missing_ok=True)
-            raise
-
+        atomic_write_bytes(dest, encode_png(out_raster))
         report["degrade"] = degrade_result.to_dict()
 
     report["input"] = str(path)
@@ -304,7 +320,6 @@ def _clean_image_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
         report.get("still_has_c2pa", False)
         or report.get("still_has_ai_metadata", False)
         or soft_found
-        or plan.degrade is not None
     )
     return CleanResult("image", path, dest, residual, report)
 

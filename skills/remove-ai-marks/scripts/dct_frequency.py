@@ -4,7 +4,9 @@ T1 Tier 1 classical attack — targets mid-frequency bands where spatial
 watermarks and soft logos typically live.  Works on any RGBA/RGB/grayscale
 image via a pure-Python orthonormal DCT-II implementation.
 
-Complexity   : O(width * height * log(width * height)) per pass
+Complexity   : O(width * height) per block with an 8x8 DCT kernel; the pure
+               Python DCT is expensive, so DCT-based strategies enforce a
+               per-image pixel cap and fail loudly above it.
 Quality     : Fair–Good (noticeable banding at aggressive settings)
 Legal risk   : High (specific intent to remove frequency-domain marks)
 
@@ -28,57 +30,106 @@ from __future__ import annotations
 
 import json
 import math
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+# Strategies this module dispatches, mapped to the keyword arguments each one
+# accepts. ``degrade_image`` rejects any keyword outside this catalog.
+DEGRADE_STRATEGY_KWARGS: dict[str, tuple[str, ...]] = {
+    "freq-dct": ("suppress", "block_size", "overlap"),
+    "blur": ("sigma",),
+    "median": ("kernel_size",),
+    "jpeg": ("quality",),
+    "rotate": ("angle_deg",),
+    "two-stage": ("blur_sigma", "quality"),
+}
+DEGRADE_STRATEGIES: tuple[str, ...] = tuple(DEGRADE_STRATEGY_KWARGS)
+
+# The pure-Python DCT kernels cost ~8k float ops per 8x8 block, so DCT-based
+# strategies bound the total pixel count instead of letting a 40 MP input run
+# for hours. O(width*height) strategies (blur/median/rotate) have no cap here;
+# callers bound them with their own image limits.
+MAX_FREQ_DCT_PIXELS = 65_536  # 256x256
+MAX_JPEG_PIXELS = 262_144  # 512x512
+
 
 # ---------------------------------------------------------------------------
 # 2D orthonormal DCT-II
 # ---------------------------------------------------------------------------
 
 
+def _cos_table(n: int) -> list[list[float]]:
+    """Precompute cos(pi * k * (2 * i + 1) / (2 * n)) for i, k in [0, n)."""
+    return [[math.cos(math.pi * k * (2 * i + 1) / (2 * n)) for i in range(n)] for k in range(n)]
+
+
+_COS_CACHE: dict[int, list[list[float]]] = {}
+_SCALE_CACHE: dict[int, list[float]] = {}
+
+
+def _cos_lookup(n: int) -> list[list[float]]:
+    table = _COS_CACHE.get(n)
+    if table is None:
+        table = _cos_table(n)
+        _COS_CACHE[n] = table
+    return table
+
+
+def _scales(n: int) -> list[float]:
+    factors = _SCALE_CACHE.get(n)
+    if factors is None:
+        factors = [math.sqrt(1.0 / n) if k == 0 else math.sqrt(2.0 / n) for k in range(n)]
+        _SCALE_CACHE[n] = factors
+    return factors
+
+
 def _dct2_ortho(block: list[list[float]]) -> list[list[float]]:
-    """Compute the orthonormal 2-D DCT-II of a block."""
+    """Compute the orthonormal 2-D DCT-II of a block (cached cosine tables)."""
     h = len(block)
     w = len(block[0]) if h else 0
+    cos_h = _cos_lookup(h)  # cos_h[k][i]
+    cos_w = _cos_lookup(w)
+    au_factors = _scales(h)
+    av_factors = _scales(w)
     result: list[list[float]] = [[0.0] * w for _ in range(h)]
     for u in range(h):
+        au = au_factors[u]
+        row_u = cos_h[u]
+        out_row = result[u]
         for v in range(w):
+            av = av_factors[v]
+            col_v = cos_w[v]
             s = 0.0
             for x in range(h):
+                in_row = block[x]
+                cux = row_u[x]
                 for y in range(w):
-                    s += (
-                        block[x][y]
-                        * math.cos(math.pi * u * (2 * x + 1) / (2 * h))
-                        * math.cos(math.pi * v * (2 * y + 1) / (2 * w))
-                    )
-            au = math.sqrt(1.0 / h) if u == 0 else math.sqrt(2.0 / h)
-            av = math.sqrt(1.0 / w) if v == 0 else math.sqrt(2.0 / w)
-            result[u][v] = au * av * s
+                    s += in_row[y] * cux * col_v[y]
+            out_row[v] = au * av * s
     return result
 
 
 def _idct2_ortho(block: list[list[float]]) -> list[list[float]]:
-    """Inverse orthonormal 2-D DCT-II."""
+    """Inverse orthonormal 2-D DCT-II (cached cosine tables)."""
     h = len(block)
     w = len(block[0]) if h else 0
+    cos_h = _cos_lookup(h)  # cos_h[k][i]
+    cos_w = _cos_lookup(w)
+    au_factors = _scales(h)
+    av_factors = _scales(w)
     result: list[list[float]] = [[0.0] * w for _ in range(h)]
     for x in range(h):
+        out_row = result[x]
         for y in range(w):
             s = 0.0
             for u in range(h):
+                row_u = block[u]
+                cux = cos_h[u][x]
+                au = au_factors[u]
                 for v in range(w):
-                    au = math.sqrt(1.0 / h) if u == 0 else math.sqrt(2.0 / h)
-                    av = math.sqrt(1.0 / w) if v == 0 else math.sqrt(2.0 / w)
-                    s += (
-                        au
-                        * av
-                        * block[u][v]
-                        * math.cos(math.pi * u * (2 * x + 1) / (2 * h))
-                        * math.cos(math.pi * v * (2 * y + 1) / (2 * w))
-                    )
-            result[x][y] = s
+                    s += au * av_factors[v] * row_u[v] * cux * cos_w[v][y]
+            out_row[y] = s
     return result
 
 
@@ -102,13 +153,39 @@ def _dct_block(block: list[list[float]], suppress: float) -> list[list[float]]:
             mid_start = max_dist * 0.2
             mid_end = max_dist * 0.6
             if mid_start <= dist <= mid_end:
-                window = (
-                    1.0
-                    - 0.5
-                    * (1.0 + math.cos(math.pi * (dist - mid_start) / (mid_end - mid_start)))
+                window = 1.0 - 0.5 * (
+                    1.0 + math.cos(math.pi * (dist - mid_start) / (mid_end - mid_start))
                 )
                 dct_block[u][v] *= 1.0 - suppress * window
     return _idct2_ortho(dct_block)
+
+
+# ---------------------------------------------------------------------------
+# Keyword dispatch
+# ---------------------------------------------------------------------------
+
+
+def _strategy_kwargs(strategy: str, kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Return the caller kwargs allowed for ``strategy``, rejecting the rest.
+
+    Rejecting unexpected keywords catches typos and keeps callers honest:
+    silently dropping ``sigm=2.0`` would apply a default the caller never chose.
+    """
+    allowed = DEGRADE_STRATEGY_KWARGS.get(strategy)
+    if allowed is None:
+        raise ValueError(f"unknown strategy: {strategy}")
+    unexpected = sorted(set(kwargs) - set(allowed))
+    if unexpected:
+        names = ", ".join(unexpected)
+        raise TypeError(f"unexpected keyword argument(s) for strategy {strategy!r}: {names}")
+    return {name: kwargs[name] for name in allowed if name in kwargs}
+
+
+def _validate_raster(width: int, height: int, channels: int) -> None:
+    if width <= 0 or height <= 0:
+        raise ValueError("image dimensions must be positive")
+    if channels not in (1, 3, 4):
+        raise ValueError("channels must be 1, 3, or 4")
 
 
 # ---------------------------------------------------------------------------
@@ -153,8 +230,13 @@ def frequency_suppress(
 
     Operates independently on each channel using overlapping DCT blocks.
     """
-    if channels not in (1, 3, 4):
-        raise ValueError("channels must be 1, 3, or 4")
+    _validate_raster(width, height, channels)
+    if not 0.0 <= suppress <= 1.0:
+        raise ValueError("suppress must be in [0, 1]")
+    if block_size < 2:
+        raise ValueError("block_size must be >= 2")
+    if not isinstance(overlap, int) or not 0 <= overlap < block_size:
+        raise ValueError("overlap must be an integer in [0, block_size)")
 
     # Build per-channel channel data
     channel_data: list[list[list[float]]] = []
@@ -170,12 +252,13 @@ def frequency_suppress(
 
     # Apply frequency suppression per channel
     result: list[list[list[float]]] = []
+    stride = block_size - overlap
     for ch in range(channels):
         channel = channel_data[ch]
         temp: list[list[float]] = [[0.0] * width for _ in range(height)]
         count: list[list[float]] = [[0.0] * width for _ in range(height)]
-        for by in range(0, height - block_size + 1, block_size - overlap):
-            for bx in range(0, width - block_size + 1, block_size - overlap):
+        for by in range(0, height - block_size + 1, stride):
+            for bx in range(0, width - block_size + 1, stride):
                 block: list[list[float]] = []
                 for dy in range(block_size):
                     block.append([channel[by + dy][bx + dx] for dx in range(block_size)])
@@ -246,7 +329,10 @@ def gaussian_blur_2d(
     sigma: float = 1.0,
 ) -> list[list[float]]:
     """Apply a Gaussian blur (separable 1-D passes) to each channel."""
-    if sigma <= 0:
+    _validate_raster(width, height, channels)
+    if sigma < 0:
+        raise ValueError("sigma must be >= 0")
+    if sigma == 0:
         return [list(row) for row in pixels]
 
     radius = max(1, int(3 * sigma))
@@ -306,6 +392,9 @@ def median_filter_2d(
     kernel_size: int = 3,
 ) -> list[list[float]]:
     """Apply a per-channel median filter."""
+    _validate_raster(width, height, channels)
+    if not isinstance(kernel_size, int) or kernel_size < 1 or kernel_size % 2 == 0:
+        raise ValueError("kernel_size must be a positive odd integer")
     half = kernel_size // 2
     out: list[list[float]] = [[] for _ in range(height * width)]
     for ch in range(channels):
@@ -336,7 +425,10 @@ def jpeg_compress_sim(
     quality: int = 40,
 ) -> list[list[float]]:
     """Simulate JPEG compression via quantized DCT + rounding."""
-    qf = min(100, max(1, quality))
+    _validate_raster(width, height, channels)
+    if not 1 <= quality <= 100:
+        raise ValueError("quality must be in [1, 100]")
+    qf = quality
     if qf < 50:
         qm = [[max(1, int(5000 / qf)) for _ in range(8)] for _ in range(8)]
     else:
@@ -389,6 +481,7 @@ def rotate_image(
     angle_deg: float = 3.0,
 ) -> list[list[float]]:
     """Rotate pixels by angle (degrees) using nearest-neighbor sampling."""
+    _validate_raster(width, height, channels)
     if angle_deg == 0:
         return [list(row) for row in pixels]
 
@@ -470,10 +563,27 @@ def degrade_image(
     jpeg       — Simulated JPEG compression
     rotate     — Nearest-neighbor rotation
     two-stage  — blur → jpeg → median (95–98% ASR paper-reported)
+
+    Only the keywords listed in ``DEGRADE_STRATEGY_KWARGS`` are accepted for
+    each strategy; any other keyword raises ``TypeError`` so typos cannot
+    silently apply defaults.
     """
+    _validate_raster(width, height, channels)
     if len(raw) != width * height * channels:
         raise ValueError(f"raw length {len(raw)} != {width}*{height}*{channels}")
+    pixel_count = width * height
+    if strategy == "freq-dct" and pixel_count > MAX_FREQ_DCT_PIXELS:
+        raise ValueError(
+            f"freq-dct supports at most {MAX_FREQ_DCT_PIXELS:,} pixels "
+            f"({pixel_count:,} given); downscale the image first"
+        )
+    if strategy in ("jpeg", "two-stage") and pixel_count > MAX_JPEG_PIXELS:
+        raise ValueError(
+            f"{strategy} supports at most {MAX_JPEG_PIXELS:,} pixels "
+            f"({pixel_count:,} given); downscale the image first"
+        )
 
+    filtered = _strategy_kwargs(strategy, kwargs)
     pixels: list[list[float]] = []
     for i in range(0, len(raw), channels):
         pixels.append([float(raw[i + c]) for c in range(channels)])
@@ -486,19 +596,19 @@ def degrade_image(
         return out
 
     if strategy == "freq-dct":
-        result = frequency_suppress(pixels, width, height, channels, **kwargs)
+        result = frequency_suppress(pixels, width, height, channels, **filtered)
         return FrequencyResult(
             data=_bytes_from_result(result),
             width=width,
             height=height,
             channels=channels,
             strategy="freq-dct",
-            suppress_ratio=kwargs.get("suppress", 0.6),
-            block_size=kwargs.get("block_size", 8),
+            suppress_ratio=filtered.get("suppress", 0.6),
+            block_size=filtered.get("block_size", 8),
         )
 
     if strategy == "blur":
-        result = gaussian_blur_2d(pixels, width, height, channels, **kwargs)
+        result = gaussian_blur_2d(pixels, width, height, channels, **filtered)
         return FrequencyResult(
             data=_bytes_from_result(result),
             width=width,
@@ -510,7 +620,7 @@ def degrade_image(
         )
 
     if strategy == "median":
-        result = median_filter_2d(pixels, width, height, channels, **kwargs)
+        result = median_filter_2d(pixels, width, height, channels, **filtered)
         return FrequencyResult(
             data=_bytes_from_result(result),
             width=width,
@@ -522,7 +632,7 @@ def degrade_image(
         )
 
     if strategy == "jpeg":
-        result = jpeg_compress_sim(pixels, width, height, channels, **kwargs)
+        result = jpeg_compress_sim(pixels, width, height, channels, **filtered)
         return FrequencyResult(
             data=_bytes_from_result(result),
             width=width,
@@ -534,7 +644,7 @@ def degrade_image(
         )
 
     if strategy == "rotate":
-        result = rotate_image(pixels, width, height, channels, **kwargs)
+        result = rotate_image(pixels, width, height, channels, **filtered)
         return FrequencyResult(
             data=_bytes_from_result(result),
             width=width,
@@ -546,7 +656,7 @@ def degrade_image(
         )
 
     if strategy == "two-stage":
-        return two_stage_attack(raw, width, height, channels, **kwargs)
+        return two_stage_attack(raw, width, height, channels, **filtered)
 
     raise ValueError(f"unknown strategy: {strategy}")
 
@@ -560,14 +670,17 @@ def main() -> int:
     """CLI: degrade a PNG image through a frequency attack."""
     import argparse
 
-    from morphomod import decode_png, encode_png
+    from common import atomic_write_bytes, read_bytes_bounded
+    from morphomod import MAX_ENCODED_BYTES, Raster, decode_png, encode_png
+    from structured_log import init_logger
 
+    logger = init_logger()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("image", type=str, help="Input PNG file")
     parser.add_argument("-o", "--output", type=str, default=None, help="Output PNG file")
     parser.add_argument(
         "--strategy",
-        choices=["freq-dct", "blur", "median", "jpeg", "rotate", "two-stage"],
+        choices=list(DEGRADE_STRATEGIES),
         default="freq-dct",
         help="Degradation strategy",
     )
@@ -578,8 +691,22 @@ def main() -> int:
     parser.add_argument("--json", action="store_true", help="Output JSON report")
     args = parser.parse_args()
 
+    # Forward only the keywords the selected strategy accepts.
+    all_kwargs = {
+        "suppress": args.suppress,
+        "sigma": args.sigma,
+        "blur_sigma": args.sigma,
+        "angle_deg": args.angle,
+        "quality": args.quality,
+    }
+    kwargs = {
+        name: all_kwargs[name]
+        for name in DEGRADE_STRATEGY_KWARGS[args.strategy]
+        if name in all_kwargs
+    }
+
     try:
-        raw = open(args.image, "rb").read()  # noqa: SIM115
+        raw = read_bytes_bounded(Path(args.image), MAX_ENCODED_BYTES, label="encoded file")
         raster = decode_png(raw)
 
         result = degrade_image(
@@ -588,27 +715,14 @@ def main() -> int:
             raster.height,
             raster.channels,
             strategy=args.strategy,
-            suppress=args.suppress,
-            sigma=args.sigma,
-            angle=args.angle,
-            quality=args.quality,
+            **kwargs,
         )
 
         if args.output is None:
             args.output = str(Path(args.image).with_suffix(".degraded.png"))
 
-        out_raster = type(
-            "Raster",
-            (),
-            {
-                "width": result.width,
-                "height": result.height,
-                "channels": result.channels,
-                "data": result.data,
-            },
-        )()
-        with open(args.output, "wb") as f:
-            f.write(encode_png(out_raster))
+        out_raster = Raster(result.width, result.height, result.channels, result.data)
+        atomic_write_bytes(Path(args.output), encode_png(out_raster))
 
         report = result.to_dict()
         if args.json:
@@ -616,8 +730,8 @@ def main() -> int:
         else:
             print(f"wrote {args.output} strategy={result.strategy}")
         return 0
-    except Exception as e:
-        sys.stderr.write(f"error: {e}\n")
+    except Exception as error:
+        logger.error(f"error: {error}", module="dct_frequency")
         return 1
 
 

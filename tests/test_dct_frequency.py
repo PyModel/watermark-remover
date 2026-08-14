@@ -220,3 +220,102 @@ class TestRotate:
         result = rotate_image(pixels, width, height, channels, angle_deg=3.0)
         for row in result:
             assert all(0 <= v <= 255 for v in row)
+
+
+"""Validation and dispatch regressions for the degradation strategies."""
+
+
+from dct_frequency import (
+    MAX_FREQ_DCT_PIXELS,
+    median_filter_2d,
+)
+
+
+class TestStrictKeywordDispatch:
+    """degrade_image rejects keywords the selected strategy does not accept."""
+
+    def test_unexpected_keyword_rejected(self) -> None:
+        raw = bytes([128] * (8 * 8 * 3))
+        with pytest.raises(TypeError, match="unexpected keyword"):
+            degrade_image(raw, 8, 8, 3, strategy="blur", suppress=0.5)
+
+    def test_seed_rejected_for_freq_dct(self) -> None:
+        raw = bytes([128] * (8 * 8 * 3))
+        with pytest.raises(TypeError, match="unexpected keyword"):
+            degrade_image(raw, 8, 8, 3, strategy="freq-dct", seed=3)
+
+    def test_typo_keyword_rejected(self) -> None:
+        raw = bytes([128] * (8 * 8 * 3))
+        with pytest.raises(TypeError, match="unexpected keyword"):
+            degrade_image(raw, 8, 8, 3, strategy="blur", sigm=2.0)
+
+
+class TestInputValidation:
+    def test_suppress_out_of_range(self) -> None:
+        pixels = [[128.0] * 3 for _ in range(64)]
+        with pytest.raises(ValueError, match="suppress"):
+            frequency_suppress(pixels, 8, 8, 3, suppress=1.5)
+
+    def test_block_size_too_small(self) -> None:
+        pixels = [[128.0] * 3 for _ in range(64)]
+        with pytest.raises(ValueError, match="block_size"):
+            frequency_suppress(pixels, 8, 8, 3, block_size=1)
+
+    def test_overlap_at_least_block_size(self) -> None:
+        pixels = [[128.0] * 3 for _ in range(64)]
+        with pytest.raises(ValueError, match="overlap"):
+            frequency_suppress(pixels, 8, 8, 3, overlap=8)
+
+    def test_negative_overlap(self) -> None:
+        pixels = [[128.0] * 3 for _ in range(64)]
+        with pytest.raises(ValueError, match="overlap"):
+            frequency_suppress(pixels, 8, 8, 3, overlap=-1)
+
+    def test_invalid_channels(self) -> None:
+        raw = bytes(8 * 8 * 2)
+        with pytest.raises(ValueError, match="channels"):
+            degrade_image(raw, 8, 8, 2, strategy="blur")
+
+    def test_negative_sigma(self) -> None:
+        pixels = [[128.0] * 3 for _ in range(64)]
+        with pytest.raises(ValueError, match="sigma"):
+            gaussian_blur_2d(pixels, 8, 8, 3, sigma=-1.0)
+
+    def test_even_kernel_size(self) -> None:
+        pixels = [[128.0] * 3 for _ in range(64)]
+        with pytest.raises(ValueError, match="kernel_size"):
+            median_filter_2d(pixels, 8, 8, 3, kernel_size=4)
+
+    def test_jpeg_quality_out_of_range(self) -> None:
+        pixels = [[128.0] * 3 for _ in range(64)]
+        with pytest.raises(ValueError, match="quality"):
+            jpeg_compress_sim(pixels, 8, 8, 3, quality=101)
+
+
+class TestPixelCaps:
+    """DCT-based strategies fail loudly above their pixel caps."""
+
+    def test_freq_dct_rejects_oversized_image(self) -> None:
+        size = 257  # 66_049 pixels > MAX_FREQ_DCT_PIXELS
+        raw = bytes([128] * (size * size * 3))
+        with pytest.raises(ValueError, match="downscale"):
+            degrade_image(raw, size, size, 3, strategy="freq-dct")
+
+    def test_freq_dct_accepts_boundary_size(self) -> None:
+        size = 256
+        assert size * size == MAX_FREQ_DCT_PIXELS
+        raw = bytes([128] * (size * size))
+        result = degrade_image(raw, size, size, 1, strategy="freq-dct")
+        assert len(result.data) == len(raw)
+
+    def test_jpeg_rejects_oversized_image(self) -> None:
+        size = 513  # 263_169 pixels > MAX_JPEG_PIXELS
+        raw = bytes([128] * (size * size * 3))
+        with pytest.raises(ValueError, match="downscale"):
+            degrade_image(raw, size, size, 3, strategy="jpeg")
+
+    def test_two_stage_rejects_oversized_image(self) -> None:
+        size = 513
+        raw = bytes([128] * (size * size * 3))
+        with pytest.raises(ValueError, match="downscale"):
+            degrade_image(raw, size, size, 3, strategy="two-stage")

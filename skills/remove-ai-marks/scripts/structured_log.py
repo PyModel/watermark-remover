@@ -1,7 +1,8 @@
 """Structured logging for the watermark-remover tool.
 
 Provides a module-level logger singleton with structured JSON output.
-Falls back to plain stderr printing when JSON is not requested.
+All log output goes to stderr so stdout stays reserved for CLI payloads
+(including machine-readable --json output).
 
 Usage:
     from structured_log import log_warning, log_info, log_error, init_logger
@@ -13,10 +14,15 @@ Usage:
     # Or full logger for structured output:
     logger = init_logger()
     logger.info("cleaning asset", module="clean_asset", path=str(path))
+
+The default log level comes from the shared configuration system
+(configuration.load_configuration): WATERMARKS_LOG_LEVEL env var, .env, or
+pyproject.toml [tool.watermark], falling back to INFO.
 """
 
 from __future__ import annotations
 
+import datetime
 import json
 import sys
 from dataclasses import dataclass, field
@@ -44,17 +50,10 @@ class _LogEntry:
     msg: str
     extra: dict[str, Any] = field(default_factory=dict)
 
-    @classmethod
-    def _iso_now(cls) -> str:
-        """Return current time as ISO 8601 string."""
-        import datetime
-
-        return datetime.datetime.now(datetime.timezone.utc).isoformat()
-
 
 def _make_entry(level: str, msg: str, module: str = "", **kwargs: Any) -> _LogEntry:
     return _LogEntry(
-        ts=_LogEntry._iso_now(),
+        ts=datetime.datetime.now(datetime.timezone.utc).isoformat(),
         level=level,
         module=module,
         msg=msg,
@@ -62,8 +61,8 @@ def _make_entry(level: str, msg: str, module: str = "", **kwargs: Any) -> _LogEn
     )
 
 
-def _emit(entry: _LogEntry, stderr: bool = False) -> None:
-    """Output a log entry as a structured JSON line or plain text."""
+def _emit(entry: _LogEntry) -> None:
+    """Write one log entry to stderr as JSON (with extras) or plain text."""
     if entry.extra:
         data = {
             "ts": entry.ts,
@@ -72,42 +71,37 @@ def _emit(entry: _LogEntry, stderr: bool = False) -> None:
             "msg": entry.msg,
             "extra": entry.extra,
         }
-        print(json.dumps(data, ensure_ascii=False, default=str), file=sys.stderr if stderr else sys.stdout)
+        print(json.dumps(data, ensure_ascii=False, default=str), file=sys.stderr)
     else:
-        target = sys.stderr if stderr else sys.stdout
-        target.write(f"[{entry.level}] {entry.module}: {entry.msg}\n")
+        sys.stderr.write(f"[{entry.level}] {entry.module}: {entry.msg}\n")
     sys.stderr.flush()
 
 
-# Quick helpers — always formatted, never JSON unless extra provided
+# Quick helpers — always on stderr; JSON when extra fields are provided.
 def log_debug(msg: str, module: str = "", **kwargs: Any) -> None:
-    entry = _make_entry("DEBUG", msg, module, **kwargs)
-    _emit(entry, stderr=(bool(kwargs) or len(kwargs) > 0))
+    _emit(_make_entry("DEBUG", msg, module, **kwargs))
 
 
 def log_info(msg: str, module: str = "", **kwargs: Any) -> None:
-    entry = _make_entry("INFO", msg, module, **kwargs)
-    _emit(entry, stderr=False)
+    _emit(_make_entry("INFO", msg, module, **kwargs))
 
 
 def log_warning(msg: str, module: str = "", **kwargs: Any) -> None:
-    entry = _make_entry("WARNING", msg, module, **kwargs)
-    _emit(entry, stderr=True)
+    _emit(_make_entry("WARNING", msg, module, **kwargs))
 
 
 def log_error(msg: str, module: str = "", **kwargs: Any) -> None:
-    entry = _make_entry("ERROR", msg, module, **kwargs)
-    _emit(entry, stderr=True)
+    _emit(_make_entry("ERROR", msg, module, **kwargs))
 
 
 def log_critical(msg: str, module: str = "", **kwargs: Any) -> None:
-    entry = _make_entry("CRITICAL", msg, module, **kwargs)
-    _emit(entry, stderr=True)
+    _emit(_make_entry("CRITICAL", msg, module, **kwargs))
 
 
 # ---------------------------------------------------------------------------
 # Logger class — full structured logging
 # ---------------------------------------------------------------------------
+
 
 class Logger:
     """Structured logger that writes JSON lines to stderr."""
@@ -130,7 +124,7 @@ class Logger:
         if not self._should_log(level):
             return
         entry = _make_entry(level.name, msg, module, **kwargs)
-        _emit(entry, stderr=True)
+        _emit(entry)
 
     def debug(self, msg: str, module: str = "", **kwargs: Any) -> None:
         self._log(LogLevel.DEBUG, msg, module=module, **kwargs)
@@ -150,26 +144,25 @@ class Logger:
     def structured(self, level: str, msg: str, module: str = "", **kwargs: Any) -> None:
         """Log a structured entry with a custom level string."""
         entry = _make_entry(level, msg, module, **kwargs)
-        _emit(entry, stderr=True)
+        _emit(entry)
 
 
-def init_logger(log_level: LogLevel | None = None) -> Logger:
-    """Create and return a Logger configured from the environment.
+def init_logger(log_level: str | LogLevel | None = None) -> Logger:
+    """Create and return a Logger configured from shared configuration.
 
-    Reads WATERMARKS_LOG_LEVEL from the environment; defaults to INFO.
+    Precedence when ``log_level`` is omitted: WATERMARKS_LOG_LEVEL env var,
+    .env file, pyproject.toml [tool.watermark], then the INFO default.
+    Invalid level strings fall back to INFO; unknown levels never crash.
     """
     if log_level is None:
-        raw = _get_env_log_level()
-        log_level = _parse_log_level(raw)
+        from configuration import load_configuration
+
+        summary = load_configuration()
+        raw = summary.settings.get("log_level")
+        log_level = raw.value if raw is not None else "INFO"
+    if isinstance(log_level, str):
+        log_level = _parse_log_level(log_level)
     return Logger(level=log_level)
-
-
-def _get_env_log_level() -> str:
-    return (
-        sys.modules.get("__main__", {}).get("WATERMARKS_LOG_LEVEL", "INFO")
-        if "__main__" in sys.modules
-        else ""
-    )
 
 
 def _parse_log_level(raw: str) -> LogLevel:

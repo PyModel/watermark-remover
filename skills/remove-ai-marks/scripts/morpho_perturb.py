@@ -11,6 +11,9 @@ Strategies
     noise     — Per-pixel Gaussian noise injection
     quantize  — Color-quantization to break fine gradients
 
+The alpha channel of RGBA input is never modified: perturbing opacity would
+change compositing, not watermark structure.
+
 Complexity   : O(width * height) — one pass per channel
 Quality     : High (adjustable strength)
 Legal risk   : Low (generic image operations)
@@ -18,11 +21,49 @@ Legal risk   : Low (generic image operations)
 
 from __future__ import annotations
 
+import json
 import math
 import random
-import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+
+# Strategies this module dispatches, mapped to the keyword arguments each one
+# accepts. ``morpho_perturb`` rejects any keyword outside this catalog.
+MORPHO_STRATEGY_KWARGS: dict[str, tuple[str, ...]] = {
+    "grid": ("spacing", "opacity", "seed"),
+    "diagonal": ("spacing", "opacity", "angle", "seed"),
+    "noise": ("sigma", "seed"),
+    "quantize": ("levels",),
+}
+MORPHO_STRATEGIES: tuple[str, ...] = tuple(MORPHO_STRATEGY_KWARGS)
+
+
+def _strategy_kwargs(strategy: str, kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Return the caller kwargs allowed for ``strategy``, rejecting the rest.
+
+    Rejecting unexpected keywords catches typos and keeps callers honest:
+    silently dropping ``opacit=0.1`` would apply a default the caller never chose.
+    """
+    allowed = MORPHO_STRATEGY_KWARGS.get(strategy)
+    if allowed is None:
+        raise ValueError(f"unknown morphological strategy: {strategy}")
+    unexpected = sorted(set(kwargs) - set(allowed))
+    if unexpected:
+        names = ", ".join(unexpected)
+        raise TypeError(f"unexpected keyword argument(s) for strategy {strategy!r}: {names}")
+    return {name: kwargs[name] for name in allowed if name in kwargs}
+
+
+def _validate_input(raw: bytes, width: int, height: int, channels: int) -> None:
+    if width <= 0 or height <= 0:
+        raise ValueError("image dimensions must be positive")
+    if channels not in (1, 3, 4):
+        raise ValueError("channels must be 1, 3, or 4")
+    expected = width * height * channels
+    if len(raw) != expected:
+        raise ValueError(f"raw length {len(raw)} != {width}*{height}*{channels}")
+
 
 # ---------------------------------------------------------------------------
 # Per-channel morphological operations
@@ -50,6 +91,11 @@ class MorphoResult:
             "height": self.height,
             "channels": self.channels,
         }
+
+
+def _color_channels(channels: int) -> int:
+    """Channels to perturb: alpha is always left untouched for RGBA input."""
+    return channels - 1 if channels == 4 else channels
 
 
 def _pixels_from_bytes(raw: bytes, channels: int) -> list[list[float]]:
@@ -82,12 +128,17 @@ def morpho_grid(
     """Overlay a subtle grid pattern to break logo/overlay continuity.
 
     Grid lines are rendered at *spacing*-pixel intervals with alpha *opacity*.
-    Higher opacity = more aggressive watermark disruption.
+    Higher opacity = more aggressive watermark disruption. The alpha channel
+    of RGBA input is preserved exactly.
     """
+    _validate_input(raw, width, height, channels)
     if spacing < 2:
         raise ValueError("spacing must be >= 2")
+    if not 0.0 <= opacity <= 1.0:
+        raise ValueError("opacity must be in [0, 1]")
     rng = random.Random(seed)
     pixels = _pixels_from_bytes(raw, channels)
+    color_channels = _color_channels(channels)
 
     for i, row in enumerate(pixels):
         y = i // width
@@ -95,8 +146,8 @@ def morpho_grid(
         is_grid = (x % spacing == 0) or (y % spacing == 0)
         if is_grid:
             base = rng.uniform(opacity * 1.5, opacity * 3)
-            for c in range(channels):
-                row[c] = row[c] * (1.0 - base) + (128 if c == 3 else 200) * base
+            for c in range(color_channels):
+                row[c] = row[c] * (1.0 - base) + 200 * base
 
     return MorphoResult(
         data=_bytes_from_pixels(pixels, channels),
@@ -121,11 +172,17 @@ def morpho_diagonal(
     seed: int | None = None,
 ) -> MorphoResult:
     """Add fine diagonal scan lines to disrupt texture-based watermarks."""
+    _validate_input(raw, width, height, channels)
+    if spacing < 2:
+        raise ValueError("spacing must be >= 2")
+    if not 0.0 <= opacity <= 1.0:
+        raise ValueError("opacity must be in [0, 1]")
     rad = math.radians(angle)
     cos_a = math.cos(rad)
     sin_a = math.sin(rad)
     rng = random.Random(seed)
     pixels = _pixels_from_bytes(raw, channels)
+    color_channels = _color_channels(channels)
 
     diag_length = math.sqrt(width * width + height * height)
     for i, row in enumerate(pixels):
@@ -136,7 +193,7 @@ def morpho_diagonal(
         is_line = (proj % spacing) < 1.0
         if is_line:
             base = rng.uniform(opacity * 1.2, opacity * 2.5)
-            for c in range(channels):
+            for c in range(color_channels):
                 row[c] = row[c] * (1.0 - base) + 255 * base
 
     return MorphoResult(
@@ -160,13 +217,15 @@ def morpho_noise(
     seed: int | None = None,
 ) -> MorphoResult:
     """Inject per-pixel Gaussian noise to disrupt frequency-domain marks."""
+    _validate_input(raw, width, height, channels)
     if sigma < 0:
         raise ValueError("sigma must be >= 0")
     rng = random.Random(seed)
     pixels = _pixels_from_bytes(raw, channels)
+    color_channels = _color_channels(channels)
 
     for row in pixels:
-        for c in range(channels):
+        for c in range(color_channels):
             noise = rng.gauss(0, sigma)
             row[c] = max(0, min(255, row[c] + noise))
 
@@ -190,11 +249,15 @@ def morpho_quantize(
     levels: int = 32,
 ) -> MorphoResult:
     """Color quantization to break fine gradients used by some watermark detectors."""
-    step = 255.0 / max(1, levels - 1)
+    _validate_input(raw, width, height, channels)
+    if levels < 2:
+        raise ValueError("levels must be >= 2")
+    step = 255.0 / (levels - 1)
     pixels = _pixels_from_bytes(raw, channels)
+    color_channels = _color_channels(channels)
 
     for row in pixels:
-        for c in range(channels):
+        for c in range(color_channels):
             row[c] = round(row[c] / step) * step
 
     return MorphoResult(
@@ -203,7 +266,7 @@ def morpho_quantize(
         height=height,
         channels=channels,
         strategy="quantize",
-        strength=1.0 / max(1, levels - 1),
+        strength=1.0 / (levels - 1),
         seed=None,
     )
 
@@ -225,15 +288,20 @@ def morpho_perturb(
     diagonal  — Fine diagonal scan lines
     noise     — Per-pixel Gaussian noise
     quantize  — Color quantization
+
+    Only the keywords listed in ``MORPHO_STRATEGY_KWARGS`` are accepted for
+    each strategy; any other keyword raises ``TypeError`` so typos cannot
+    silently apply defaults.
     """
+    filtered = _strategy_kwargs(strategy, kwargs)
     if strategy == "grid":
-        return morpho_grid(raw, width, height, channels, **kwargs)
+        return morpho_grid(raw, width, height, channels, **filtered)
     if strategy == "diagonal":
-        return morpho_diagonal(raw, width, height, channels, **kwargs)
+        return morpho_diagonal(raw, width, height, channels, **filtered)
     if strategy == "noise":
-        return morpho_noise(raw, width, height, channels, **kwargs)
+        return morpho_noise(raw, width, height, channels, **filtered)
     if strategy == "quantize":
-        return morpho_quantize(raw, width, height, channels, **kwargs)
+        return morpho_quantize(raw, width, height, channels, **filtered)
     raise ValueError(f"unknown morphological strategy: {strategy}")
 
 
@@ -255,23 +323,30 @@ def combined_morpho(
     """Chain multiple morphological strategies sequentially.
 
     Example: grid + noise disrupts both pattern-based and frequency-domain marks.
+
+    When ``seed`` is provided, each strategy in the chain receives a distinct
+    derived seed (seed, seed + 1, ...) so every stage stays reproducible.
+    Strategies that take no seed (quantize) are left deterministic.
     """
     current = bytearray(raw)
     active_seed = seed
-    last_result = None
+    last_result: MorphoResult | None = None
 
     for strat in strategies:
+        stage_kwargs = dict(kwargs)
+        if active_seed is not None and "seed" in MORPHO_STRATEGY_KWARGS[strat]:
+            stage_kwargs["seed"] = active_seed
         result = morpho_perturb(
             bytes(current),
             width,
             height,
             channels,
             strategy=strat,
-            seed=active_seed,
-            **kwargs,
+            **stage_kwargs,
         )
         current = result.data
-        active_seed = (result.seed or 0) + 1 if active_seed else seed
+        if active_seed is not None:
+            active_seed += 1
         last_result = result
 
     if last_result is None:
@@ -297,14 +372,17 @@ def main() -> int:
     """CLI: apply morphological perturbation to a PNG image."""
     import argparse
 
-    from morphomod import decode_png, encode_png
+    from common import atomic_write_bytes, read_bytes_bounded
+    from morphomod import MAX_ENCODED_BYTES, Raster, decode_png, encode_png
+    from structured_log import init_logger
 
+    logger = init_logger()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("image", type=str, help="Input PNG file")
     parser.add_argument("-o", "--output", type=str, default=None, help="Output PNG file")
     parser.add_argument(
         "--strategy",
-        choices=["grid", "diagonal", "noise", "quantize"],
+        choices=list(MORPHO_STRATEGIES),
         default="grid",
         help="Perturbation strategy",
     )
@@ -316,8 +394,22 @@ def main() -> int:
     parser.add_argument("--json", action="store_true", help="Output JSON report")
     args = parser.parse_args()
 
+    # Forward only the keywords the selected strategy accepts.
+    all_kwargs = {
+        "spacing": args.spacing,
+        "opacity": args.opacity,
+        "sigma": args.sigma,
+        "levels": args.levels,
+        "seed": args.seed,
+    }
+    kwargs = {
+        name: all_kwargs[name]
+        for name in MORPHO_STRATEGY_KWARGS[args.strategy]
+        if name in all_kwargs and all_kwargs[name] is not None
+    }
+
     try:
-        raw = open(args.image, "rb").read()  # noqa: SIM115
+        raw = read_bytes_bounded(Path(args.image), MAX_ENCODED_BYTES, label="encoded file")
         raster = decode_png(raw)
 
         result = morpho_perturb(
@@ -326,28 +418,14 @@ def main() -> int:
             raster.height,
             raster.channels,
             strategy=args.strategy,
-            opacity=args.opacity,
-            spacing=args.spacing,
-            sigma=args.sigma,
-            levels=args.levels,
-            seed=args.seed,
+            **kwargs,
         )
 
         if args.output is None:
             args.output = str(Path(args.image).with_suffix(".perturbed.png"))
 
-        out_raster = type(
-            "Raster",
-            (),
-            {
-                "width": result.width,
-                "height": result.height,
-                "channels": result.channels,
-                "data": result.data,
-            },
-        )()
-        with open(args.output, "wb") as f:
-            f.write(encode_png(out_raster))
+        out_raster = Raster(result.width, result.height, result.channels, result.data)
+        atomic_write_bytes(Path(args.output), encode_png(out_raster))
 
         report = result.to_dict()
         if args.json:
@@ -355,13 +433,10 @@ def main() -> int:
         else:
             print(f"wrote {args.output} strategy={result.strategy}")
         return 0
-    except Exception as e:
-        sys.stderr.write(f"error: {e}\n")
+    except Exception as error:
+        logger.error(f"error: {error}", module="morpho_perturb")
         return 1
 
 
 if __name__ == "__main__":
-    import json
-    from pathlib import Path
-
     raise SystemExit(main())

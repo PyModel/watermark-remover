@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "watermark-remover"
@@ -26,8 +26,11 @@ classifiers = [
 [project.scripts]
 wm = "skills.remove_ai_marks.scripts.clean_file:main"
 
-[tool.setuptools.packages.find]
-include = ["skills.remove_ai_marks.scripts*"]
+[tool.setuptools]
+# The on-disk directory uses a hyphen (skills/remove-ai-marks) while the
+# importable package uses an underscore; map them explicitly.
+package-dir = {"skills.remove_ai_marks" = "skills/remove-ai-marks"}
+packages = ["skills.remove_ai_marks", "skills.remove_ai_marks.scripts"]
 
 [tool.ruff]
 line-length = 100
@@ -42,12 +45,6 @@ ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 "demo.py" = ["E402"]
 "skills/remove-ai-marks/scripts/*.py" = ["E402"]
 "tests/*.py" = ["E402"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-python_files = ["test_*.py"]
-python_functions = ["test_*"]
-addopts = "-q"
 
 [tool.watermark]
 # Default settings — overridden by env vars and .env file.
