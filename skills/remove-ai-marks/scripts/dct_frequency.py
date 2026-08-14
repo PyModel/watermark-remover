@@ -19,6 +19,9 @@ Strategies
     rotate     — Nearest-neighbor rotation
     two-stage  — blur → jpeg → median (95–98% ASR paper-reported)
 
+The alpha channel of RGBA input is preserved exactly by every strategy:
+degrading opacity would change compositing, not watermark structure.
+
 Usage
 -----
     from dct_frequency import degrade_image, frequency_suppress_from_bytes
@@ -188,6 +191,18 @@ def _validate_raster(width: int, height: int, channels: int) -> None:
         raise ValueError("channels must be 1, 3, or 4")
 
 
+def _color_channels(channels: int) -> int:
+    """Channels to degrade: alpha is always left untouched for RGBA input."""
+    return channels - 1 if channels == 4 else channels
+
+
+def _append_alpha(out: list[list[float]], pixels: list[list[float]], channels: int) -> None:
+    """Copy the original alpha channel through after a color-only transform."""
+    if channels == 4:
+        for i in range(len(out)):
+            out[i].append(pixels[i][3])
+
+
 # ---------------------------------------------------------------------------
 # Public attack functions
 # ---------------------------------------------------------------------------
@@ -239,8 +254,9 @@ def frequency_suppress(
         raise ValueError("overlap must be an integer in [0, block_size)")
 
     # Build per-channel channel data
+    color_channels = _color_channels(channels)
     channel_data: list[list[list[float]]] = []
-    for ch in range(channels):
+    for ch in range(color_channels):
         channel: list[list[float]] = []
         for y in range(height):
             row: list[float] = []
@@ -253,7 +269,7 @@ def frequency_suppress(
     # Apply frequency suppression per channel
     result: list[list[list[float]]] = []
     stride = block_size - overlap
-    for ch in range(channels):
+    for ch in range(color_channels):
         channel = channel_data[ch]
         temp: list[list[float]] = [[0.0] * width for _ in range(height)]
         count: list[list[float]] = [[0.0] * width for _ in range(height)]
@@ -282,7 +298,9 @@ def frequency_suppress(
     flat: list[list[float]] = []
     for y in range(height):
         for x in range(width):
-            flat.append([result[ch][y][x] for ch in range(channels)])
+            idx = y * width + x
+            flat.append([result[ch][y][x] for ch in range(color_channels)])
+    _append_alpha(flat, pixels, channels)
     return flat
 
 
@@ -377,7 +395,7 @@ def gaussian_blur_2d(
         return out
 
     out: list[list[float]] = [[] for _ in range(height * width)]
-    for ch in range(channels):
+    for ch in range(_color_channels(channels)):
         col_data: list[list[float]] = [[0.0] * width for _ in range(height)]
         for y in range(height):
             for x in range(width):
@@ -390,6 +408,7 @@ def gaussian_blur_2d(
             blurred = _blur_column(col_vals)
             for y in range(height):
                 out[y * width + x].append(blurred[y])
+    _append_alpha(out, pixels, channels)
     return out
 
 
@@ -407,7 +426,7 @@ def median_filter_2d(
         raise ValueError("kernel_size must be a positive odd integer")
     half = kernel_size // 2
     out: list[list[float]] = [[] for _ in range(height * width)]
-    for ch in range(channels):
+    for ch in range(_color_channels(channels)):
         vals: list[list[float]] = [[0.0] * width for _ in range(height)]
         for y in range(height):
             for x in range(width):
@@ -423,6 +442,7 @@ def median_filter_2d(
                 samples.sort()
                 mid = len(samples) // 2
                 out[y * width + x].append(samples[mid])
+    _append_alpha(out, pixels, channels)
     return out
 
 
@@ -455,7 +475,7 @@ def jpeg_compress_sim(
         qm = [[max(1, int(s * qf / 50)) for s in row] for row in standard]
 
     out: list[list[float]] = [[] for _ in range(height * width)]
-    for ch in range(channels):
+    for ch in range(_color_channels(channels)):
         block_data: list[list[float]] = [[0.0] * width for _ in range(height)]
         for y in range(height):
             for x in range(width):
@@ -479,6 +499,7 @@ def jpeg_compress_sim(
             for x in range(width):
                 out[y * width + x].append(block_data[y][x])
 
+    _append_alpha(out, pixels, channels)
     return out
 
 
@@ -500,17 +521,21 @@ def rotate_image(
     sin_a = math.sin(rad)
 
     cx, cy = width / 2, height / 2
-    out: list[list[float]] = [[0.0] * channels for _ in range(height * width)]
+    color_channels = _color_channels(channels)
+    out: list[list[float]] = [[0.0] * color_channels for _ in range(height * width)]
 
     for y in range(height):
         for x in range(width):
+            i = y * width + x
             rx = cos_a * (x - cx) + sin_a * (y - cy) + cx
             ry = -sin_a * (x - cx) + cos_a * (y - cy) + cy
             sx, sy = round(rx), round(ry)
             if 0 <= sx < width and 0 <= sy < height:
-                out[y * width + x] = list(pixels[sy * width + sx])
-            else:
-                out[y * width + x] = [0.0] * channels
+                out[i] = [pixels[sy * width + sx][c] for c in range(color_channels)]
+            # Out-of-bounds pixels stay [0.0, ...]; alpha is copied below so
+            # rotation never manufactures transparency.
+            if channels == 4:
+                out[i].append(pixels[i][3])
     return out
 
 

@@ -175,6 +175,34 @@ The stdlib dilation is non-cascading and runs in O(width × height). PNG decodin
 
 Paper-reported MorphoMod improvements are not this implementation's measured results. The report includes initial and refined mask pixels and requires manual fidelity review.
 
+### Image degradation (opt-in Layer V extension)
+
+`--degrade` and `--morpho` apply frequency-domain or morphological degradation to
+PNG images after metadata cleaning:
+
+```bash
+# Frequency-domain strategies: freq-dct, blur, median, jpeg, rotate, two-stage
+python3 "$SCRIPTS/clean_file.py" photo.png -o out.png \
+  --degrade freq-dct --degrade-strength 0.5 --degrade-seed 7
+
+# Morphological strategies: grid, diagonal, noise, quantize
+python3 "$SCRIPTS/clean_file.py" photo.png -o out.png --morpho grid --degrade-seed 7
+```
+
+Semantics:
+
+- Degradation is an intentional transform, not residual risk: a degraded image
+  exits 0 and the report records the strategy under `degrade` instead of
+  printing a residual warning.
+- `--degrade-strength` (0–1) only configures `freq-dct`; the other strategies
+  use conservative built-in defaults. `--degrade-seed` makes seeded strategies
+  reproducible.
+- DCT-based strategies (`freq-dct`, `jpeg`, `two-stage`) refuse images above
+  their pixel caps (65,536 / 262,144) instead of running for hours in pure
+  Python.
+- The RGBA alpha channel is never modified, output files keep the destination's
+  existing permissions, and degradation requires PNG output.
+
 ---
 
 ## Metadata and provenance

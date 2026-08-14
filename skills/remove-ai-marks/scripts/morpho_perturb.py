@@ -324,16 +324,25 @@ def combined_morpho(
 
     Example: grid + noise disrupts both pattern-based and frequency-domain marks.
 
-    When ``seed`` is provided, each strategy in the chain receives a distinct
-    derived seed (seed, seed + 1, ...) so every stage stays reproducible.
-    Strategies that take no seed (quantize) are left deterministic.
+    Keyword arguments are filtered per stage against ``MORPHO_STRATEGY_KWARGS``,
+    so one call can carry options for several strategies (e.g. ``spacing`` for
+    grid and ``sigma`` for noise). When ``seed`` is provided, each strategy in
+    the chain receives a distinct derived seed (seed, seed + 1, ...) so every
+    stage stays reproducible. Strategies that take no seed (quantize) are left
+    deterministic.
     """
     current = bytearray(raw)
     active_seed = seed
     last_result: MorphoResult | None = None
 
     for strat in strategies:
-        stage_kwargs = dict(kwargs)
+        # Each stage receives only the keywords its strategy accepts, so a
+        # heterogeneous chain like grid (spacing) + noise (sigma) works.
+        stage_kwargs = {
+            name: value
+            for name, value in kwargs.items()
+            if name in MORPHO_STRATEGY_KWARGS.get(strat, ())
+        }
         if active_seed is not None and "seed" in MORPHO_STRATEGY_KWARGS[strat]:
             stage_kwargs["seed"] = active_seed
         result = morpho_perturb(

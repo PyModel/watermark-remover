@@ -334,3 +334,19 @@ class TestFromBytesCap:
         raw = bytes([128] * (8 * 8))
         result = frequency_suppress_from_bytes(raw, 8, 8, 1, suppress=0.5)
         assert len(result) == 8 * 8
+
+
+class TestAlphaPreservation:
+    """Every degrade strategy passes the RGBA alpha channel through untouched."""
+
+    @pytest.mark.parametrize(
+        "strategy", ["freq-dct", "blur", "median", "jpeg", "rotate", "two-stage"]
+    )
+    def test_alpha_never_modified(self, strategy: str) -> None:
+        size = 16
+        alpha = bytes((i * 13) % 256 for i in range(size * size))
+        raw = bytearray()
+        for i in range(size * size):
+            raw += bytes([60, 120, 180, alpha[i]])
+        result = degrade_image(bytes(raw), size, size, 4, strategy=strategy)
+        assert result.data[3::4] == alpha

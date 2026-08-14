@@ -128,3 +128,34 @@ def test_cli_error_path_reports_and_exits_one(tmp_path: Path) -> None:
     assert result.returncode == 1
     assert "[ERROR]" in result.stderr
     assert "error:" in result.stderr
+
+
+def test_combined_morpho_filters_kwargs_per_stage() -> None:
+    """Heterogeneous chains accept strategy-specific kwargs in one call."""
+    first = combined_morpho(
+        _raw(),
+        8,
+        8,
+        4,
+        strategies=("grid", "noise"),
+        spacing=2,
+        sigma=5.0,
+        seed=42,
+    )
+    second = combined_morpho(
+        _raw(),
+        8,
+        8,
+        4,
+        strategies=("grid", "noise"),
+        spacing=2,
+        sigma=5.0,
+        seed=42,
+    )
+    assert bytes(first.data) == bytes(second.data)
+    assert first.data[3::4] == bytes([255] * (8 * 8))
+
+
+def test_combined_morpho_unknown_strategy_in_chain() -> None:
+    with pytest.raises(ValueError, match="unknown morphological strategy"):
+        combined_morpho(_raw(), 8, 8, 4, strategies=("grid", "lava"))
