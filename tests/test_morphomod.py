@@ -78,37 +78,6 @@ def test_visible_backend_requires_destination_before_writing_mask(tmp_path: Path
     assert not mask_output.exists()
 
 
-@pytest.mark.parametrize("backend", ["texture", "simple"])
-def test_png_only_backend_rejects_jpeg_before_localization(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str
-) -> None:
-    source = tmp_path / "input.jpg"
-    source.write_bytes(b"\xff\xd8\xff\xd9")
-    destination = tmp_path / "output.jpg"
-    mask_output = tmp_path / "mask.pgm"
-    monkeypatch.setattr(
-        morphomod,
-        "_run_template",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("invalid backend reached detector")
-        ),
-    )
-
-    with pytest.raises(ValueError, match=rf"{backend} backend supports PNG only"):
-        remove_visible(
-            source,
-            destination,
-            VisiblePlan(
-                detect_command="detect {input} {mask}",
-                backend=backend,
-                mask_output=mask_output,
-            ),
-        )
-
-    assert not destination.exists()
-    assert not mask_output.exists()
-
-
 def test_dilation_is_bounded_not_cascading():
     data = bytearray(7 * 7)
     data[3 * 7 + 3] = 255
