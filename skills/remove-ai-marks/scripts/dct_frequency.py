@@ -151,8 +151,8 @@ def _dct_block(block: list[list[float]], suppress: float) -> list[list[float]]:
         for v in range(w):
             if u == 0 and v == 0:
                 continue  # DC component
-            dist = math.sqrt((u - h / 2) ** 2 + (v - w / 2) ** 2)
-            max_dist = math.sqrt((h / 2) ** 2 + (w / 2) ** 2)
+            dist = math.hypot(u, v)
+            max_dist = math.hypot(h - 1, w - 1)
             mid_start = max_dist * 0.2
             mid_end = max_dist * 0.6
             if mid_start <= dist <= mid_end:
@@ -201,6 +201,15 @@ def _append_alpha(out: list[list[float]], pixels: list[list[float]], channels: i
     if channels == 4:
         for i in range(len(out)):
             out[i].append(pixels[i][3])
+
+
+def _block_origins(length: int, block_size: int, stride: int) -> list[int]:
+    """Return starts that cover an axis, including a final anchored block."""
+    last = max(0, length - block_size)
+    origins = list(range(0, last + 1, stride))
+    if not origins or origins[-1] != last:
+        origins.append(last)
+    return origins
 
 
 # ---------------------------------------------------------------------------
@@ -266,21 +275,28 @@ def frequency_suppress(
             channel.append(row)
         channel_data.append(channel)
 
-    # Apply frequency suppression per channel
+    # Apply frequency suppression per channel. Edge-replicated padding ensures
+    # sub-block images and right/bottom remainders are transformed too.
     result: list[list[list[float]]] = []
     stride = block_size - overlap
+    y_origins = _block_origins(height, block_size, stride)
+    x_origins = _block_origins(width, block_size, stride)
     for ch in range(color_channels):
         channel = channel_data[ch]
         temp: list[list[float]] = [[0.0] * width for _ in range(height)]
         count: list[list[float]] = [[0.0] * width for _ in range(height)]
-        for by in range(0, height - block_size + 1, stride):
-            for bx in range(0, width - block_size + 1, stride):
-                block: list[list[float]] = []
-                for dy in range(block_size):
-                    block.append([channel[by + dy][bx + dx] for dx in range(block_size)])
+        for by in y_origins:
+            for bx in x_origins:
+                block = [
+                    [
+                        channel[min(height - 1, by + dy)][min(width - 1, bx + dx)]
+                        for dx in range(block_size)
+                    ]
+                    for dy in range(block_size)
+                ]
                 dct_out = _dct_block(block, suppress)
-                for dy in range(block_size):
-                    for dx in range(block_size):
+                for dy in range(min(block_size, height - by)):
+                    for dx in range(min(block_size, width - bx)):
                         temp[by + dy][bx + dx] += dct_out[dy][dx]
                         count[by + dy][bx + dx] += 1.0
 
@@ -375,23 +391,27 @@ def gaussian_blur_2d(
     def _blur_row(row: list[float]) -> list[float]:
         out: list[float] = [0.0] * len(row)
         for x in range(len(row)):
-            s = 0.0
+            total = 0.0
+            used_weight = 0.0
             for j, offset in enumerate(range(-radius, radius + 1)):
                 nx = x + offset
                 if 0 <= nx < len(row):
-                    s += row[nx] * kernel[j]
-            out[x] = s
+                    total += row[nx] * kernel[j]
+                    used_weight += kernel[j]
+            out[x] = total / used_weight
         return out
 
-    def _blur_column(col_vals: list[list[float]]) -> list[float]:
+    def _blur_column(col_vals: list[float]) -> list[float]:
         out: list[float] = [0.0] * len(col_vals)
         for y in range(len(col_vals)):
-            s = 0.0
+            total = 0.0
+            used_weight = 0.0
             for j, offset in enumerate(range(-radius, radius + 1)):
                 ny = y + offset
                 if 0 <= ny < len(col_vals):
-                    s += col_vals[ny] * kernel[j]
-            out[y] = s
+                    total += col_vals[ny] * kernel[j]
+                    used_weight += kernel[j]
+            out[y] = total / used_weight
         return out
 
     out: list[list[float]] = [[] for _ in range(height * width)]
@@ -458,21 +478,18 @@ def jpeg_compress_sim(
     _validate_raster(width, height, channels)
     if not 1 <= quality <= 100:
         raise ValueError("quality must be in [1, 100]")
-    qf = quality
-    if qf < 50:
-        qm = [[max(1, int(5000 / qf)) for _ in range(8)] for _ in range(8)]
-    else:
-        standard = [
-            [16, 11, 10, 16, 24, 40, 51, 61],
-            [12, 12, 14, 19, 26, 58, 60, 55],
-            [14, 13, 16, 24, 40, 57, 69, 56],
-            [14, 17, 22, 29, 51, 87, 80, 62],
-            [18, 22, 37, 56, 68, 109, 103, 77],
-            [24, 35, 55, 64, 81, 104, 113, 92],
-            [49, 64, 78, 87, 103, 121, 120, 101],
-            [72, 92, 95, 98, 112, 100, 103, 99],
-        ]
-        qm = [[max(1, int(s * qf / 50)) for s in row] for row in standard]
+    standard = [
+        [16, 11, 10, 16, 24, 40, 51, 61],
+        [12, 12, 14, 19, 26, 58, 60, 55],
+        [14, 13, 16, 24, 40, 57, 69, 56],
+        [14, 17, 22, 29, 51, 87, 80, 62],
+        [18, 22, 37, 56, 68, 109, 103, 77],
+        [24, 35, 55, 64, 81, 104, 113, 92],
+        [49, 64, 78, 87, 103, 121, 120, 101],
+        [72, 92, 95, 98, 112, 100, 103, 99],
+    ]
+    scale = 5000 / quality if quality < 50 else 200 - 2 * quality
+    qm = [[max(1, min(255, int((entry * scale + 50) // 100))) for entry in row] for row in standard]
 
     out: list[list[float]] = [[] for _ in range(height * width)]
     for ch in range(_color_channels(channels)):
@@ -481,18 +498,22 @@ def jpeg_compress_sim(
             for x in range(width):
                 block_data[y][x] = pixels[y * width + x][ch]
 
-        for by in range(0, height - 7, 8):
-            for bx in range(0, width - 7, 8):
-                blk: list[list[float]] = []
-                for dy in range(8):
-                    blk.append([block_data[by + dy][bx + dx] for dx in range(8)])
+        for by in range(0, height, 8):
+            for bx in range(0, width, 8):
+                blk = [
+                    [
+                        block_data[min(height - 1, by + dy)][min(width - 1, bx + dx)]
+                        for dx in range(8)
+                    ]
+                    for dy in range(8)
+                ]
                 dct_blk = _dct2_ortho(blk)
                 for u in range(8):
                     for v in range(8):
                         dct_blk[u][v] = round(dct_blk[u][v] / qm[u][v]) * qm[u][v]
                 out_blk = _idct2_ortho(dct_blk)
-                for dy in range(8):
-                    for dx in range(8):
+                for dy in range(min(8, height - by)):
+                    for dx in range(min(8, width - bx)):
                         block_data[by + dy][bx + dx] = out_blk[dy][dx]
 
         for y in range(height):

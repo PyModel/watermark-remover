@@ -2,15 +2,8 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
+import dct_frequency
 import pytest
-
-ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
-sys.path.insert(0, str(SCRIPTS))
-
 from dct_frequency import (
     degrade_image,
     frequency_suppress,
@@ -21,6 +14,35 @@ from dct_frequency import (
     two_stage_attack,
 )
 from morpho_perturb import morpho_perturb
+
+
+def test_dct_suppression_uses_dc_as_radial_origin(monkeypatch: pytest.MonkeyPatch) -> None:
+    coefficients = [[1.0] * 8 for _ in range(8)]
+    monkeypatch.setattr(dct_frequency, "_dct2_ortho", lambda block: coefficients)
+    monkeypatch.setattr(dct_frequency, "_idct2_ortho", lambda block: block)
+
+    result = dct_frequency._dct_block([[0.0] * 8 for _ in range(8)], suppress=1.0)
+
+    assert result[0][0] == 1.0
+    assert result[3][3] < 1.0
+    assert result[7][7] == 1.0
+
+
+def test_frequency_suppress_processes_sub_block_and_edge_pixels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        dct_frequency,
+        "_dct_block",
+        lambda block, suppress: [[value + 10 for value in row] for row in block],
+    )
+    pixels = [[float(i)] for i in range(10 * 10)]
+
+    result = frequency_suppress(pixels, 10, 10, 1, block_size=8, overlap=0)
+    tiny = frequency_suppress(pixels[:9], 3, 3, 1, block_size=8, overlap=0)
+
+    assert result[-1][0] == pixels[-1][0] + 10
+    assert all(out[0] == source[0] + 10 for source, out in zip(pixels[:9], tiny, strict=True))
 
 
 class TestFrequencySuppress:
@@ -192,6 +214,11 @@ class TestGaussianBlur:
         # Blur should spread the bright pixel
         assert result[width * 8 + 8][0] > 0.0
 
+    def test_constant_image_keeps_border_intensity(self) -> None:
+        pixels = [[73.0] for _ in range(5 * 3)]
+        result = gaussian_blur_2d(pixels, 5, 3, 1, sigma=2.0)
+        assert all(row[0] == pytest.approx(73.0) for row in result)
+
 
 class TestJPEGCompress:
     """Test simulated JPEG compression."""
@@ -203,6 +230,26 @@ class TestJPEGCompress:
         assert len(result) == width * height
         for row in result:
             assert all(0 <= v <= 255 for v in row)
+
+    def test_jpeg_processes_sub_block_and_partial_edges(self) -> None:
+        width, height = 10, 5
+        pixels = [[float((x * 31 + y * 17) % 256)] for y in range(height) for x in range(width)]
+        result = jpeg_compress_sim(pixels, width, height, 1, quality=20)
+        assert result[-1] != pixels[-1]
+
+    def test_quality_is_monotonic_for_reconstruction_error(self) -> None:
+        width = height = 8
+        pixels = [[float((x * 37 + y * 19) % 256)] for y in range(height) for x in range(width)]
+        low = jpeg_compress_sim(pixels, width, height, 1, quality=10)
+        high = jpeg_compress_sim(pixels, width, height, 1, quality=90)
+
+        def squared_error(candidate: list[list[float]]) -> float:
+            return sum(
+                (source[0] - output[0]) ** 2
+                for source, output in zip(pixels, candidate, strict=True)
+            )
+
+        assert squared_error(low) >= squared_error(high)
 
 
 class TestRotate:
