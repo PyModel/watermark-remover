@@ -14,7 +14,6 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
-sys.path.insert(0, str(SCRIPTS))
 
 import morphomod
 from morphomod import (
@@ -362,7 +361,10 @@ def test_external_command_failure_caps_diagnostics(tmp_path: Path, monkeypatch):
         encoding="utf-8",
     )
     try:
-        morphomod._run_template(f"{shlex.quote(sys.executable)} {shlex.quote(str(noisy))}")
+        morphomod._run_template(
+            f"{shlex.quote(sys.executable)} {shlex.quote(str(noisy))}",
+            timeout=5,
+        )
     except RuntimeError as error:
         message = str(error)
         assert "failed (7)" in message
@@ -589,3 +591,81 @@ def test_morphomod_cli(tmp_path: Path):
     report = json.loads(r.stdout)
     assert report["status"] == "completed"
     assert dest.is_file()
+
+
+def test_clean_file_frictionless_no_mask_artifact_by_default(tmp_path: Path):
+    # F2: automated/frictionless — visible cleaning publishes no .mask.pgm
+    # unless --keep-artifacts is requested.
+    src = tmp_path / "input.png"
+    src.write_bytes(encode_png(Raster(16, 16, 3, bytearray([9, 8, 7] * 256))))
+    dest = tmp_path / "cleaned.png"
+    r = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS / "clean_file.py"),
+            str(src),
+            "-o",
+            str(dest),
+            "--visible-box",
+            "4,4,4,4",
+            "--dilate",
+            "0",
+            "--visible-backend",
+            "simple",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    report = json.loads(r.stdout)
+    assert report["visible"]["status"] == "completed"
+    assert dest.is_file()
+    # Frictionless: no published mask artifact next to the output.
+    assert not dest.with_name("cleaned.mask.pgm").exists()
+    assert report["visible"]["mask"] is None
+
+    # Same run with --keep-artifacts publishes the mask.
+    dest2 = tmp_path / "kept.png"
+    r2 = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS / "clean_file.py"),
+            str(src),
+            "-o",
+            str(dest2),
+            "--visible-box",
+            "4,4,4,4",
+            "--dilate",
+            "0",
+            "--visible-backend",
+            "simple",
+            "--keep-artifacts",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert r2.returncode == 0, r2.stderr
+    assert dest2.with_name("kept.mask.pgm").is_file()
+    assert json.loads(r2.stdout)["visible"]["mask"] is not None
+
+
+def test_remove_visible_respects_publish_mask_direct(tmp_path: Path):
+    from morphomod import VisiblePlan, remove_visible
+
+    src = tmp_path / "input.png"
+    src.write_bytes(encode_png(Raster(16, 16, 3, bytearray([9, 8, 7] * 256))))
+    dest = tmp_path / "out.png"
+    plan = VisiblePlan(
+        box=(4, 4, 4, 4),
+        backend="simple",
+        dilation_radius=0,
+        mask_output=tmp_path / "out.mask.pgm",
+        publish_mask=False,
+    )
+    report = remove_visible(src, dest, plan)
+    assert report["status"] == "completed"
+    assert dest.is_file()
+    assert not (tmp_path / "out.mask.pgm").exists()
+    assert report["mask"] is None
