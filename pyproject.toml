@@ -23,6 +23,29 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 
+[project.optional-dependencies]
+visible = [
+    "numpy",
+    "Pillow",
+    "opencv-python-headless",
+]
+quality = [
+    "scikit-image",
+]
+ai = [
+    "torch",
+    "torchvision",
+]
+provenance = [
+    "c2pa-python",
+]
+all = [
+    "watermark-remover[visible]",
+    "watermark-remover[quality]",
+    "watermark-remover[ai]",
+    "watermark-remover[provenance]",
+]
+
 [project.scripts]
 wm = "skills.remove_ai_marks.scripts.clean_file:main"
 
