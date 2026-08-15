@@ -66,6 +66,12 @@ class VisiblePlan:
     dilation_radius: int = DEFAULT_DILATION_RADIUS
     mask_output: Path | None = None
     prompt: str = "Remove watermark, fill with background"
+    #: False = frictionless mode: do not publish a .mask.pgm next to output.
+    #: The effective mask is still computed and used internally (and written
+    #: for the external backend, which needs a real file as its input).
+    publish_mask: bool = True
+
+    timeout: float = EXTERNAL_COMMAND_TIMEOUT_SECONDS
 
     def __post_init__(self) -> None:
         if self.backend not in VISIBLE_BACKENDS:
@@ -87,6 +93,15 @@ class VisiblePlan:
             or self.dilation_radius < 0
         ):
             raise ValueError("dilation radius must be a non-negative integer")
+        if (
+            isinstance(self.timeout, bool)
+            or not isinstance(self.timeout, (int, float))
+            or not math.isfinite(self.timeout)
+            or self.timeout <= 0
+        ):
+            raise ValueError("timeout must be a finite positive number")
+        if not isinstance(self.publish_mask, bool):
+            raise TypeError("publish_mask must be a bool")
 
 
 def _read_bounded(path: Path, limit: int | None = None) -> bytes:
@@ -236,6 +251,134 @@ def fill_holes(mask: Mask) -> Mask:
 
 def refine_mask(mask: Mask, radius: int = DEFAULT_DILATION_RADIUS) -> Mask:
     return dilate(fill_holes(mask), radius)
+
+
+def filter_components(mask: Mask, *, min_size: int = 10, max_components: int = 50) -> Mask:
+    """Remove small disconnected components from a mask.
+
+    Keeps only components whose pixel count >= ``min_size``, up to
+    ``max_components`` total components.  Use this after mask acquisition
+    to drop noise and false positives from detectors.
+
+    Does NOT modify the original mask.
+    """
+    w, h = mask.width, mask.height
+    data = bytearray(mask.data)
+    visited = bytearray(w * h)
+    component_sizes: list[int] = []
+    component_ids: list[list[int]] = []
+
+    for y in range(h):
+        for x in range(w):
+            idx = y * w + x
+            if data[idx] == 0 or visited[idx]:
+                continue
+            # BFS to find connected component
+            component: list[int] = []
+            q: deque[int] = deque([idx])
+            visited[idx] = 1
+            while q:
+                ci = q.popleft()
+                component.append(ci)
+                cx, cy = ci % w, ci // w
+                for nx, ny in ((cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)):
+                    if 0 <= nx < w and 0 <= ny < h:
+                        ni = ny * w + nx
+                        if data[ni] != 0 and not visited[ni]:
+                            visited[ni] = 1
+                            q.append(ni)
+            component_sizes.append(len(component))
+            component_ids.append(component)
+
+    # Keep large components, discard small ones
+    kept = 0
+    for comp_idx, size in enumerate(component_sizes):
+        if size >= min_size and kept < max_components:
+            kept += 1
+        else:
+            for ci in component_ids[comp_idx]:
+                data[ci] = 0
+
+    return Mask(w, h, data)
+
+
+def closing(mask: Mask, radius: int = 1) -> Mask:
+    """Morphological closing: dilate then erode to fill narrow gaps.
+
+    Operates on marked pixels (255 = mark).  ``radius=1`` fills single-pixel
+    gaps and bridges narrow breaks.
+    """
+    if radius < 1:
+        return Mask(mask.width, mask.height, bytearray(mask.data))
+    # Dilate first, then erode using the mask's real rectangular dimensions.
+    dilated = dilate(mask, radius)
+    eroded = _erode_mask(dilated.data, mask.width, mask.height, radius)
+    return Mask(mask.width, mask.height, eroded)
+
+
+def _erode_mask(data: bytearray, width: int, height: int, radius: int) -> bytearray:
+    """Erode a binary mask (255=foreground, 0=background) by radius."""
+    out = bytearray(data)
+    for y in range(height):
+        for x in range(width):
+            idx = y * width + x
+            if data[idx] == 0:
+                continue
+            # Check all pixels in the radius window
+            keep = True
+            for dy in range(-radius, radius + 1):
+                for dx in range(-radius, radius + 1):
+                    ny, nx = y + dy, x + dx
+                    if 0 <= ny < height and 0 <= nx < width and data[ny * width + nx] == 0:
+                        keep = False
+                        break
+                if not keep:
+                    break
+            if not keep:
+                out[idx] = 0
+    return out
+
+
+def feather_blend(
+    original: Raster,
+    inpainted: Raster,
+    mask: Mask,
+    *,
+    feather_radius: int = 3,
+) -> Raster:
+    """Blend inpainted pixels into the original with a smooth feather region.
+
+    Unlike texture_patch_inpaint's built-in feather, this operates on
+    any inpainted raster by computing a depth-based blend at the mask
+    boundary.  The mask must already be the effective mask (post-dilation).
+
+    Returns a new Raster; original and inpainted are not modified.
+    """
+    if (
+        original.width != inpainted.width
+        or original.height != inpainted.height
+        or original.channels != inpainted.channels
+    ):
+        raise ValueError("original/inpainted dimensions or channel counts differ")
+    if (original.width, original.height) != (mask.width, mask.height):
+        raise ValueError("mask dimensions must match raster dimensions")
+    if feather_radius <= 0:
+        return composite(original, inpainted, mask)
+
+    depths = _mask_depths(mask)
+    out = bytearray(original.data)
+    ch = original.channels
+
+    for i, marked in enumerate(mask.data):
+        if not marked:
+            continue
+        blend = min(1.0, max(0.0, depths[i] / max(1, feather_radius)))
+        blend = blend * blend * (3.0 - 2.0 * blend)  # smoothstep
+        for c in range(ch):
+            out[i * ch + c] = round(
+                original.data[i * ch + c] * (1.0 - blend) + inpainted.data[i * ch + c] * blend
+            )
+    return Raster(original.width, original.height, ch, out)
 
 
 # ---------------------------------------------------------------------------
@@ -629,10 +772,10 @@ def composite(original: Raster, inpainted: Raster, mask: Mask) -> Raster:
     return Raster(original.width, original.height, ch, out)
 
 
-def _run_template(template: str, **values: str) -> None:
+def _run_template(template: str, *, timeout: float, **values: str) -> None:
     result = external_command.run_command(
         external_command.command_from_template(template, **values),
-        timeout=EXTERNAL_COMMAND_TIMEOUT_SECONDS,
+        timeout=timeout,
         output_limit=MAX_COMMAND_DIAGNOSTIC_BYTES,
     )
     if result.returncode != 0:
@@ -683,6 +826,8 @@ def remove_visible(
     path: Path,
     dest: Path | None,
     plan: VisiblePlan,
+    *,
+    mask_details: dict[str, Mask] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(plan, VisiblePlan):
         raise TypeError("plan must be a VisiblePlan")
@@ -731,6 +876,7 @@ def remove_visible(
                 input=str(path),
                 mask=str(detected),
                 prompt=plan.prompt,
+                timeout=plan.timeout,
             )
             if not detected.is_file():
                 raise RuntimeError("detector command did not create {mask}")
@@ -740,18 +886,28 @@ def remove_visible(
     if dims and (initial.width, initial.height) != dims:
         raise ValueError(f"mask dimensions {(initial.width, initial.height)} != image {dims}")
     refined = refine_mask(initial, plan.dilation_radius)
+    if mask_details is not None:
+        mask_details.update(original=initial, effective=refined)
+    # The external backend needs a real mask file as its input, so it always
+    # publishes one.  Internal backends (texture/simple) may suppress the
+    # artifact entirely in frictionless mode (publish_mask=False).
+    publish = plan.publish_mask or plan.backend == "external"
     mask_output = plan.mask_output
-    if mask_output is None:
-        base = dest or path.with_name(f"{path.stem}.visible.cleaned{path.suffix}")
-        mask_output = base.with_name(f"{base.stem}.mask.pgm")
-        _validate_visible_paths(path, dest, plan.mask_path, mask_output)
-    write_pgm(refined, mask_output)
+    if publish:
+        if mask_output is None:
+            base = dest or path.with_name(f"{path.stem}.visible.cleaned{path.suffix}")
+            mask_output = base.with_name(f"{base.stem}.mask.pgm")
+            _validate_visible_paths(path, dest, plan.mask_path, mask_output)
+        write_pgm(refined, mask_output)
+        mask_label = str(mask_output)
+    else:
+        mask_label = None  # frictionless: effective mask kept in memory only
     actions.extend(
         [
             f"mask source: {source}",
-            "fill holes + dilate "
-            f"radius={plan.dilation_radius}: {initial.marked}->{refined.marked} pixels",
-            f"wrote refined mask: {mask_output}",
+            f"fill holes + dilate radius={plan.dilation_radius}: {initial.marked}->{refined.marked} pixels",
+            f"effective mask: {initial.marked}->{refined.marked} pixels"
+            + (f" (published {mask_label})" if mask_label else " (not published)"),
         ]
     )
 
@@ -766,9 +922,7 @@ def remove_visible(
         atomic_write_bytes(dest, encode_png(restored))
         status, output = "completed", str(dest)
         actions.append(
-            "texture-patch inpaint "
-            f"source=({match.x},{match.y},{match.width},{match.height}) "
-            f"edge_mse={match.score:.2f}"
+            f"texture-patch inpaint source=({match.x},{match.y},{match.width},{match.height}) edge_mse={match.score:.2f}"
         )
     elif plan.backend == "simple":
         assert raster is not None
@@ -791,6 +945,7 @@ def remove_visible(
                 mask=str(mask_output),
                 output=str(external_out),
                 prompt=plan.prompt,
+                timeout=plan.timeout,
             )
             if not external_out.is_file():
                 raise RuntimeError("inpaint command did not create {output}")
@@ -809,14 +964,13 @@ def remove_visible(
         "output": output,
         "format": fmt,
         "backend": plan.backend,
-        "mask": str(mask_output),
+        "mask": mask_label,
         "initial_mask_pixels": initial.marked,
         "refined_mask_pixels": refined.marked,
         "dilation_radius": plan.dilation_radius,
         "actions": actions,
         "note": (
-            "MorphoMod-inspired pipeline; CVPR paper metrics are not this run's metrics. "
-            "Inspect output fidelity and residual marks manually."
+            "MorphoMod-inspired pipeline; CVPR paper metrics are not this run's metrics. Inspect output fidelity and residual marks manually."
         ),
     }
 

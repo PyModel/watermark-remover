@@ -336,14 +336,13 @@ def combined_morpho(
     last_result: MorphoResult | None = None
 
     for strat in strategies:
+        allowed = MORPHO_STRATEGY_KWARGS.get(strat)
+        if allowed is None:
+            raise ValueError(f"unknown morphological strategy: {strat}")
         # Each stage receives only the keywords its strategy accepts, so a
         # heterogeneous chain like grid (spacing) + noise (sigma) works.
-        stage_kwargs = {
-            name: value
-            for name, value in kwargs.items()
-            if name in MORPHO_STRATEGY_KWARGS.get(strat, ())
-        }
-        if active_seed is not None and "seed" in MORPHO_STRATEGY_KWARGS[strat]:
+        stage_kwargs = {name: value for name, value in kwargs.items() if name in allowed}
+        if active_seed is not None and "seed" in allowed:
             stage_kwargs["seed"] = active_seed
         result = morpho_perturb(
             bytes(current),
