@@ -120,6 +120,8 @@ def _import_safe(name: str) -> Any | None:
 
 #: ``cv2`` or None — the OpenCV package.
 cv2: Any = _import_safe("cv2")
+#: ``PIL`` or None — Pillow library.
+PIL: Any = _import_safe("PIL")
 #: ``skimage`` or None — scikit-image.
 skimage: Any = _import_safe("skimage")
 #: ``torch`` or None — PyTorch.

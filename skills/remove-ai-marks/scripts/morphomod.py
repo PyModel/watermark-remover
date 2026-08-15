@@ -19,6 +19,7 @@ implementation's results; inspect the generated mask and output yourself.
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import math
 import struct
@@ -507,6 +508,84 @@ def encode_png(raster: Raster) -> bytes:
     )
 
 
+def decode_jpeg(data: bytes) -> Raster:
+    """Decode JPEG image bytes into a canonical Raster.
+
+    Contract:
+    A Raster has no orientation concept and no external-profile dependency.
+    channels == 1 means L (grayscale), 3 means sRGB RGB, and 4 means sRGB RGBA
+    with straight alpha. CMYK never enters Raster.
+    """
+    import optional_deps
+
+    if optional_deps.PIL is None:
+        raise ValueError(
+            optional_deps.BackendAvailability(
+                available=False,
+                extra="visible",
+                reason="Pillow is required for JPEG input decoding",
+            ).hint
+        )
+    from PIL import Image, ImageCms, ImageOps
+
+    saved_max = Image.MAX_IMAGE_PIXELS
+    Image.MAX_IMAGE_PIXELS = MAX_PIXELS
+    try:
+        try:
+            raw_im = Image.open(io.BytesIO(data))
+        except Exception as exc:
+            raise ValueError(f"malformed JPEG image: {exc}") from exc
+
+        with raw_im:
+            _validate_dimensions(raw_im.width, raw_im.height)
+            try:
+                im = ImageOps.exif_transpose(raw_im)
+            except Exception:
+                im = raw_im
+            if im is None:
+                im = raw_im
+            _validate_dimensions(im.width, im.height)
+
+            icc_data = im.info.get("icc_profile")
+            if icc_data:
+                try:
+                    input_profile = ImageCms.getOpenProfile(io.BytesIO(icc_data))
+                    srgb_profile = ImageCms.createProfile("sRGB")
+                    im = ImageCms.profileToProfile(
+                        im,
+                        inputProfile=input_profile,
+                        outputProfile=srgb_profile,
+                        outputMode="RGB",
+                    )
+                except Exception:
+                    im = im.convert("RGB")
+            elif im.mode not in ("L", "RGB", "RGBA"):
+                im = im.convert("RGB")
+
+            channels = len(im.getbands())
+            if channels not in (1, 3, 4):
+                im = im.convert("RGB")
+                channels = 3
+
+            _validate_dimensions(im.width, im.height)
+            try:
+                pixel_data = im.tobytes()
+            except Exception as exc:
+                raise ValueError(f"failed to decode JPEG pixels: {exc}") from exc
+            return Raster(im.width, im.height, channels, bytearray(pixel_data))
+    finally:
+        Image.MAX_IMAGE_PIXELS = saved_max
+
+
+def decode_to_raster(data: bytes, fmt: str) -> Raster:
+    """Decode image bytes of a supported format into a canonical Raster."""
+    if fmt == "png":
+        return decode_png(data)
+    if fmt == "jpeg":
+        return decode_jpeg(data)
+    raise ValueError(f"unsupported format for raster decode: {fmt}")
+
+
 def load_mask(path: Path) -> Mask:
     if path.suffix.lower() == ".pgm":
         return read_pgm(path)
@@ -650,33 +729,71 @@ def _find_texture_match(raster: Raster, mask: Mask, feather: int) -> TextureMatc
             f"texture patch exceeds safety limit of {MAX_TEXTURE_PATCH_PIXELS:,} pixels"
         )
 
+    gap = max(2, feather)
+    max_sx = raster.width - width
+    max_sy = raster.height - height
+    # A same-size source patch must sit entirely in one of the four margins
+    # around the mask; their union is exactly the feasible set, so sampling
+    # the strips can never miss a valid placement (a radius window around
+    # the mask can, when the margin is farther away than the radius).
+    strips = [
+        (0, x0 - width - gap, 0, max_sy),
+        (x1 + gap, max_sx, 0, max_sy),
+        (0, max_sx, 0, y0 - height - gap),
+        (0, max_sx, y1 + gap, max_sy),
+    ]
+    strips = [s for s in strips if s[0] <= s[1] and s[2] <= s[3]]
+    if not strips:
+        # When the mask is too large, no non-overlapping placement exists
+        # and scanning the search region would only reject every candidate.
+        raise ValueError(
+            f"texture patch {width}x{height} at ({x0},{y0}) cannot be placed "
+            f"non-overlapping inside {raster.width}x{raster.height} image; "
+            "mask is too large for the texture backend (use --backend simple or external)"
+        )
+
+    # Two-tier search: prefer a local window around the mask to keep the
+    # candidate count bounded and avoid distant semantic mismatches on large
+    # images; fall back to the full feasible strips when the margin is pushed
+    # outside the local radius (e.g. wide feather).
     radius = max(256, 6 * max(width, height))
-    min_x = max(0, x0 - radius)
-    max_x = min(raster.width - width, x0 + radius)
-    min_y = max(0, y0 - radius)
-    max_y = min(raster.height - height, y0 + radius)
+    win_x0 = max(0, x0 - radius)
+    win_x1 = min(max_sx, x0 + radius)
+    win_y0 = max(0, y0 - radius)
+    win_y1 = min(max_sy, y0 + radius)
+    local_strips = [
+        (max(left, win_x0), min(right, win_x1), max(top, win_y0), min(bottom, win_y1))
+        for left, right, top, bottom in strips
+    ]
+    local_strips = [s for s in local_strips if s[0] <= s[1] and s[2] <= s[3]]
+    search_strips = local_strips if local_strips else strips
+
     step = max(1, min(width, height) // 16)
-    estimated = ((max_x - min_x) // step + 1) * ((max_y - min_y) // step + 1)
+
+    def axis(lo: int, hi: int) -> list[int]:
+        return _candidate_axis(lo, hi, step)
+
+    estimated = sum(len(axis(a, b)) * len(axis(c, d)) for a, b, c, d in search_strips)
     if estimated > MAX_TEXTURE_CANDIDATES:
         step *= math.ceil(math.sqrt(estimated / MAX_TEXTURE_CANDIDATES))
 
     best: tuple[float, int, int, int] | None = None
-    gap = max(2, feather)
-    for source_y in _candidate_axis(min_y, max_y, step):
-        for source_x in _candidate_axis(min_x, max_x, step):
-            overlaps = not (
-                source_x + width + gap <= x0
-                or source_x >= x1 + gap
-                or source_y + height + gap <= y0
-                or source_y >= y1 + gap
-            )
-            if overlaps:
-                continue
-            score = _texture_edge_score(raster, bounds, source_x, source_y)
-            distance = abs(source_x - x0) + abs(source_y - y0)
-            candidate = (score, distance, source_x, source_y)
-            if best is None or candidate < best:
-                best = candidate
+    seen: set[tuple[int, int]] = set()
+    for left, right, top, bottom in search_strips:
+        for source_y in axis(top, bottom):
+            for source_x in axis(left, right):
+                if (source_x, source_y) in seen:
+                    continue
+                seen.add((source_x, source_y))
+                score = _texture_edge_score(raster, bounds, source_x, source_y)
+                candidate = (
+                    score,
+                    abs(source_x - x0) + abs(source_y - y0),
+                    source_x,
+                    source_y,
+                )
+                if best is None or candidate < best:
+                    best = candidate
     if best is None:
         raise ValueError("no non-overlapping texture patch candidate found")
     score, _distance, source_x, source_y = best
@@ -783,27 +900,6 @@ def _run_template(template: str, *, timeout: float, **values: str) -> None:
         raise RuntimeError(f"external command failed ({result.returncode}): {diagnostics}")
 
 
-def _jpeg_dimensions(data: bytes) -> tuple[int, int] | None:
-    i = 2
-    while i + 9 <= len(data):
-        if data[i] != 0xFF:
-            i += 1
-            continue
-        marker = data[i + 1]
-        i += 2
-        if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
-            continue
-        if i + 2 > len(data):
-            break
-        length = struct.unpack(">H", data[i : i + 2])[0]
-        if marker in range(0xC0, 0xC4) and i + 7 <= len(data):
-            return struct.unpack(">H", data[i + 5 : i + 7])[0], struct.unpack(
-                ">H", data[i + 3 : i + 5]
-            )[0]
-        i += length
-    return None
-
-
 def _validate_visible_paths(
     path: Path,
     dest: Path | None,
@@ -834,8 +930,6 @@ def remove_visible(
     _validate_visible_paths(path, dest, plan.mask_path, plan.mask_output)
     data = _read_bounded(path)
     fmt = detect_format(data)
-    raster = decode_png(data) if fmt == "png" else None
-    dims = (raster.width, raster.height) if raster else _jpeg_dimensions(data)
     actions: list[str] = []
 
     has_source = any(
@@ -854,10 +948,20 @@ def remove_visible(
             ],
             "note": "No blind segmenter is bundled; no image bytes were changed.",
         }
-    if raster is None and plan.backend in ("texture", "simple"):
-        raise ValueError(f"{plan.backend} backend supports PNG only; use --backend external")
+    raster = decode_to_raster(data, fmt)
+    dims = (raster.width, raster.height)
     if plan.backend != "print-plan" and dest is None:
         raise ValueError("output required for an inpainting backend")
+    if (
+        plan.backend != "print-plan"
+        and fmt != "png"
+        and dest is not None
+        and dest.suffix.lower() != ".png"
+    ):
+        raise ValueError(
+            f"{fmt} input must be written to a PNG destination (.png); "
+            "outside-mask guarantee cannot survive a JPEG re-encode"
+        )
 
     if plan.mask_path is not None:
         initial = load_mask(plan.mask_path)
@@ -938,10 +1042,12 @@ def remove_visible(
         assert dest is not None
         dest.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="wm-inpaint-") as temp_dir:
-            external_out = Path(temp_dir) / ("inpainted.png" if fmt == "png" else path.name)
+            temp_in = Path(temp_dir) / "input.png"
+            atomic_write_bytes(temp_in, encode_png(raster))
+            external_out = Path(temp_dir) / "inpainted.png"
             _run_template(
                 plan.command,
-                input=str(path),
+                input=str(temp_in),
                 mask=str(mask_output),
                 output=str(external_out),
                 prompt=plan.prompt,
@@ -949,13 +1055,18 @@ def remove_visible(
             )
             if not external_out.is_file():
                 raise RuntimeError("inpaint command did not create {output}")
-            if raster is not None:
-                inpainted = decode_png(_read_bounded(external_out))
-                atomic_write_bytes(dest, encode_png(composite(raster, inpainted, refined)))
-                actions.append("external inpaint + stdlib restore outside mask")
-            else:
-                atomic_write_bytes(dest, _read_bounded(external_out))
-                actions.append("external backend output copied (backend owns JPEG compositing)")
+            inpainted = decode_png(_read_bounded(external_out))
+            if (inpainted.width, inpainted.height, inpainted.channels) != (
+                raster.width,
+                raster.height,
+                raster.channels,
+            ):
+                raise ValueError(
+                    f"external backend output shape {(inpainted.width, inpainted.height, inpainted.channels)} "
+                    f"does not match source {(raster.width, raster.height, raster.channels)}"
+                )
+            atomic_write_bytes(dest, encode_png(composite(raster, inpainted, refined)))
+            actions.append("external inpaint + stdlib restore outside mask")
         status, output = "completed", str(dest)
 
     return {

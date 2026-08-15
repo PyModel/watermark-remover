@@ -78,37 +78,6 @@ def test_visible_backend_requires_destination_before_writing_mask(tmp_path: Path
     assert not mask_output.exists()
 
 
-@pytest.mark.parametrize("backend", ["texture", "simple"])
-def test_png_only_backend_rejects_jpeg_before_localization(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str
-) -> None:
-    source = tmp_path / "input.jpg"
-    source.write_bytes(b"\xff\xd8\xff\xd9")
-    destination = tmp_path / "output.jpg"
-    mask_output = tmp_path / "mask.pgm"
-    monkeypatch.setattr(
-        morphomod,
-        "_run_template",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("invalid backend reached detector")
-        ),
-    )
-
-    with pytest.raises(ValueError, match=rf"{backend} backend supports PNG only"):
-        remove_visible(
-            source,
-            destination,
-            VisiblePlan(
-                detect_command="detect {input} {mask}",
-                backend=backend,
-                mask_output=mask_output,
-            ),
-        )
-
-    assert not destination.exists()
-    assert not mask_output.exists()
-
-
 def test_dilation_is_bounded_not_cascading():
     data = bytearray(7 * 7)
     data[3 * 7 + 3] = 255
@@ -290,6 +259,49 @@ def test_texture_patch_inpaint_preserves_outside_and_replaces_texture():
     center = (34 * width + 34) * 4
     assert result.data[center : center + 3] != b"\xff\xff\xff"
     assert result.data[center + 3] == 255
+
+
+def test_texture_large_mask_raises_actionable_error():
+    # Mask spans most of the image: no same-size source patch can fit in any
+    # margin, so the search region clamps below the mask size and every
+    # candidate would "overlap".  The feasibility check must fail fast with
+    # guidance instead of scanning and raising a dead-end error.
+    width, height = 48, 32
+    raster = Raster(width, height, 3, bytearray([100, 110, 120] * width * height))
+    mask = box_mask(width, height, (10, 10, 40, 24))
+    with pytest.raises(ValueError, match="cannot be placed non-overlapping"):
+        morphomod._find_texture_match(raster, mask, 0)
+    with pytest.raises(ValueError, match="--backend simple or external"):
+        morphomod._find_texture_match(raster, mask, 0)
+
+
+def test_texture_match_boundary_feasibility():
+    width, height = 48, 32
+    pixels = bytearray()
+    for y in range(height):
+        for x in range(width):
+            value = 60 + ((x * 11 + y * 7) % 80)
+            pixels.extend((value, value, value))
+    raster = Raster(width, height, 3, pixels)
+    # 22-wide mask at (0,0): right margin 22+2+22=46 <= 48 → feasible.
+    match = morphomod._find_texture_match(raster, box_mask(width, height, (0, 0, 22, 20)), 0)
+    assert match.width == 22 and match.height == 20
+    # 24-wide mask at (0,0): right margin 24+2+24=50 > 48 → infeasible.
+    with pytest.raises(ValueError, match="cannot be placed non-overlapping"):
+        morphomod._find_texture_match(raster, box_mask(width, height, (0, 0, 24, 20)), 0)
+
+
+def test_texture_match_reaches_margin_beyond_radius_window():
+    # gap = feather = 254 pushes the only valid right-margin placement to
+    # x = 40 + 254 = 294, beyond the old radius window (max(256, 6*40)=256)
+    # which raised "no non-overlapping texture patch candidate found".
+    width, height = 334, 100
+    raster = Raster(width, height, 3, bytearray([100] * width * height * 3))
+    mask = box_mask(width, height, (0, 0, 40, 40))
+    match = morphomod._find_texture_match(raster, mask, 254)
+    assert match.width == 40 and match.height == 40
+    assert match.x == 294
+    assert match.y == 0
 
 
 def test_remove_visible_texture_pipeline(tmp_path: Path):
