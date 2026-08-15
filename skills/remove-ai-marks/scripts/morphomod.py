@@ -650,33 +650,71 @@ def _find_texture_match(raster: Raster, mask: Mask, feather: int) -> TextureMatc
             f"texture patch exceeds safety limit of {MAX_TEXTURE_PATCH_PIXELS:,} pixels"
         )
 
+    gap = max(2, feather)
+    max_sx = raster.width - width
+    max_sy = raster.height - height
+    # A same-size source patch must sit entirely in one of the four margins
+    # around the mask; their union is exactly the feasible set, so sampling
+    # the strips can never miss a valid placement (a radius window around
+    # the mask can, when the margin is farther away than the radius).
+    strips = [
+        (0, x0 - width - gap, 0, max_sy),
+        (x1 + gap, max_sx, 0, max_sy),
+        (0, max_sx, 0, y0 - height - gap),
+        (0, max_sx, y1 + gap, max_sy),
+    ]
+    strips = [s for s in strips if s[0] <= s[1] and s[2] <= s[3]]
+    if not strips:
+        # When the mask is too large, no non-overlapping placement exists
+        # and scanning the search region would only reject every candidate.
+        raise ValueError(
+            f"texture patch {width}x{height} at ({x0},{y0}) cannot be placed "
+            f"non-overlapping inside {raster.width}x{raster.height} image; "
+            "mask is too large for the texture backend (use --backend simple or external)"
+        )
+
+    # Two-tier search: prefer a local window around the mask to keep the
+    # candidate count bounded and avoid distant semantic mismatches on large
+    # images; fall back to the full feasible strips when the margin is pushed
+    # outside the local radius (e.g. wide feather).
     radius = max(256, 6 * max(width, height))
-    min_x = max(0, x0 - radius)
-    max_x = min(raster.width - width, x0 + radius)
-    min_y = max(0, y0 - radius)
-    max_y = min(raster.height - height, y0 + radius)
+    win_x0 = max(0, x0 - radius)
+    win_x1 = min(max_sx, x0 + radius)
+    win_y0 = max(0, y0 - radius)
+    win_y1 = min(max_sy, y0 + radius)
+    local_strips = [
+        (max(left, win_x0), min(right, win_x1), max(top, win_y0), min(bottom, win_y1))
+        for left, right, top, bottom in strips
+    ]
+    local_strips = [s for s in local_strips if s[0] <= s[1] and s[2] <= s[3]]
+    search_strips = local_strips if local_strips else strips
+
     step = max(1, min(width, height) // 16)
-    estimated = ((max_x - min_x) // step + 1) * ((max_y - min_y) // step + 1)
+
+    def axis(lo: int, hi: int) -> list[int]:
+        return _candidate_axis(lo, hi, step)
+
+    estimated = sum(len(axis(a, b)) * len(axis(c, d)) for a, b, c, d in search_strips)
     if estimated > MAX_TEXTURE_CANDIDATES:
         step *= math.ceil(math.sqrt(estimated / MAX_TEXTURE_CANDIDATES))
 
     best: tuple[float, int, int, int] | None = None
-    gap = max(2, feather)
-    for source_y in _candidate_axis(min_y, max_y, step):
-        for source_x in _candidate_axis(min_x, max_x, step):
-            overlaps = not (
-                source_x + width + gap <= x0
-                or source_x >= x1 + gap
-                or source_y + height + gap <= y0
-                or source_y >= y1 + gap
-            )
-            if overlaps:
-                continue
-            score = _texture_edge_score(raster, bounds, source_x, source_y)
-            distance = abs(source_x - x0) + abs(source_y - y0)
-            candidate = (score, distance, source_x, source_y)
-            if best is None or candidate < best:
-                best = candidate
+    seen: set[tuple[int, int]] = set()
+    for left, right, top, bottom in search_strips:
+        for source_y in axis(top, bottom):
+            for source_x in axis(left, right):
+                if (source_x, source_y) in seen:
+                    continue
+                seen.add((source_x, source_y))
+                score = _texture_edge_score(raster, bounds, source_x, source_y)
+                candidate = (
+                    score,
+                    abs(source_x - x0) + abs(source_y - y0),
+                    source_x,
+                    source_y,
+                )
+                if best is None or candidate < best:
+                    best = candidate
     if best is None:
         raise ValueError("no non-overlapping texture patch candidate found")
     score, _distance, source_x, source_y = best
