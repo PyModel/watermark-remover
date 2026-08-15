@@ -45,7 +45,9 @@ def _embedded_png(tmp_path: Path, name: str = "in.png") -> Path:
 
 def _detect(path: Path) -> float:
     raster = decode_png(path.read_bytes())
-    det = detect_synthid_pattern(bytes(raster.data), raster.width, raster.height, raster.channels, seed=42)
+    det = detect_synthid_pattern(
+        bytes(raster.data), raster.width, raster.height, raster.channels, seed=42
+    )
     return det.confidence
 
 

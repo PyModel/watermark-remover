@@ -407,15 +407,16 @@ def main() -> int:
     action.add_argument(
         "--embed", type=int, metavar="SEED", help="Embed a seeded band pattern (strength)"
     )
-    action.add_argument(
-        "--detect", type=int, metavar="SEED", help="Detect a seeded band pattern"
-    )
+    action.add_argument("--detect", type=int, metavar="SEED", help="Detect a seeded band pattern")
     action.add_argument(
         "--remove", action="store_true", help="Remove the SynthID-class band signal"
     )
     parser.add_argument("--strength", type=float, default=0.25, help="Embed strength (0-1)")
     parser.add_argument(
-        "--remove-strength", type=float, default=DEFAULT_REMOVE_STRENGTH, help="Remove strength (0-1)"
+        "--remove-strength",
+        type=float,
+        default=DEFAULT_REMOVE_STRENGTH,
+        help="Remove strength (0-1)",
     )
     parser.add_argument("--json", action="store_true", help="Output JSON report")
     args = parser.parse_args()
@@ -437,7 +438,9 @@ def main() -> int:
                 sys.stdout.write("\n")
             else:
                 label = "yes" if detection.is_watermarked else "no"
-                print(f"SynthID-class detect: confidence {detection.confidence:.3f} (present: {label})")
+                print(
+                    f"SynthID-class detect: confidence {detection.confidence:.3f} (present: {label})"
+                )
             return 0
 
         if args.remove:
@@ -470,7 +473,9 @@ def main() -> int:
             strength=args.strength,
         )
         dest = Path(args.output or str(Path(args.image).with_suffix(".embedded.png")))
-        atomic_write_bytes(dest, encode_png(Raster(raster.width, raster.height, raster.channels, out)))
+        atomic_write_bytes(
+            dest, encode_png(Raster(raster.width, raster.height, raster.channels, out))
+        )
         payload = {"strategy": "synthid-embed", "seed": args.embed, "output": str(dest)}
         if args.json:
             json.dump(payload, sys.stdout, indent=2)

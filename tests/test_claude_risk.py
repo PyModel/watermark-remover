@@ -29,7 +29,13 @@ def _png_with_c2pa() -> bytes:
     ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
     idat = zlib.compress(b"\x00\x00\x00")
     text = b"Comment\x00c2pa test contentcredentials"
-    return sig + _png_chunk(b"IHDR", ihdr) + _png_chunk(b"tEXt", text) + _png_chunk(b"IDAT", idat) + _png_chunk(b"IEND", b"")
+    return (
+        sig
+        + _png_chunk(b"IHDR", ihdr)
+        + _png_chunk(b"tEXt", text)
+        + _png_chunk(b"IDAT", idat)
+        + _png_chunk(b"IEND", b"")
+    )
 
 
 def _png_clean() -> bytes:

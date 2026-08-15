@@ -30,12 +30,12 @@ BEST_EFFORT_NOTE = (
 #: Weight of each residual-signal category (0..1 * weight).  Arbitrary but
 #: documented and stable; the score is capped at 100.
 _SIGNAL_WEIGHTS = {
-    "invisible_unicode_carriers": 20,   # per hit kind present, cap 60
-    "residual_c2pa": 40,                # provenance manifest still embedded
-    "residual_ai_metadata": 35,         # AI-generation tags still embedded
-    "synthid_confidence": 45,           # spectral signal above detector floor
-    "visible_mark_findings": 15,        # per finding, cap 45
-    "base": 5,                          # any AI watermark can evade static analysis
+    "invisible_unicode_carriers": 20,  # per hit kind present, cap 60
+    "residual_c2pa": 40,  # provenance manifest still embedded
+    "residual_ai_metadata": 35,  # AI-generation tags still embedded
+    "synthid_confidence": 45,  # spectral signal above detector floor
+    "visible_mark_findings": 15,  # per finding, cap 45
+    "base": 5,  # any AI watermark can evade static analysis
 }
 
 _VERDICT_CUTOFFS = {"low": 30, "medium": 60}  # < low, < medium, else high
@@ -75,8 +75,7 @@ def _assess_text(path: Path) -> dict:
         "score": score,
         "verdict": verdict,
         "note": (
-            BEST_EFFORT_NOTE
-            + "; statistical (token-sampling) watermarks are invisible here — "
+            BEST_EFFORT_NOTE + "; statistical (token-sampling) watermarks are invisible here — "
             "Layer B rewrite is the intended mitigation and is best-effort"
         ),
     }
@@ -88,12 +87,20 @@ def _assess_image(path: Path, synthid_dir: str | None) -> dict:
     score = _SIGNAL_WEIGHTS["base"]
     if after.has_c2pa:
         signals.append(
-            {"signal": "residual_c2pa", "detail": "C2PA/provenance manifest still embedded", "severity": "high"}
+            {
+                "signal": "residual_c2pa",
+                "detail": "C2PA/provenance manifest still embedded",
+                "severity": "high",
+            }
         )
         score += _SIGNAL_WEIGHTS["residual_c2pa"]
     if after.has_ai_metadata:
         signals.append(
-            {"signal": "residual_ai_metadata", "detail": "AI-generation metadata tags still embedded", "severity": "medium"}
+            {
+                "signal": "residual_ai_metadata",
+                "detail": "AI-generation metadata tags still embedded",
+                "severity": "medium",
+            }
         )
         score += _SIGNAL_WEIGHTS["residual_ai_metadata"]
     if after.synthid is not None:

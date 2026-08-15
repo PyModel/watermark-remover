@@ -95,7 +95,9 @@ def test_detect_command_receives_input_mask_prompt(tmp_path) -> None:
     )
     dest = tmp_path / "output.png"
     prompt = "remove the watermark box please"
-    command = f"{shlex.quote(sys.executable)} {shlex.quote(str(detector))} {{input}} {{mask}} {{prompt}}"
+    command = (
+        f"{shlex.quote(sys.executable)} {shlex.quote(str(detector))} {{input}} {{mask}} {{prompt}}"
+    )
 
     result = _run(
         str(source),

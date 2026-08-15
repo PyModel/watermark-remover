@@ -630,7 +630,9 @@ def clean_image(
             # write back so the truthful marker survives every prior pass.
             marked = add_wmct_marker(dest.read_bytes())
             atomic_write_bytes(dest, marked)
-            actions.append("wmCt replacement marker written (strip-without-replacement remains the default)")
+            actions.append(
+                "wmCt replacement marker written (strip-without-replacement remains the default)"
+            )
         wmct_marker_present = fmt == "png"
     else:
         wmct_marker_present = False

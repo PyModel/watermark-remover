@@ -261,12 +261,21 @@ class CleanPlan:
     def __post_init__(self) -> None:
         if self.forced_kind not in ("auto", "text", "image", "container"):
             raise ValueError(f"unsupported forced asset kind: {self.forced_kind}")
-        for name in ("in_place", "strip_all_metadata", "inspect_soft_binding", "remove_synthid", "wmct_marker"):
+        for name in (
+            "in_place",
+            "strip_all_metadata",
+            "inspect_soft_binding",
+            "remove_synthid",
+            "wmct_marker",
+        ):
             if not isinstance(getattr(self, name), bool):
                 raise TypeError(f"{name} must be a bool")
         if not isinstance(self.text, TextCleanPlan):
             raise TypeError("text must be a TextCleanPlan")
-        if not isinstance(self.synthid_strength, (int, float)) or not 0.0 <= self.synthid_strength <= 1.0:
+        if (
+            not isinstance(self.synthid_strength, (int, float))
+            or not 0.0 <= self.synthid_strength <= 1.0
+        ):
             raise ValueError("synthid_strength must be in [0, 1]")
         if self.visible is not None:
             if not isinstance(self.visible, VisiblePlan):
