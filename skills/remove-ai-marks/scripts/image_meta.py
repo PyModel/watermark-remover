@@ -7,6 +7,7 @@ import os
 import re
 import struct
 import sys
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -394,6 +395,37 @@ def strip_png(data: bytes, *, strip_all_text: bool = True) -> tuple[bytes, list[
     return bytes(out), actions
 
 
+#: Keyword of the truthful "cleaned by wm" replacement marker (F4).
+WMCT_KEYWORD = "wmCt"
+#: Human-readable marker text; kept short and stable.
+WMCT_TEXT = '{"tool":"wm","cleaned":true}'
+
+
+def add_wmct_marker(data: bytes, text: str = WMCT_TEXT) -> bytes:
+    """Inject a ``wmCt`` tEXt chunk into a PNG, before IEND.
+
+    F4 gives users an optional *replacement* provenance marker (strip-without-
+    replacement stays the frictionless default).  The marker is a plain tEXt
+    chunk whose keyword ``wmCt`` records that this output was cleaned by wm —
+    parseable, truthful, and never mistaken for vendor C2PA.
+    """
+    if not data.startswith(PNG_SIG):
+        raise ValueError("wmCt marker requires PNG input")
+    keyword = WMCT_KEYWORD.encode("latin-1")
+    payload = keyword + b"\x00" + text.encode("utf-8")
+    marker_chunk = struct.pack(">I", len(payload)) + keyword + payload
+    marker_chunk += struct.pack(">I", zlib.crc32(payload, zlib.crc32(keyword)) & 0xFFFFFFFF)
+
+    # Rebuild the PNG, inserting the marker immediately before the terminal
+    # IEND.  Iterating validated chunks is robust regardless of the IEND CRC.
+    out = bytearray(PNG_SIG)
+    for chunk in iter_png_chunks(data, allow_trailing_data=True):
+        if chunk.kind == b"IEND":
+            out.extend(marker_chunk)
+        out.extend(chunk.raw)
+    return bytes(out)
+
+
 def _find_jpeg_eoi(data: bytes, start: int) -> int | None:
     """Locate an unstuffed EOI marker in entropy-coded JPEG data."""
     i = start
@@ -517,6 +549,9 @@ def clean_image(
     *,
     strip_all_metadata: bool = True,
     synthid_dir: str | None = None,
+    remove_synthid: bool = False,
+    synthid_strength: float = 0.6,
+    wmct_marker: bool = False,
 ) -> dict[str, Any]:
     data = path.read_bytes()
     fmt = detect_format(data)
@@ -557,6 +592,49 @@ def clean_image(
         except Exception as error:
             actions.append(f"exiftool failed: {error}")
 
+    synthid_removal: dict[str, Any] | None = None
+    if remove_synthid:
+        if fmt != "png":
+            raise ValueError(
+                "SynthID removal currently supports PNG output; JPEG/HEIF/AVIF "
+                "inputs are not supported"
+            )
+        if not 0.0 <= synthid_strength <= 1.0:
+            raise ValueError("synthid_strength must be in [0, 1]")
+        # Lazy import keeps the metadata-only CLI free of the raster/DCT stack
+        # until removal is actually requested.
+        from synthid_remove import apply_synthid_removal
+
+        # Reads dest, applies band suppression, writes dest back in place.
+        apply_synthid_removal(
+            dest,
+            dest,
+            strength=synthid_strength,
+        )
+        synthid_removal = {
+            "strategy": "synthid-band-dct",
+            "strength": synthid_strength,
+            "block_size": 8,
+            "bytes_out": dest.stat().st_size,
+            "note": "seed-independent mid-frequency band suppression (best-effort)",
+        }
+        actions.append(
+            f"SynthID band removal: strength={synthid_strength} (seed-independent DCT suppression)"
+        )
+
+    if wmct_marker:
+        if fmt != "png":
+            actions.append("wmCt replacement marker skipped: PNG output only")
+        else:
+            # Read dest (post-strip/exiftool/synthid), inject the marker, and
+            # write back so the truthful marker survives every prior pass.
+            marked = add_wmct_marker(dest.read_bytes())
+            atomic_write_bytes(dest, marked)
+            actions.append("wmCt replacement marker written (strip-without-replacement remains the default)")
+        wmct_marker_present = fmt == "png"
+    else:
+        wmct_marker_present = False
+
     after = inspect_image(dest, synthid_dir=synthid_dir)
     return {
         "input": str(path),
@@ -570,4 +648,6 @@ def clean_image(
         "post_findings": after.findings,
         "synthid_before": synthid_before,
         "synthid_after": after.synthid,
+        "synthid_removal": synthid_removal,
+        "wmct_marker": wmct_marker_present,
     }
