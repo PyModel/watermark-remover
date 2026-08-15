@@ -42,6 +42,24 @@ def main() -> int:
         default=None,
         help="reverse-SynthID checkout root for optional pixel SynthID scoring",
     )
+    p.add_argument(
+        "--remove-synthid",
+        action="store_true",
+        help="Remove SynthID-class spectral signal via DCT mid-frequency band suppression "
+        "(seed-independent, best-effort; PNG output only)",
+    )
+    p.add_argument(
+        "--synthid-strength",
+        type=float,
+        default=0.6,
+        help="SynthID removal strength (0-1; default: 0.6)",
+    )
+    p.add_argument(
+        "--wmct-marker",
+        action="store_true",
+        help="Replace removed provenance with a truthful wmCt marker (PNG output). "
+        "Default: strip-without-replacement (frictionless)",
+    )
     args = p.parse_args()
 
     if not args.path.is_file():
@@ -76,6 +94,9 @@ def main() -> int:
             dest,
             strip_all_metadata=not args.keep_non_ai_metadata,
             synthid_dir=args.synthid_dir,
+            remove_synthid=args.remove_synthid,
+            synthid_strength=args.synthid_strength,
+            wmct_marker=args.wmct_marker,
         )
     except Exception as e:
         eprint(f"error: {e}")

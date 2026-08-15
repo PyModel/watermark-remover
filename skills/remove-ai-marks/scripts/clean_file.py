@@ -28,7 +28,14 @@ from clean_asset import (
     TextCleanPlan,
     clean_asset,
 )
-from common import backup_path, cleaned_path, eprint, paths_alias, validate_output_path
+from common import (
+    atomic_write_text,
+    backup_path,
+    cleaned_path,
+    eprint,
+    paths_alias,
+    validate_output_path,
+)
 from morphomod import DEFAULT_DILATION_RADIUS, VISIBLE_CLEAN_BACKENDS, VisiblePlan
 from operation import ExitCode, OperationStatus, status_to_exit_code
 from perturb_text import MODES as PERTURB_MODES
@@ -99,6 +106,25 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--visible-prompt", default="Remove watermark, fill with background")
     p.add_argument("--soft-binding", action="store_true")
 
+    # Quality profile, dry-run, timeout
+    p.add_argument(
+        "--quality",
+        choices=["fast", "balanced", "high"],
+        default="balanced",
+        help="Quality profile for visible cleaning (affects backend selection)",
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Plan visible cleaning without running inpainting",
+    )
+    p.add_argument(
+        "--timeout",
+        type=float,
+        default=1800.0,
+        help="Seconds to wait for each external inpaint command (default: 1800)",
+    )
+
     # Frequency / morphological degradation (Layer V extension)
     degrade = p.add_mutually_exclusive_group()
     degrade.add_argument(
@@ -119,6 +145,48 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--degrade-seed", type=int, default=None, help="Deterministic seed for degradation"
+    )
+
+    # SynthID detection-evasion (Layer V)
+    p.add_argument(
+        "--remove-synthid",
+        action="store_true",
+        help="Remove SynthID-class spectral signal via DCT mid-frequency band suppression "
+        "(seed-independent, best-effort; PNG output only)",
+    )
+    p.add_argument(
+        "--synthid-strength",
+        type=float,
+        default=0.6,
+        help="SynthID removal strength (0-1; default: 0.6)",
+    )
+    p.add_argument(
+        "--wmct-marker",
+        action="store_true",
+        help="Replace removed provenance with a truthful wmCt marker (PNG output). "
+        "Default: strip-without-replacement (frictionless)",
+    )
+
+    # Artifact / audit-trail control
+    p.add_argument(
+        "--keep-artifacts",
+        action="store_true",
+        help="Publish .mask.pgm / .bak review artifacts (default: frictionless, no artifacts)",
+    )
+    p.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress progress/success output (silent batch op). Errors still surface.",
+    )
+    p.add_argument(
+        "--audit",
+        nargs="?",
+        const="wm-audit.json",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Write a JSON audit report (what was removed). Optional path; "
+        "default: wm-audit.json. Off by default (no audit trail).",
     )
     return p
 
@@ -170,15 +238,31 @@ def main() -> int:
     except ValueError as error:
         eprint(f"invalid output selection: {error}")
         return ExitCode.USAGE_ERROR.value
+    if args.dry_run:
+        results = [
+            _dry_run_payload(item.path, output, plan, args.in_place) for item, output, plan in work
+        ]
+        payload = {"total": len(results), "results": results} if batch else results[0]
+        _write_audit(args, payload)
+        if args.json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        elif not args.quiet:
+            for result in results:
+                print(f"dry-run: {result['input']} -> {result['output']}")
+                for action in result["actions"]:
+                    print(f"  - {action}")
+        return ExitCode.SUCCESS.value
+
     if batch and args.output and not args.in_place:
         args.output.mkdir(parents=True, exist_ok=True)
 
     results = [_run_clean_item(item.path, output, args, plan) for item, output, plan in work]
 
+    payload: dict | list = {"total": len(results), "results": results} if batch else results[0]
+    _write_audit(args, payload)
     if args.json:
-        payload: dict | list = {"total": len(results), "results": results} if batch else results[0]
         print(json.dumps(payload, indent=2, ensure_ascii=False))
-    elif batch:
+    elif batch and not args.quiet:
         errors = sum(r.get("exit_code", 0) != 0 for r in results)
         eprint(f"done: {len(results)} file(s), {errors} with warnings/errors")
     if all(r.get("exit_code", 0) == 0 for r in results):
@@ -247,6 +331,16 @@ def _plan_work(
 
 
 def _build_clean_plan(args, dest: Path, kind: AssetKind) -> CleanPlan:
+    if (args.degrade or args.morpho) and kind != "image":
+        raise ValueError("--degrade/--morpho are only valid for image assets")
+    if args.dry_run:
+        if kind != "image":
+            raise ValueError("--dry-run is only valid for image assets")
+        if not any((args.visible_mask, args.visible_box, args.detect_command)):
+            raise ValueError(
+                "--dry-run requires --visible-mask, --visible-box, or --detect-command"
+            )
+
     text_plan = TextCleanPlan()
     if kind == "text":
         rewrite_plan = (
@@ -269,15 +363,26 @@ def _build_clean_plan(args, dest: Path, kind: AssetKind) -> CleanPlan:
 
     visible_plan = None
     if kind == "image" and _visible_requested(args):
+        backend = args.visible_backend
+        if args.quality == "fast" and backend in ("texture", "simple"):
+            backend = "simple"
+        elif args.quality == "high" and backend == "simple":
+            backend = "texture"
+
         visible_plan = VisiblePlan(
             mask_path=args.visible_mask,
             box=args.visible_box,
             detect_command=args.detect_command,
-            backend=args.visible_backend,
+            backend=backend,
             command=args.inpaint_command,
             dilation_radius=(args.dilate if args.dilate is not None else DEFAULT_DILATION_RADIUS),
+            # mask_output is always a *planned* path (needed for output-collision
+            # checks and dry-run reporting); publication is gated by
+            # publish_mask, so frictionless runs leave no .mask.pgm on disk.
             mask_output=dest.with_name(f"{dest.stem}.mask.pgm"),
             prompt=args.visible_prompt,
+            timeout=args.timeout,
+            publish_mask=args.keep_artifacts,
         )
 
     # Build degradation plan for images
@@ -306,6 +411,9 @@ def _build_clean_plan(args, dest: Path, kind: AssetKind) -> CleanPlan:
         visible=visible_plan,
         inspect_soft_binding=args.soft_binding,
         degrade=degrade_plan,
+        remove_synthid=args.remove_synthid,
+        synthid_strength=args.synthid_strength,
+        wmct_marker=args.wmct_marker,
     )
 
 
@@ -322,6 +430,73 @@ def _visible_requested(args) -> bool:
     )
 
 
+def _dry_run_payload(
+    path: Path,
+    output: Path | None,
+    plan: CleanPlan,
+    in_place: bool,
+) -> dict:
+    visible = plan.visible
+    if visible is None:
+        raise ValueError("dry-run requires a visible cleaning plan")
+    destination = path if in_place else output or cleaned_path(path)
+    if visible.mask_path is not None:
+        localization = f"mask:{visible.mask_path}"
+    elif visible.box is not None:
+        localization = f"box:{','.join(map(str, visible.box))}"
+    else:
+        localization = "external-detector"
+    actions = [
+        f"localize visible mark via {localization}",
+        f"fill holes + dilate radius={visible.dilation_radius}",
+        f"inpaint with {visible.backend} backend",
+        "strip requested metadata",
+    ]
+    if plan.degrade is not None:
+        actions.append(f"apply {plan.degrade.strategy} degradation")
+    actions.append(f"publish mask to {visible.mask_output} and image to {destination}")
+    return {
+        "kind": "image",
+        "status": "dry-run",
+        "input": str(path),
+        "output": str(destination),
+        "mask": str(visible.mask_output),
+        "backend": visible.backend,
+        "timeout": visible.timeout,
+        "actions": actions,
+        "exit_code": ExitCode.SUCCESS.value,
+    }
+
+
+def _write_audit(args, payload: dict | list) -> None:
+    """Write the JSON audit report when --audit is requested.
+
+    The audit is the same combined payload as ``--json``; it is written to a
+    file so the frictionless default (no audit trail) can be overridden when a
+    record of what was removed is wanted.  Uses atomic write.
+
+    The bare ``--audit`` default resolves next to the output (or into the
+    batch output directory); an explicit ``--audit PATH`` is honored verbatim.
+    """
+    if args.audit is None:
+        return
+    audit_path = Path(args.audit)
+    if str(audit_path) == "wm-audit.json":
+        if isinstance(payload, dict) and payload.get("output"):
+            audit_path = Path(payload["output"]).resolve().parent / "wm-audit.json"
+        elif args.output:
+            audit_path = Path(args.output).resolve() / "wm-audit.json"
+        else:
+            audit_path = Path.cwd() / "wm-audit.json"
+    elif audit_path.is_dir():
+        audit_path = audit_path / "wm-audit.json"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(
+        audit_path,
+        json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+    )
+
+
 def _error_payload(path: Path, output: Path, error: Exception) -> dict:
     return {
         "kind": "unknown",
@@ -333,7 +508,9 @@ def _error_payload(path: Path, output: Path, error: Exception) -> dict:
     }
 
 
-def _present_result(result: CleanResult, payload: dict) -> None:
+def _present_result(result: CleanResult, payload: dict, *, quiet: bool = False) -> None:
+    if quiet:
+        return
     if result.kind == "text":
         stats = payload["stats"]
         eprint(
@@ -379,7 +556,7 @@ def _run_clean_item(
     status = OperationStatus.VERIFIED if not result.residual else OperationStatus.RESIDUAL_RISK
     payload["exit_code"] = status_to_exit_code(status)
     if not args.json:
-        _present_result(result, payload)
+        _present_result(result, payload, quiet=args.quiet)
     return payload
 
 
