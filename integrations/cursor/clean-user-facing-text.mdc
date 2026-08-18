@@ -1,0 +1,15 @@
+---
+description: Apply text hygiene to natural-language content intended for readers
+alwaysApply: true
+---
+
+# Clean user-facing text
+
+Before finalizing substantial natural-language content intended for readers, use the `clean-user-facing-text` skill.
+
+- Apply this only to content the user owns or is authorized to process, and preserve required disclosures.
+- Apply it to articles, papers, reports, documentation, emails, product copy, UI text, Markdown prose, and HTML prose.
+- Preserve facts, numbers, names, citations, requirements, language, tone, and formatting.
+- Do not modify fenced or inline code, commands, paths, URLs, identifiers, APIs, formulas, or verbatim quotations.
+- Treat statistical-watermark reduction as best-effort; never claim the result is certified undetectable or proves human authorship.
+- Skip the skill for code-only tasks.
