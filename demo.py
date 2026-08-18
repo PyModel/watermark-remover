@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -67,6 +68,9 @@ def clean_upload(file_obj, keep_non_ai: bool, layer_b: bool, strength: str):
             src, dest, CleanPlan(forced_kind=kind, strip_all_metadata=not keep_non_ai)
         ).to_dict()
     except Exception as e:
+        # Success must keep workdir alive (Gradio serves dest from it); on
+        # failure nothing references it, so don't leak a directory per upload.
+        shutil.rmtree(workdir, ignore_errors=True)
         return f"**Error cleaning {requested_src.name}:** `{e}`", None, ""
 
     prompt = ""

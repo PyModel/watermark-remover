@@ -1754,9 +1754,14 @@ def clean_pdf(path: Path, dest: Path) -> tuple[list[str], dict]:
                 output_limit=2 * 1024 * 1024,
             )
             actions.append(f"exiftool -all= (rc={r.returncode})")
-            exiftool_ok = r.returncode == 0
-            if not exiftool_ok:
+            truncated = bool(
+                getattr(r, "stdout_truncated", False) or getattr(r, "stderr_truncated", False)
+            )
+            exiftool_ok = r.returncode == 0 and not truncated
+            if r.returncode != 0:
                 actions.append(f"exiftool degraded (rc={r.returncode})")
+            elif truncated:
+                actions.append("exiftool output exceeded safety limit")
         except Exception as e:
             actions.append(f"exiftool failed: {e}")
         if not exiftool_ok:
