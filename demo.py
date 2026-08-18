@@ -13,6 +13,8 @@ intentionally unavailable because it requires format-aware text extraction.
 from __future__ import annotations
 
 import json
+import re
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -29,17 +31,47 @@ def clean_upload(file_obj, keep_non_ai: bool, layer_b: bool, strength: str):
     """Gradio handler. Returns (report markdown, cleaned file path, rewrite prompt)."""
     if file_obj is None:
         return "Upload a file first.", None, ""
-    src = Path(file_obj.name if hasattr(file_obj, "name") else str(file_obj))
+    requested_src = Path(file_obj.name if hasattr(file_obj, "name") else str(file_obj))
     workdir = Path(tempfile.mkdtemp(prefix="wmr-"))
-    dest = workdir / f"{src.stem}.cleaned{src.suffix}"
 
     try:
+        if requested_src.is_symlink():
+            raise ValueError("uploaded path is a symlink")
+        src = requested_src.resolve(strict=True)
+        if not src.is_file():
+            raise ValueError("uploaded path is not a regular file")
+        configured_temporary_root = Path(tempfile.gettempdir()).absolute()
+        temporary_root = configured_temporary_root.resolve(strict=True)
+        if not src.is_relative_to(temporary_root):
+            raise ValueError("uploaded path is outside the system temporary directory")
+
+        requested_absolute = requested_src.absolute()
+        for candidate_root in (configured_temporary_root, temporary_root):
+            try:
+                relative_source = requested_absolute.relative_to(candidate_root)
+                break
+            except ValueError:
+                continue
+        else:
+            raise ValueError("uploaded path reaches the temporary directory through a symlink")
+        current = candidate_root
+        for component in relative_source.parts:
+            current /= component
+            if current.is_symlink():
+                raise ValueError(f"uploaded path contains a symlink: {current}")
+
+        safe_stem = re.sub(r"[^A-Za-z0-9._-]", "_", src.stem) or "upload"
+        safe_suffix = re.sub(r"[^A-Za-z0-9._-]", "_", src.suffix)
+        dest = workdir / f"{safe_stem}.cleaned{safe_suffix}"
         kind = classify_asset(src)
         result = clean_asset(
             src, dest, CleanPlan(forced_kind=kind, strip_all_metadata=not keep_non_ai)
         ).to_dict()
     except Exception as e:
-        return f"**Error cleaning {src.name}:** `{e}`", None, ""
+        # Success must keep workdir alive (Gradio serves dest from it); on
+        # failure nothing references it, so don't leak a directory per upload.
+        shutil.rmtree(workdir, ignore_errors=True)
+        return f"**Error cleaning {requested_src.name}:** `{e}`", None, ""
 
     prompt = ""
     if layer_b and kind == "text":

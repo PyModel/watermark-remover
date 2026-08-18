@@ -298,7 +298,11 @@ def create_backup(source: Path) -> Path:
                 dest_file.write(chunk)
             dest_file.flush()
             os.fsync(dest_fd)
-        os.fchmod(dest_fd, stat.S_IMODE(source_stat.st_mode))
+        mode = stat.S_IMODE(source_stat.st_mode)
+        if hasattr(os, "fchmod"):
+            os.fchmod(dest_fd, mode)
+        else:
+            os.chmod(dest, mode)
     except Exception:
         if dest_fd is not None:
             os.close(dest_fd)

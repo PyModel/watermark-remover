@@ -15,7 +15,7 @@ WM="${WATERMARKS_SERVICE_URL:-http://127.0.0.1:8765}"
 ```
 
 Start it either with Docker/compose (`docker compose up -d`, or the published
-GHCR image `ghcr.io/pythoughts-labs/watermark-remover`) or locally
+GHCR image `ghcr.io/pymodel/watermark-remover`) or locally
 (`make serve` / `wm-serve`). **Always check it first**, and stop with a clear
 message if it is unreachable:
 

@@ -267,6 +267,9 @@ def test_read_error_raises_runtime_error(monkeypatch: pytest.MonkeyPatch) -> Non
         def wait(self, *, timeout: float) -> int:
             return 0
 
+        def poll(self) -> int:
+            return 0
+
     monkeypatch.setattr(external_command.subprocess, "Popen", FakePopen)
 
     with pytest.raises(RuntimeError, match="failed to read external command output"):

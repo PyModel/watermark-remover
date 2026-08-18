@@ -61,7 +61,7 @@ representative at an online or offline event.
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
 reported to the community leaders responsible for enforcement through GitHub
 by opening a private security advisory or contacting the repository maintainers
-via [GitHub](https://github.com/Pythoughts-labs/watermark-remover) or by email at
+via [GitHub](https://github.com/PyModel/watermark-remover) or by email at
 <melkholy@techmatrix.com>.
 
 All complaints will be reviewed and investigated promptly and fairly.
