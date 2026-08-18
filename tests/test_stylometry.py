@@ -11,7 +11,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "skills" / "remove-ai-mar
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-from score_stylometry import (  # noqa: E402
+from score_stylometry import (
     compute_burstiness,
     compute_mattr,
     extract_sentences,

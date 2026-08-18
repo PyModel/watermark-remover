@@ -32,23 +32,19 @@ import json
 import os
 import sys
 import time
-import urllib.error
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
-from common import (  # noqa: E402
-    MAX_INPUT_BYTES,
-    classify_finding_confidence,
+from common import (
     emit_json,
     read_text_input,
 )
-from external_command import (  # noqa: E402
+from external_command import (
     ExternalCommandTimeout,
     run_command,
 )
-from layer_b_http import LayerBHTTPError, request_json  # noqa: E402
+from layer_b_http import LayerBHTTPError, request_json
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 
@@ -226,10 +222,7 @@ def _call_gemini(
 
 def _is_retryable_layer_b_error(error: LayerBHTTPError) -> bool:
     msg = str(error)
-    for code in _RETRYABLE_HTTP_CODES:
-        if f"HTTP {code}" in msg:
-            return True
-    return False
+    return any(f"HTTP {code}" in msg for code in _RETRYABLE_HTTP_CODES)
 
 
 class GeminiSynthIDTextDetector:
@@ -277,7 +270,13 @@ class GeminiSynthIDTextDetector:
             "available": True,
         }
         try:
-            data = _call_gemini(GEMINI_DETECT_URL, GEMINI_DETECT_ROUTE_TEMPLATE.format(model=model), body, api_key, timeout)
+            data = _call_gemini(
+                GEMINI_DETECT_URL,
+                GEMINI_DETECT_ROUTE_TEMPLATE.format(model=model),
+                body,
+                api_key,
+                timeout,
+            )
         except DetectorError as e:
             report["available"] = False
             report["error"] = str(e)
@@ -403,7 +402,9 @@ class MarkLLMTextDetector:
                 report["error"] = (result.stderr or "").strip()[:400] or "MarkLLM unavailable"
                 return report
             if result.returncode != 0:
-                report["error"] = (result.stderr or "").strip()[:400] or f"MarkLLM exit {result.returncode}"
+                report["error"] = (result.stderr or "").strip()[
+                    :400
+                ] or f"MarkLLM exit {result.returncode}"
                 return report
             try:
                 payload = json.loads(result.stdout or "{}")

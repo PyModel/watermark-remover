@@ -8,8 +8,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
@@ -49,17 +47,13 @@ KGW_CONFIG = '{"algorithm_name": "KGW", "z_threshold": 4.0}'
 SYNTHID_CONFIG = '{"algorithm_name": "SynthID", "threshold": 0.52, "detector_type": "mean"}'
 
 
-def _fake_auto_watermark(
-    *, fail_detect: bool = False, fail_generate: bool = False
-) -> str:
+def _fake_auto_watermark(*, fail_detect: bool = False, fail_generate: bool = False) -> str:
     detect_body = (
         'raise RuntimeError("boom")'
         if fail_detect
         else 'return {"is_watermarked": True, "score": 3.5}'
     )
-    gen_body = (
-        'raise RuntimeError("boom")' if fail_generate else "return 'WATERMARKED SAMPLE'"
-    )
+    gen_body = 'raise RuntimeError("boom")' if fail_generate else "return 'WATERMARKED SAMPLE'"
     return (
         "from types import SimpleNamespace\n"
         "class _WM:\n"
@@ -181,9 +175,7 @@ def test_cli_bad_input_binary(tmp_path: Path):
     upstream = _make_fake_upstream(tmp_path)
     png = tmp_path / "img.png"
     png.write_bytes(b"\x89PNG\r\n\x1a\nnot really")
-    r = _run_adapter(
-        "detect", str(png), "--scheme", "kgw", "--upstream-dir", str(upstream)
-    )
+    r = _run_adapter("detect", str(png), "--scheme", "kgw", "--upstream-dir", str(upstream))
     assert r.returncode == 2
     assert "refusing" in (r.stderr or "")
 

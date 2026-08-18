@@ -25,7 +25,7 @@ from typing import Any
 SCRIPTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-from common import (  # noqa: E402
+from common import (
     classify_finding_confidence,
     emit_json,
     read_text_input,

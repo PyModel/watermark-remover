@@ -18,8 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-import text_detectors  # noqa: E402
-
+import text_detectors
 
 # ---------------------------------------------------------------------------
 # Fake opener adapters
@@ -107,8 +106,11 @@ def test_gemini_unconfigured():
 
 def test_gemini_verdict_watermarked(monkeypatch):
     monkeypatch.setenv("WATERMARKS_GEMINI_API_KEY", "k")
-    fake = _FakeOpener(_FakeResponse(_gemini_success(verdict="Likely AI-generated")))
-    monkeypatch.setattr(text_detectors, "request_json", lambda *a, **kw: _gemini_success(verdict="Likely AI-generated"))
+    monkeypatch.setattr(
+        text_detectors,
+        "request_json",
+        lambda *a, **kw: _gemini_success(verdict="Likely AI-generated"),
+    )
     report = text_detectors.GeminiSynthIDTextDetector().detect("some text")
     assert report["available"] is True
     assert report["is_watermarked"] is True
