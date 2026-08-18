@@ -22,3 +22,10 @@ CLAUDE.md
 # Python build artifacts
 build/
 *.egg-info/
+
+# Secrets / local env
+.env
+
+# Hugging Face caches (MarkLLM / MarkDiffusion / CtrlRegen backends)
+.hf_cache/
+.cache/huggingface/
