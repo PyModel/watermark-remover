@@ -15,7 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from asset_kind import SUPPORTED_EXTENSIONS, classify_asset
 from batch_inputs import select_inputs
-from common import emit_json, eprint, read_text_input
+from common import MAX_INPUT_BYTES, emit_json, eprint, read_text_input
 from container_meta import inspect_container
 from image_meta import inspect_image
 from inspect_soft_binding import inspect_soft_binding
@@ -55,6 +55,13 @@ def main() -> int:
 
 
 def _inspect_single(path: Path, args) -> dict:
+    if path.stat().st_size > MAX_INPUT_BYTES:
+        return {
+            "kind": "refused",
+            "path": str(path),
+            "note": f"input larger than {MAX_INPUT_BYTES} bytes",
+            "suspicious": False,
+        }
     kind = classify_asset(path, forced_kind=args.force_type)
     if kind == "text":
         report = inspect_text(read_text_input(str(path)), aggressive=args.aggressive)

@@ -28,10 +28,15 @@ def main() -> int:
         action="store_true",
         help="Treat binary-looking input as text anyway",
     )
+    p.add_argument(
+        "--strip-emoji-glue",
+        action="store_true",
+        help="Strip load-bearing emoji glue even in context",
+    )
     args = p.parse_args()
 
     text = read_text_input(args.path, allow_binary=args.force_text, advice=TEXT_TOOL_ADVICE)
-    report = inspect_text(text, aggressive=args.aggressive)
+    report = inspect_text(text, aggressive=args.aggressive, strip_emoji_glue=args.strip_emoji_glue)
     if args.json:
         emit_json(report.to_dict())
     else:
