@@ -102,6 +102,8 @@ def test_demo_rejects_non_regular_upload(tmp_path: Path) -> None:
 
 
 def test_demo_sanitizes_cleaned_output_name(tmp_path: Path) -> None:
+    if os.name == "nt":
+        pytest.skip("Windows forbids < and > in filenames")
     source = tmp_path / "report <bad>.txt"
     source.write_text("hello\u200bworld", encoding="utf-8")
 
@@ -270,6 +272,8 @@ def test_existing_checkout_is_repinned_before_install(
     sparse_command: str,
     head_matches: bool,
 ) -> None:
+    if os.name == "nt":
+        pytest.skip("setup shell scripts are POSIX-only (Windows uses the .ps1 variants)")
     checkout = tmp_path / "checkout"
     (checkout / ".git").mkdir(parents=True)
     python = checkout / ".venv" / "bin" / "python"
