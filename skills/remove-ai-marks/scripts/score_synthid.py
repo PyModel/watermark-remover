@@ -23,8 +23,16 @@ import contextlib
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 from typing import Any
+
+# Serializes the process-global section of score_file: the sys.path
+# insertion of the external checkout, the module imports, the codebook
+# load / extraction, and the stdout redirection. The upstream library is
+# not thread-safe and redirect_stdout swaps process-wide stdout, so the
+# threaded HTTP sidecar must not run two scores concurrently.
+_SCORE_LOCK = threading.Lock()
 
 
 def resolve_upstream(raw: str | None) -> Path | None:
@@ -74,34 +82,36 @@ def score_file(
         print(f"codebook not found: {codebook_path}", file=sys.stderr)
         return 3, None
 
-    sys.path.insert(0, str(extraction))
-    try:
-        import cv2
-        from robust_extractor import RobustSynthIDExtractor
-        from synthid_bypass_v4 import SpectralCodebookV4
-    except ImportError as e:
-        print(f"optional scorer dependencies missing: {e}", file=sys.stderr)
-        return 3, None
+    with _SCORE_LOCK:
+        if str(extraction) not in sys.path:
+            sys.path.insert(0, str(extraction))
+        try:
+            import cv2
+            from robust_extractor import RobustSynthIDExtractor
+            from synthid_bypass_v4 import SpectralCodebookV4
+        except ImportError as e:
+            print(f"optional scorer dependencies missing: {e}", file=sys.stderr)
+            return 3, None
 
-    try:
-        img = cv2.imread(str(path))
-        if img is None:
-            print(f"could not load image: {path}", file=sys.stderr)
-            return 2, None
-        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        try:
+            img = cv2.imread(str(path))
+            if img is None:
+                print(f"could not load image: {path}", file=sys.stderr)
+                return 2, None
+            rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-        # Upstream prints progress ("CodebookV4 loaded: ...") straight to
-        # stdout, which corrupts --json for any caller that parses us
-        # (image_meta.py json.loads our stdout). Keep stdout ours alone.
-        with contextlib.redirect_stdout(sys.stderr):
-            codebook_v4 = SpectralCodebookV4()
-            codebook_v4.load(str(codebook_path))
+            # Upstream prints progress ("CodebookV4 loaded: ...") straight to
+            # stdout, which corrupts --json for any caller that parses us
+            # (image_meta.py json.loads our stdout). Keep stdout ours alone.
+            with contextlib.redirect_stdout(sys.stderr):
+                codebook_v4 = SpectralCodebookV4()
+                codebook_v4.load(str(codebook_path))
 
-            extractor = RobustSynthIDExtractor()
-            result = extractor.detect_from_v4_codebook(rgb, codebook_v4, model=model)
-    except Exception as e:
-        print(f"scorer error: {e}", file=sys.stderr)
-        return 1, None
+                extractor = RobustSynthIDExtractor()
+                result = extractor.detect_from_v4_codebook(rgb, codebook_v4, model=model)
+        except Exception as e:
+            print(f"scorer error: {e}", file=sys.stderr)
+            return 1, None
 
     payload = {
         "available": True,

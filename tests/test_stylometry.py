@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "skills" / "remove-ai-marks" / "scripts"
@@ -116,6 +117,33 @@ def test_ai_vs_human_discrimination():
     # Human sample should have low score and CLEAN/LOW confidence
     assert human_report.score < 0.35
     assert human_report.confidence_level in ("CLEAN", "LOW")
+
+
+def test_oversized_input_truncated_before_scanning():
+    # Regression: oversized inputs (>MAX_SCAN_CHARS) must be truncated before the
+    # regex scans run, with a truncation note, and complete quickly.
+    snippet = "This is a sample sentence with enough words for stylometry analysis. "
+    oversized = snippet * 40000  # ~2.6M chars > MAX_SCAN_CHARS (2,000,000)
+    assert len(oversized) > 2_000_000
+
+    start = time.monotonic()
+    report = score_text_stylometry(oversized, path="oversized.txt")
+    elapsed = time.monotonic() - start
+
+    assert any("truncat" in n.lower() for n in report.notes)
+    assert report.status == "ok"
+    assert 0 < report.word_count < 2_000_000
+    assert elapsed < 30
+
+
+def test_under_cap_input_has_no_truncation_note():
+    # Inputs within the cap must behave byte-identically: no truncation note,
+    # and the established score is preserved.
+    sample = (FIXTURES_DIR / "stylometry_ai_sample.txt").read_text(encoding="utf-8")
+    assert len(sample) <= 2_000_000
+    report = score_text_stylometry(sample, path="ai_sample.txt")
+    assert not any("truncat" in n.lower() for n in report.notes)
+    assert report.score >= 0.70
 
 
 def test_score_stylometry_cli():

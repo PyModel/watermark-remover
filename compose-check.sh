@@ -11,7 +11,7 @@ BASE_URL="${WATERMARKS_SERVICE_URL:-http://127.0.0.1:8765}"
 COMPOSE=(docker compose --profile harness --profile heavy)
 FAIL=0
 
-if curl -fsS "$BASE_URL/health" >/dev/null 2>&1; then
+if curl -fsS --connect-timeout 2 --max-time 10 "$BASE_URL/health" >/dev/null 2>&1; then
   echo "wr-core: OK"
 else
   echo "wr-core: FAIL (no /health at $BASE_URL)"
