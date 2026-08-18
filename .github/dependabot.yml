@@ -1,0 +1,43 @@
+# Dependabot configuration (https://docs.github.com/code-security/dependabot)
+version: 2
+updates:
+  # GitHub Actions: keeps the SHA pins in .github/workflows/ fresh. All action
+  # references are SHA-pinned, so dependabot is the mechanism that rotates them
+  # when upstream releases new versions.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+
+  # Root dev/test dependencies (requirements-test.txt: pytest, pypdf, ruff,
+  # openapi-spec-validator).
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 10
+
+  # Optional backend dependencies (synthid scorer, ctrlregen, markllm,
+  # markdiffusion). NOTE: the synthid/ctrlregen/markllm pins are
+  # compatibility-coupled to the upstream checkouts pinned in setup_*.sh /
+  # Dockerfile.* (REF build args). Before merging a bump, re-verify the
+  # affected adapter against that upstream commit - CI's pip-audit step will
+  # flag any security regression, but functional compatibility must be
+  # checked by a human.
+  - package-ecosystem: "pip"
+    directory: "/skills/remove-ai-marks/scripts"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 10
+
+  # Docker base images: tracks the digest-pinned python:*-slim bases.
+  # Monthly - digest churn is low-signal weekly.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 5

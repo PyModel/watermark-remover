@@ -5,17 +5,28 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
-    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.12", "3.14"]
+        include:
+          - os: ubuntu-latest
+            python-version: "3.10"
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: ubuntu-latest
+            python-version: "3.14"
+          # Windows leg (pwsh smoke + .ps1 validation live here).
+          - os: windows-latest
+            python-version: "3.12"
+    runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -29,8 +40,44 @@ jobs:
       - name: Test
         run: python -m pytest -q
 
+      - name: Validate OpenAPI spec (module call, no live server)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          python -c "import sys; sys.path.insert(0, 'skills/remove-ai-marks/scripts'); import server; from openapi_spec_validator import validate; validate(server.openapi_spec())"
+
       - name: Full check (lint, format, compile, test, smoke)
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.14'
         run: make check PYTHON=python
+
+      - name: Audit dependencies (pip-audit)
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.14'
+        run: |
+          python -m pip install pip-audit==2.10.1
+          python -m pip_audit -r requirements-test.txt \
+            -r skills/remove-ai-marks/scripts/requirements-synthid-scorer.txt
+
+      - name: Smoke (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          python skills/remove-ai-marks/scripts/clean_text.py tests/fixtures/sample_watermarked.txt -o "$env:TEMP/wm.cleaned.txt" --stats &&
+          python skills/remove-ai-marks/scripts/rewrite_text.py tests/fixtures/sample_watermarked.txt --backend print-prompt > $null &&
+          python skills/remove-ai-marks/scripts/clean_file.py tests/fixtures/sample_ai.md -o "$env:TEMP/sample_ai.cleaned.md" &&
+          python skills/remove-ai-marks/scripts/clean_file.py tests/fixtures/sample_ai.html -o "$env:TEMP/sample_ai.cleaned.html" &&
+          python skills/remove-ai-marks/scripts/clean_file.py tests/fixtures/sample_meta.svg -o "$env:TEMP/sample_meta.cleaned.svg"
+
+      - name: Validate setup .ps1 scripts
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $files = @('skills/remove-ai-marks/scripts/setup_ctrlregen.ps1', 'skills/remove-ai-marks/scripts/setup_synthid.ps1')
+          foreach ($f in $files) {
+            $tokens = $null; $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f), [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }
+          }
+          $ps1 = Get-Content skills/remove-ai-marks/scripts/setup_ctrlregen.ps1 -Raw
+          if ($ps1 -notmatch 'cuda\.is_available\(\)') { Write-Error 'post-install CUDA verification missing'; exit 1 }
 
   # Single stable context for branch protection; the matrix can change freely.
   ci-green:
