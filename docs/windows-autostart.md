@@ -10,7 +10,7 @@ Replace `<path-to-clone>` below with wherever you want the repo to live (e.g.
 path consistently in every step below.
 
 ```powershell
-git clone https://github.com/Pythoughts-labs/watermark-remover.git <path-to-clone>
+git clone https://github.com/PyModel/watermark-remover.git <path-to-clone>
 ```
 
 ## 2. Create a silent launcher script

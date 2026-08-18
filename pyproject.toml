@@ -1,18 +1,30 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+requires = ["setuptools>=77.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "watermark-remover"
 version = "0.4.0"
 description = "Pure-Python AI watermark remover for text, images, and documents"
+readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{name = "Mohamed Elkholy"}]
+keywords = [
+    "watermark",
+    "watermark-removal",
+    "ai-detection",
+    "c2pa",
+    "provenance",
+    "unicode",
+    "steganography",
+    "exif",
+    "metadata",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -22,6 +34,12 @@ classifiers = [
     "Topic :: Multimedia :: Graphics",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
+
+[project.urls]
+Homepage = "https://github.com/PyModel/watermark-remover"
+Repository = "https://github.com/PyModel/watermark-remover"
+Issues = "https://github.com/PyModel/watermark-remover/issues"
+Changelog = "https://github.com/PyModel/watermark-remover/releases"
 
 [project.optional-dependencies]
 visible = [
@@ -47,22 +65,23 @@ all = [
 ]
 
 [project.scripts]
-wm = "skills.remove_ai_marks.scripts.clean_file:main"
-wm-serve = "skills.remove_ai_marks.scripts.server:main"
-wm-audit-dir = "skills.remove_ai_marks.scripts.audit_dir:main"
-wm-audit-site = "skills.remove_ai_marks.scripts.audit_website:main"
+wm = "watermark_remover.scripts.clean_file:main"
+wm-serve = "watermark_remover.scripts.server:main"
+wm-audit-dir = "watermark_remover.scripts.audit_dir:main"
+wm-audit-site = "watermark_remover.scripts.audit_website:main"
 
 [tool.setuptools]
-# The on-disk directory uses a hyphen (skills/remove-ai-marks) while the
-# importable package uses an underscore; map them explicitly.
-package-dir = {"skills.remove_ai_marks" = "skills/remove-ai-marks"}
-packages = ["skills.remove_ai_marks", "skills.remove_ai_marks.scripts"]
+# The on-disk directory keeps its Claude-skill layout (skills/remove-ai-marks);
+# the installed package is a single top-level `watermark_remover` root. Mapping
+# them here avoids claiming a generic `skills` namespace in site-packages.
+package-dir = {"watermark_remover" = "skills/remove-ai-marks"}
+packages = ["watermark_remover", "watermark_remover.scripts"]
 
 [tool.setuptools.package-data]
 # Ship the skill documentation and bootstrap assets so a wheel install is
 # self-sufficient for the CLI surfaces that read them at runtime.
-"skills.remove_ai_marks" = ["SKILL.md", "references/*.md"]
-"skills.remove_ai_marks.scripts" = ["*.txt", "setup_*.sh", "setup_*.ps1"]
+"watermark_remover" = ["SKILL.md", "references/*.md"]
+"watermark_remover.scripts" = ["*.txt", "setup_*.sh", "setup_*.ps1"]
 
 [tool.ruff]
 line-length = 100

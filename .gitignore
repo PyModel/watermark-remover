@@ -21,6 +21,7 @@ CLAUDE.md
 
 # Python build artifacts
 build/
+dist/
 *.egg-info/
 
 # Secrets / local env
