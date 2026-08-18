@@ -167,7 +167,10 @@ def test_cli_unavailable_missing_deps(tmp_path: Path):
 
 
 def test_cli_bad_input_missing_file(tmp_path: Path):
-    r = _run_adapter("detect", str(tmp_path / "missing.txt"), "--scheme", "kgw")
+    upstream = _make_fake_upstream(tmp_path)
+    r = _run_adapter(
+        "detect", str(tmp_path / "missing.txt"), "--scheme", "kgw", "--upstream-dir", str(upstream)
+    )
     assert r.returncode == 2
 
 
@@ -269,8 +272,7 @@ def test_cli_detect_offline_flag(tmp_path: Path):
         "--offline",
     )
     assert r.returncode == 0, r.stderr
-    assert "local_files_only" in (r.stderr or "")
-    assert "True" in (r.stderr or "")
+    assert "'local_files_only': True" in (r.stderr or "")
 
 
 def test_cli_config_too_large(tmp_path: Path):
@@ -319,6 +321,27 @@ def test_cli_watermark_json_success(tmp_path: Path):
     assert payload["available"] is True
     assert wm_out.read_text() == "WATERMARKED SAMPLE"
     assert uwm_out.read_text() == "PLAIN SAMPLE"
+
+
+def test_cli_watermark_default_stdout(tmp_path: Path):
+    """When -o is omitted, watermarked text goes to stdout, not a file named '-'."""
+    upstream = _make_fake_upstream(tmp_path)
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("write about capybaras")
+    r = _run_adapter(
+        "watermark",
+        str(prompt),
+        "--scheme",
+        "kgw",
+        "--upstream-dir",
+        str(upstream),
+        "--device",
+        "cpu",
+    )
+    assert r.returncode == 0, r.stderr
+    assert "WATERMARKED SAMPLE" in (r.stdout or "")
+    # Must NOT have created a file literally named '-'
+    assert not (Path.cwd() / "-").exists()
 
 
 def test_cli_watermark_runtime_error(tmp_path: Path):

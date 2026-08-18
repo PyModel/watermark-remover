@@ -98,9 +98,10 @@ def _load_algorithm(
 
     # --offline: never contact the HF hub. local_files_only makes transformers
     # fail fast instead of hanging, and HF_HUB_OFFLINE covers the lower-level
-    # hub calls. Custom-code execution is not possible either way: transformers
-    # only honors auto_map/trust_remote_code when explicitly enabled, which is
-    # never done here.
+    # hub calls. Note: the operator-supplied MarkLLM checkout imported through
+    # watermark.auto_watermark is trusted and executes locally; offline mode
+    # only prevents Hugging Face Hub downloads and transformers remote-code
+    # loading (trust_remote_code is never enabled here).
     if offline:
         os.environ.setdefault("HF_HUB_OFFLINE", "1")
     load_kwargs = {"local_files_only": True} if offline else {}
@@ -224,7 +225,10 @@ def _cmd_watermark(args: argparse.Namespace, upstream: Path, alg: str) -> int:
         return 1
 
     wm_out = "-" if args.watermarked_output is None else args.watermarked_output
-    atomic_write_text(Path(wm_out), watermarked)
+    if wm_out == "-":
+        sys.stdout.write(watermarked)
+    else:
+        atomic_write_text(Path(wm_out), watermarked)
     if unwatermarked is not None:
         atomic_write_text(Path(args.unwatermarked_output), unwatermarked)
 
@@ -326,10 +330,6 @@ def main() -> int:
     wm.set_defaults(handler=_cmd_watermark)
 
     args = p.parse_args()
-
-    if args.cmd == "detect" and args.path != "-" and not Path(args.path).is_file():
-        eprint(f"not a file: {args.path}")
-        return 2
 
     raw_upstream = args.upstream_dir or os.environ.get("MARKLLM_DIR")
     upstream = resolve_upstream(str(raw_upstream) if raw_upstream else None)

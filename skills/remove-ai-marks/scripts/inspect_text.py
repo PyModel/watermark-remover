@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from pathlib import Path
 
@@ -34,9 +35,17 @@ def main() -> int:
         action="store_true",
         help="Also run zero-LLM statistical and stylometric AI cadence scoring",
     )
+    def _valid_threshold(raw: str) -> float:
+        value = float(raw)
+        if math.isnan(value) or math.isinf(value) or not (0.0 <= value <= 1.0):
+            raise argparse.ArgumentTypeError(
+                f"threshold must be a finite value in [0.0, 1.0], got {raw}"
+            )
+        return value
+
     p.add_argument(
         "--threshold",
-        type=float,
+        type=_valid_threshold,
         default=0.65,
         help="Score threshold for --stylometry exit code (default: 0.65)",
     )

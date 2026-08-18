@@ -21,40 +21,8 @@ sys.path.insert(0, str(SCRIPTS))
 import text_detectors
 
 # ---------------------------------------------------------------------------
-# Fake opener adapters
+# Fake test helpers
 # ---------------------------------------------------------------------------
-
-
-class _FakeResponse:
-    """Mimic the urllib response that layer_b_http.request_json expects."""
-
-    def __init__(self, data: dict | bytes):
-        if isinstance(data, dict):
-            self._data = json.dumps(data).encode("utf-8")
-        else:
-            self._data = data
-        self.headers = {"Content-Type": "application/json"}
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-    def read(self, n=-1):
-        return self._data
-
-
-class _FakeOpener:
-    """Stand-in for urllib.request.build_opener() output."""
-
-    def __init__(self, response: _FakeResponse | Exception):
-        self._response = response
-
-    def open(self, request, timeout=None):
-        if isinstance(self._response, Exception):
-            raise self._response
-        return self._response
 
 
 def _gemini_success(verdict: str | None = None, score: float | None = None) -> dict:
@@ -104,69 +72,30 @@ def test_gemini_unconfigured():
     assert text_detectors.GeminiSynthIDTextDetector().available() is False
 
 
-def test_gemini_verdict_watermarked(monkeypatch):
+def test_gemini_disabled_with_api_key(monkeypatch):
+    """When configured, the detector still reports unavailable (unsupported task type)."""
     monkeypatch.setenv("WATERMARKS_GEMINI_API_KEY", "k")
-    monkeypatch.setattr(
-        text_detectors,
-        "request_json",
-        lambda *a, **kw: _gemini_success(verdict="Likely AI-generated"),
-    )
     report = text_detectors.GeminiSynthIDTextDetector().detect("some text")
-    assert report["available"] is True
-    assert report["is_watermarked"] is True
-    assert report["verdict"] == "Likely AI-generated"
-
-
-def test_gemini_verdict_unlikely(monkeypatch):
-    monkeypatch.setenv("WATERMARKS_GEMINI_API_KEY", "k")
-    monkeypatch.setattr(
-        text_detectors,
-        "request_json",
-        lambda *a, **kw: _gemini_success(verdict="Unlikely AI-generated"),
-    )
-    report = text_detectors.GeminiSynthIDTextDetector().detect("some text")
-    assert report["is_watermarked"] is False
-
-
-def test_gemini_numeric_score(monkeypatch):
-    monkeypatch.setenv("WATERMARKS_GEMINI_API_KEY", "k")
-    monkeypatch.setattr(
-        text_detectors,
-        "request_json",
-        lambda *a, **kw: _gemini_success(score=0.87),
-    )
-    report = text_detectors.GeminiSynthIDTextDetector().detect("some text")
-    assert report["is_watermarked"] is True
-    assert report["score"] == 0.87
+    assert report["available"] is False
+    assert "DETECT_TEXT_WATERMARK" in report["error"]
+    assert report["detector"] == "gemini-synthid-text"
+    assert report["vendor"] == "google"
 
 
 def test_gemini_http_error(monkeypatch):
+    """Disabled detector never reaches request_json, so no HTTP call is made."""
     monkeypatch.setenv("WATERMARKS_GEMINI_API_KEY", "k")
+    calls = {"n": 0}
 
     def boom(*a, **kw):
+        calls["n"] += 1
         raise text_detectors.LayerBHTTPError("Layer B HTTP request failed with HTTP 401")
 
     monkeypatch.setattr(text_detectors, "request_json", boom)
     report = text_detectors.GeminiSynthIDTextDetector().detect("some text")
+    assert calls["n"] == 0, "disabled detector must not call request_json"
     assert report["available"] is False
-    assert "HTTP 401" in report["error"]
-
-
-def test_gemini_retries_once_on_429(monkeypatch):
-    monkeypatch.setenv("WATERMARKS_GEMINI_API_KEY", "k")
-    calls = {"n": 0}
-
-    def flaky(*a, **kw):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise text_detectors.LayerBHTTPError("Layer B HTTP request failed with HTTP 429")
-        return _gemini_success(verdict="Likely AI-generated")
-
-    monkeypatch.setattr(text_detectors, "request_json", flaky)
-    monkeypatch.setattr(text_detectors.time, "sleep", lambda _: None)
-    report = text_detectors.GeminiSynthIDTextDetector().detect("some text")
-    assert calls["n"] == 2
-    assert report["is_watermarked"] is True
+    assert "DETECT_TEXT_WATERMARK" in report["error"]
 
 
 def test_gemini_oversize_skips(monkeypatch):
@@ -179,28 +108,40 @@ def test_gemini_oversize_skips(monkeypatch):
 
 
 def test_gemini_malformed_max_chars_env_does_not_crash(monkeypatch):
+    """Malformed WATERMARKS_GEMINI_MAX_CHARS falls back to default; detector still disabled."""
     monkeypatch.setenv("WATERMARKS_GEMINI_API_KEY", "k")
     monkeypatch.setenv("WATERMARKS_GEMINI_MAX_CHARS", "not-a-number")
-    monkeypatch.setattr(
-        text_detectors,
-        "request_json",
-        lambda *a, **kw: _gemini_success(verdict="Likely AI-generated"),
-    )
     report = text_detectors.GeminiSynthIDTextDetector().detect("short text")
-    assert report["available"] is True
-    assert report["is_watermarked"] is True
-
-
-def test_gemini_no_candidates(monkeypatch):
-    monkeypatch.setenv("WATERMARKS_GEMINI_API_KEY", "k")
-    monkeypatch.setattr(
-        text_detectors,
-        "request_json",
-        lambda *a, **kw: {"candidates": []},
-    )
-    report = text_detectors.GeminiSynthIDTextDetector().detect("some text")
     assert report["available"] is False
-    assert "no candidates" in report["error"]
+    assert "DETECT_TEXT_WATERMARK" in report["error"]
+
+
+# --- parse_gemini_detect_response (standalone unit tests) ------------------
+
+
+def test_parse_gemini_verdict_watermarked():
+    data = _gemini_success(verdict="Likely AI-generated")
+    parsed = text_detectors.parse_gemini_detect_response(data)
+    assert parsed["is_watermarked"] is True
+    assert parsed["verdict"] == "Likely AI-generated"
+
+
+def test_parse_gemini_verdict_unlikely():
+    data = _gemini_success(verdict="Unlikely AI-generated")
+    parsed = text_detectors.parse_gemini_detect_response(data)
+    assert parsed["is_watermarked"] is False
+
+
+def test_parse_gemini_numeric_score():
+    data = _gemini_success(score=0.87)
+    parsed = text_detectors.parse_gemini_detect_response(data)
+    assert parsed["is_watermarked"] is True
+    assert parsed["score"] == 0.87
+
+
+def test_parse_gemini_no_candidates():
+    with pytest.raises(text_detectors.DetectorError, match="no candidates"):
+        text_detectors.parse_gemini_detect_response({"candidates": []})
 
 
 # --- MarkLLM ---------------------------------------------------------------
@@ -227,6 +168,10 @@ def test_markllm_success(monkeypatch, tmp_path):
     assert report["available"] is True
     assert report["is_watermarked"] is True
     assert "research harness" in report["note"]
+    # Verify the report merge preserves caller-facing metadata from report.
+    assert report["detector"] == "markllm"
+    assert report["vendor"] == "open-llm"
+    assert report["scheme"] == "kgw"
 
 
 def test_markllm_unavailable_exit3(monkeypatch, tmp_path):
