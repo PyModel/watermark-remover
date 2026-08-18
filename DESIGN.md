@@ -40,7 +40,7 @@ A seam exists only where at least two adapters are real:
 - **Semantic similarity:** `/v1/embeddings` and shingle-Jaccard fallback.
 - **Visible inpainting:** stdlib texture-patch (default), nearest-boundary uniform-background fallback, and an external command adapter (LaMa/MI-GAN/diffusion tools).
 - **Visible localization:** user mask/box and an external detector command.
-- **PDF:** exiftool, full-document pypdf clone, and unchanged-copy fallback.
+- **PDF:** exiftool, qpdf structural rewrite (when present), full-document pypdf clone, and unchanged-copy fallback.
 - **SynthID scoring:** unavailable/no-op default and external `reverse-SynthID` checkout.
 
 The CLI modules orchestrate these interfaces; they do not contain alternate implementations.
@@ -84,7 +84,7 @@ The CLI modules orchestrate these interfaces; they do not contain alternate impl
 - PDFs are never byte-deleted without rebuilding cross-reference/object offsets; absent a structural cleaner, input is copied unchanged and reported residual.
 - Encrypted PDFs are never regex-edited.
 - pypdf clones the complete document graph, writes to memory first, then publishes a complete parseable result.
-- DOCX `customXml` is preserved because it can back content controls/business data; residual provenance is reported rather than silently deleting application data.
+- DOCX `customXml` parts are dropped and dangling relationships / Content-Type overrides are pruned: leftover customXml can re-carry provenance data, and pruning keeps the package valid.
 
 ### Visible images
 
@@ -101,6 +101,18 @@ The CLI modules orchestrate these interfaces; they do not contain alternate impl
 - `.cleaned.*`, `.mask.*`, and `.bak` artifacts are not reprocessed; in-place backups use exclusive no-follow creation.
 - A directory is batch mode even if a glob returns one file.
 - Exit `0` means all requested operations completed without retained requested risk; `1` means processing error or residual signal; `2` means usage/input selection error.
+
+### Confidence levels and audit reporting
+
+- Finding confidence is one of `confirmed`, `probable`, `informational`,
+  `likely_false_positive` — shared by the inspectors and the audit suite.
+- SARIF 2.1.0 export (`wm-audit-dir`, `wm-audit-site`): rules
+  `AI-WATERMARK-C2PA` (error), `AI-WATERMARK-METADATA` (warning),
+  `AI-WATERMARK-UNICODE-LAYER-A` (warning), `AI-STYLES-HIGH-PROBABILITY` (note);
+  URIs are relative via `%SRCROOT%`; driver name `watermark-remover`.
+- Audit exit codes: `0` no actionable findings, `1` actionable findings,
+  `2` usage/refusal error, `3` partial scan (inconclusive — some inputs could
+  not be scanned).
 
 ## 5. Layer B — TSAPA-style implementation
 
@@ -158,18 +170,21 @@ The default stdlib backend selects a nearby texture patch by boundary error and 
 | --- | --- |
 | PNG | C2PA/text/XMP/EXIF chunks; stdlib visible pipeline |
 | JPEG | APP/JUMBF metadata; external visible backend |
-| HEIC/HEIF/AVIF | ISO-BMFF brands, JUMBF boxes, Exif/XMP item extents |
-| SVG/PDF/DOCX/ODT | Format-aware metadata rewrite |
+| WebP/BMP/GIF/TIFF | Format-aware metadata rewrite (RIFF chunks, trailing bytes, app extensions, IFD patching) |
+| HEIC/HEIF/AVIF | ISO-BMFF brands, JUMBF boxes, top-level XMP uuid, Exif/XMP item extents |
+| SVG/PDF/DOCX/XLSX/PPTX/EPUB/ODT | Format-aware metadata rewrite (+ Layer A on inline text) |
 | HTML/Markdown | Provenance metadata + Layer A text |
 | Text/code | Layer A, Layer B, character perturbation |
 
 ## 9. Roadmap
 
-1. WebP metadata support.
-2. Video metadata without transcoding.
-3. Video visible removal with optical-flow temporal consistency.
-4. Diffusion regeneration and spectral subtraction/reverse-SynthID V4 remain research-only; shipped SynthID support is external scoring, not removal.
-5. Ground-truth-aware visible-removal metrics when paired originals exist.
+1. Video metadata without transcoding.
+2. Video visible removal with optical-flow temporal consistency.
+3. Spectral subtraction via reverse-SynthID V4 remains research-only; shipped pixel work is DCT band suppression (--remove-synthid) plus external regeneration (--remove-pixel ctrlregen|diffusion), all best-effort.
+4. Ground-truth-aware visible-removal metrics when paired originals exist.
+5. Audio watermark detection/removal research.
+
+Shipped since the 0.4.0 port: the HTTP service (wm-serve + OpenAPI), the audit suite (wm-audit-dir, wm-audit-site, SARIF export), zero-LLM stylometry, vendor/harness text detectors, and the MarkLLM/CtrlRegen/MarkDiffusion heavy-backend adapters.
 
 ## 10. Out of scope
 

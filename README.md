@@ -232,8 +232,9 @@ Soft-binding removal remains out of scope. The inspector warns when an in-conten
 PDF cleaning uses this fallback order:
 
 1. `exiftool`
-2. optional `pypdf` full-document clone (outlines, forms, attachments, and catalog retained, docinfo and XMP removed)
-3. byte-exact unchanged copy with an explicit residual warning
+2. `qpdf --linearize` structural rewrite (when qpdf is present)
+3. optional `pypdf` full-document clone (outlines, forms, attachments, and catalog retained, docinfo and XMP removed)
+4. byte-exact unchanged copy with an explicit residual warning
 
 ```bash
 python3 -m pip install pypdf
@@ -264,6 +265,85 @@ docker run --rm -v "$(pwd):/data" watermark-remover-synthid-scorer /data/shot.pn
 
 This is scoring only. That repository's carrier model and success figures are maintainer-reported reverse-engineering claims, not public Google architecture and not an independent guarantee.
 
+Best-effort pixel-domain removal is opt-in on image cleans: `--remove-synthid` (seed-independent DCT mid-band suppression, PNG only) and `--remove-pixel ctrlregen|diffusion` (heavy external backends). All are labeled best-effort; none certifies a vendor-detector miss.
+
+---
+
+## Text watermark detection and stylometry
+
+Optional, stdlib-first, fail-soft:
+
+- `score_stylometry.py` — zero-LLM stylometry (burstiness, MATTR, AI-phrase density) with confidence bands and `--explain`.
+- `text_detectors.py` / `detect_text_watermark.py` — Gemini's official SynthID-text detector (needs `WATERMARKS_GEMINI_API_KEY`; env only) and a MarkLLM research harness (same-scheme-config only, not a vendor oracle). Claude detection is reserved but unavailable until a public API ships.
+- `inspect_text.py --stylometry` and `rewrite_text.py` MarkLLM before/after hooks.
+
+```bash
+python3 "$SCRIPTS/score_stylometry.py" draft.txt --threshold 0.65 --explain
+python3 "$SCRIPTS/detect_text_watermark.py" detect draft.txt --scheme kgw --json
+```
+
+---
+
+## Audit suite
+
+Directory and website audits produce JSON, human, or SARIF 2.1.0 reports (driver name `watermark-remover`, rules for C2PA, AI metadata, Layer-A Unicode, and stylometry).
+
+```bash
+wm-audit-dir ./inputs --json            # or --format sarif, --check-stylometry, -j N
+wm-audit-site --sitemap https://example.com/sitemap.xml --json
+```
+
+Exit codes: `0` no actionable findings, `1` actionable findings, `2` usage error, `3` partial scan (inconclusive — some inputs could not be scanned). The website auditor enforces same-origin, public-address, pinned-connection fetching (SSRF stack) and a 64 MiB decompressed sitemap cap.
+
+---
+
+## HTTP service
+
+The whole pipeline is also exposed over HTTP (stdlib-only, no web framework). The agent skill and any web app can call it instead of running the CLIs locally.
+
+```bash
+wm-serve                     # http://127.0.0.1:8765, optional bearer key
+curl -s http://127.0.0.1:8765/health
+curl -s http://127.0.0.1:8765/capabilities
+curl -s http://127.0.0.1:8765/openapi.json
+# POST /inspect, /detect, /clean with {"file": "<base64>", "name": "x.png", "options": {...}}
+```
+
+Docker (core image with exiftool + qpdf + c2patool baked in) and compose profiles for the heavy harnesses:
+
+```bash
+make docker-core-build
+docker compose up --build -d                  # core only
+docker compose --profile harness --profile heavy up --build -d
+./compose-check.sh
+```
+
+See [`skills/remove-ai-marks/references/service-mode.md`](skills/remove-ai-marks/references/service-mode.md) for the thin-client curl flow and [`docs/windows-autostart.md`](docs/windows-autostart.md) for a Windows login task.
+
+### Heavy backends (external checkouts, never bundled)
+
+| Backend | Purpose | License posture |
+| --- | --- | --- |
+| CtrlRegen (`noai-watermark`) | `--remove-pixel ctrlregen` regeneration removal | No LICENSE upstream — local-only image, never published |
+| reverse-SynthID | SynthID-class pixel scoring (`score_synthid.py` / sidecar) | Non-commercial Research License — local-only image, never published |
+| MarkLLM | Text scheme verification harness (`detect_text_watermark.py`) | Apache-2.0 — publishable |
+| MarkDiffusion | Image scheme harness + DiffusionPurification (`markdiffusion_harness.py`) | Apache-2.0 — publishable |
+
+Bootstrap any of them with `setup_ctrlregen.sh`, `setup_synthid.sh`, `setup_markllm.sh`, `setup_markdiffusion.sh` (or the `make bootstrap-*` targets). CtrlRegen/SynthID images build locally only; MarkLLM/MarkDiffusion images publish to GHCR on `v*` tags.
+
+---
+
+## What's new in 0.4.0
+
+- WebP, BMP, GIF, TIFF/BigTIFF metadata parsers; AI-generator product-name hints in PNG text chunks.
+- XLSX/PPTX/EPUB container support; embedded data-URI recursion; streaming zip budget (128 MB); DOCX customXml drop + relationship pruning; qpdf step in the PDF chain; HEIF/AVIF top-level XMP `uuid` box and `avio` brand.
+- Zero-LLM stylometry, vendor/harness text detectors, MarkLLM harness.
+- CtrlRegen / MarkDiffusion pixel backends, SynthID scorer sidecar, `--remove-pixel`.
+- HTTP service (`wm-serve`) + OpenAPI, audit suite (`wm-audit-dir`, `wm-audit-site`) with SARIF export.
+- Rewrite upgrades: `humanize`/`code` strengths, `--candidates`, reasoning-effort, default-deny remote endpoints; `--api-key` removed (env-only `WATERMARKS_REWRITE_API_KEY`).
+- Docker/compose profiles, Windows CI leg, CodeQL, pip-audit, dependabot, GHCR release workflow.
+- Lightweight `clean-user-facing-text` Cursor skill + installer; lint parity with the upstream reference (pylint PLW + bandit S rules).
+
 ---
 
 ## Format support
@@ -272,11 +352,16 @@ This is scoring only. That repository's carrier model and success figures are ma
 | --- | --- |
 | PNG | `caBX`, text, XMP, and EXIF chunks, plus the optional visible pipeline |
 | JPEG | APP11/JUMBF and APP metadata, external visible backend supported |
-| HEIC, HEIF, AVIF | ISO-BMFF brands, JUMBF/C2PA UUID boxes, direct-file Exif and XMP extents. Unsupported external or idat layouts fail closed |
+| WebP | Full RIFF parse: `C2PA` chunk always stripped; `ICCP`/`EXIF`/`XMP ` per mode; RIFF size recompute |
+| BMP | Trailing-byte metadata strip with file-size rewrite |
+| GIF | Comment/XMP/unknown app extensions stripped; NETSCAPE2.0/ICC kept unless marker-hit |
+| TIFF / BigTIFF | In-place IFD patching: XMP/IPTC/Exif/GPS/MakerNote/Photoshop/XP tags dropped, structural tags kept, orphaned payloads zeroed |
+| HEIC, HEIF, AVIF | ISO-BMFF brands (`heic`/`heif`/`avif`/`avio`), JUMBF/C2PA UUID boxes, top-level XMP `uuid` box, direct-file Exif and XMP extents. Unsupported external or idat layouts fail closed |
 | SVG | `<metadata>`, XMP, provenance-like comments |
-| PDF | XMP and docinfo via exiftool or a full-document pypdf clone, otherwise an unchanged copy |
-| DOCX | docProps cleaned, customXml inspected and preserved to avoid application-data loss |
-| ODT | meta.xml and generator-like metadata |
+| PDF | XMP and docinfo via exiftool, then a qpdf structural rewrite (when qpdf is present), then a full-document pypdf clone, otherwise an unchanged copy with a residual warning |
+| DOCX / XLSX / PPTX | OOXML scrub: docProps cleaned, embedded media stripped, customXml dropped with dangling relationships and Content-Type overrides pruned, Layer A on `<w:t>`/`<t>`/`<a:t>` text |
+| EPUB | OPF metadata scrub, embedded media strip, XHTML + Layer A clean, manifest pruning, mimetype stored first |
+| ODT | meta.xml and generator-like metadata, marker-carrying non-core parts dropped, Layer A on `<text:p>` |
 | HTML | meta tags, provenance JSON-LD, `data-ai*` attributes |
 | Markdown | AI-like YAML frontmatter plus a Layer A body pass |
 | Text and code | Layer A, optional Layer B or character perturbation |
@@ -299,7 +384,7 @@ This is scoring only. That repository's carrier model and success figures are ma
 
 **PNG chunk surgery.** [`image_meta.py`](skills/remove-ai-marks/scripts/image_meta.py) walks the chunk stream, removes the private ancillary `caBX` chunk that C2PA actually uses in PNG, and recomputes CRCs with `zlib.crc32`.
 
-**Markup-aware container cleaning.** [`container_meta.py`](skills/remove-ai-marks/scripts/container_meta.py) targets SVG [`<metadata>`](https://developer.mozilla.org/en-US/docs/Web/SVG/Element/metadata) elements, HTML [`<meta>`](https://developer.mozilla.org/en-US/docs/Web/HTML/Element/meta) tags, JSON-LD provenance blocks, and [`data-*` attributes](https://developer.mozilla.org/en-US/docs/Web/HTML/Global_attributes/data-*) matching `data-ai*`. DOCX `customXml` is inspected and kept, because deleting it loses application data.
+**Markup-aware container cleaning.** [`container_meta.py`](skills/remove-ai-marks/scripts/container_meta.py) targets SVG [`<metadata>`](https://developer.mozilla.org/en-US/docs/Web/SVG/Element/metadata) elements, HTML [`<meta>`](https://developer.mozilla.org/en-US/docs/Web/HTML/Element/meta) tags, JSON-LD provenance blocks, and [`data-*` attributes](https://developer.mozilla.org/en-US/docs/Web/HTML/Global_attributes/data-*) matching `data-ai*`. DOCX `customXml` parts are dropped and the dangling relationships and Content-Type overrides are pruned, because customXml can re-carry provenance data; this is a provenance tool, so pruning keeps the package valid instead of leaving orphaned parts behind.
 
 **Fallback chains that degrade loudly.** PDF cleaning tries `exiftool`, then a full-document `pypdf` clone, then a byte-exact copy with an explicit residual warning. The third case still returns a file, and still tells you nothing was removed.
 
@@ -310,7 +395,7 @@ This is scoring only. That repository's carrier model and success figures are ma
 Nothing below is required to run the core.
 
 - [pypdf](https://github.com/py-pdf/pypdf) for a structural PDF clone that keeps outlines, forms, and attachments while dropping docinfo and XMP.
-- [ExifTool](https://exiftool.org/) and [c2patool](https://github.com/contentauth/c2patool) as system binaries, used when present.
+- [ExifTool](https://exiftool.org/), [qpdf](https://qpdf.sourceforge.io/), and [c2patool](https://github.com/contentauth/c2patool) as system binaries, used when present.
 - [Gradio](https://www.gradio.app/) for [`demo.py`](demo.py), which calls the same modules as the CLI rather than reimplementing them.
 - [Ollama](https://ollama.com/) or any OpenAI-compatible endpoint for Layer B execution. Tests inject a fake callable instead.
 - [LaMa](https://github.com/advimman/lama) and [MI-GAN](https://github.com/Picsart-AI-Research/MI-GAN) as external inpainting commands behind the `external` backend.
@@ -328,8 +413,13 @@ watermark-remover/
 │   ├── ISSUE_TEMPLATE/
 │   └── workflows/
 ├── assets/
-├── research/
+├── docs/
+│   └── windows-autostart.md
+├── integrations/
+│   └── cursor/
+├── research/                       # gitignored reference material
 ├── skills/
+│   ├── clean-user-facing-text/     # lightweight Cursor skill (vendored engine)
 │   └── remove-ai-marks/
 │       ├── references/
 │       └── scripts/
@@ -338,12 +428,20 @@ watermark-remover/
 ├── CODE_OF_CONDUCT.md
 ├── CONTRIBUTING.md
 ├── DESIGN.md
+├── Dockerfile                      # core HTTP service image
+├── Dockerfile.ctrlregen
+├── Dockerfile.markdiffusion
+├── Dockerfile.markllm
 ├── Dockerfile.synthid
 ├── LICENSE
 ├── Makefile
 ├── README.md
 ├── SECURITY.md
+├── compose-check.sh
+├── compose.yaml
 ├── demo.py
+├── install-skill.sh
+├── install_skill.py
 ├── pyproject.toml
 ├── pytest.ini
 ├── requirements-demo.txt
@@ -362,7 +460,7 @@ watermark-remover/
 | Statistical text | Best-effort rewrite or evolutionary search | A strong or updated detector signal |
 | Visible images | Mask, dilation, inpaint | Missed regions, inpaint artifacts |
 | Hard-bound metadata | Format-aware stripping | Soft bindings, remote manifests, pixel marks |
-| Pixel SynthID-class | Optional external score | The pixel, audio, and video watermark itself |
+| Pixel SynthID-class | Optional external score; best-effort DCT suppression or external regeneration (`--remove-synthid`, `--remove-pixel`) | The audio/video watermark itself; detector evasion is not certified |
 | Training backdoors | Nothing | Out of scope |
 
 No public universal text detector exists, and a detector miss does not prove every trace is gone. Stronger attacks trade fidelity for lower detectability, and provider implementations keep changing.
