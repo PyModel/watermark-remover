@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inspect PNG/JPEG for C2PA and AI-related metadata."""
+"""Inspect raster images (PNG/JPEG/WebP/AVIF/HEIF/BMP/GIF/TIFF) for C2PA and AI-related metadata."""
 
 from __future__ import annotations
 
@@ -9,13 +9,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from common import emit_json
+from common import classify_finding_confidence, emit_json
 from image_meta import inspect_image
 
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("path", type=Path, help="Image path (PNG or JPEG)")
+    p.add_argument("path", type=Path, help="Image path (PNG/JPEG/WebP/AVIF/HEIF/BMP/GIF/TIFF)")
     p.add_argument("--json", action="store_true")
     p.add_argument(
         "--synthid-dir",
@@ -40,7 +40,7 @@ def main() -> int:
         if report.findings:
             print("Findings:")
             for f in report.findings:
-                print(f"  - {f}")
+                print(f"  - [{classify_finding_confidence(f)}] {f}")
         ct = report.tools.get("c2patool") or {}
         print(f"c2patool: {'yes' if ct.get('available') else 'no'}")
         et = report.tools.get("exiftool") or {}

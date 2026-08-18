@@ -27,12 +27,15 @@ HEIF_BRANDS = {
     b"hevs",
     b"mif1",
     b"msf1",
+    b"heif",
 }
-AVIF_BRANDS = {b"avif", b"avis"}
+AVIF_BRANDS = {b"avif", b"avis", b"avio"}
 
 C2PA_BOX_TYPES = (b"jumb", b"JUMB", b"c2pa", b"C2PA", b"cabx", b"caBX")
 C2PA_BMFF_UUID = bytes.fromhex("d8fec3d61b0e483c92975828877ec481")
 XMP_MIME = b"application/rdf+xml"
+# User-type of the XMP-bearing `uuid` box (ISO 23008-2 / Apple).
+XMP_UUID = b"\xbe\x7a\xcf\xcb\x97\xa9\x42\xe8\x9c\x71\x99\x94\x91\xe3\xaf\xac"
 
 
 @dataclass
@@ -245,6 +248,21 @@ def _c2pa_boxes(data: bytes) -> list[Box]:
     return found
 
 
+def _xmp_uuid_boxes(data: bytes) -> list[Box]:
+    """XMP-bearing `uuid` boxes (XMP_UUID user-type) at top level or inside meta."""
+    out: list[Box] = []
+    for box in _iter_boxes(data, 0, len(data)):
+        if box.type == b"uuid" and data[box.payload_start : box.end].startswith(XMP_UUID):
+            out.append(box)
+        if box.type == b"meta":
+            for child in _iter_boxes(data, box.payload_start + 4, box.end):
+                if child.type == b"uuid" and data[child.payload_start : child.end].startswith(
+                    XMP_UUID
+                ):
+                    out.append(child)
+    return out
+
+
 def _item_extent_bytes(
     data: bytes,
     items: dict[int, tuple[bytes, str, str]],
@@ -304,6 +322,30 @@ def inspect_heif(data: bytes) -> tuple[bool, bool, list[str], dict[str, Any]]:
         findings.append(
             f"C2PA/JUMBF box '{box.type.decode('latin-1')}' at offset {box.header_start}"
         )
+
+    for box in _xmp_uuid_boxes(data):
+        xmp_text = data[box.payload_start + 16 : box.end]
+        hits = _contains_any(xmp_text, AI_META_HINTS + C2PA_MARKERS)
+        if hits:
+            has_ai = True
+            if any(
+                h.lower() in ("c2pa", "contentcredentials", "jumb", "contentauth") for h in hits
+            ):
+                has_c2pa = True
+            findings.append(f"XMP uuid box @ {box.header_start}: {', '.join(hits[:8])}")
+        else:
+            findings.append(f"XMP uuid box @ {box.header_start}")
+
+    for box in _iter_boxes(data, 0, len(data)):
+        if box.type != b"uuid":
+            continue
+        payload = data[box.payload_start : box.end]
+        if payload.startswith(XMP_UUID):
+            continue
+        hits = _contains_any(payload, AI_META_HINTS + C2PA_MARKERS)
+        if hits:
+            has_ai = True
+            findings.append(f"uuid box @ {box.header_start}: {', '.join(hits[:8])}")
 
     try:
         items, extents = _provenance_items(data)
@@ -373,6 +415,22 @@ def neutralize_heif(data: bytes, *, strip_all_metadata: bool = True) -> tuple[by
         actions.append(
             f"neutralized '{name}' box -> free (zeroed {box.end - box.payload_start} payload bytes)"
         )
+
+    # 1b. Neutralize XMP `uuid` boxes (XMP_UUID user-type) at top level or inside meta.
+    for box in _xmp_uuid_boxes(bytes(buf)):
+        if strip_all_metadata:
+            pad = 0x20
+            for i in range(box.payload_start + 16, box.end):
+                buf[i] = pad
+            actions.append(
+                f"zeroed XMP uuid box payload ({box.end - box.payload_start - 16} bytes, offsets preserved)"
+            )
+        else:
+            hits = _neutralize_runs(
+                buf, box.payload_start + 16, box.end - box.payload_start - 16, 0x20
+            )
+            if hits:
+                actions.append(f"neutralized AI tokens in XMP uuid box: {', '.join(hits[:8])}")
 
     # 2. Exif / XMP item extents.
     items, extents = _provenance_items(bytes(buf))

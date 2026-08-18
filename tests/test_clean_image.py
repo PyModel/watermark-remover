@@ -16,7 +16,15 @@ SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 import image_meta
-from image_meta import clean_image, inspect_jpeg, strip_jpeg, strip_png
+from image_meta import (
+    clean_image,
+    detect_format,
+    inspect_jpeg,
+    inspect_webp,
+    strip_jpeg,
+    strip_png,
+    strip_webp,
+)
 
 
 def _png_chunk(ctype: bytes, payload: bytes) -> bytes:
@@ -233,3 +241,76 @@ def test_clean_image_roundtrip(tmp_path: Path):
     result = clean_image(src, dest)
     assert dest.is_file()
     assert result["bytes_out"] > 0
+
+
+def _webp_chunk(fourcc: bytes, payload: bytes) -> bytes:
+    padding = b"\x00" if len(payload) & 1 else b""
+    return fourcc + struct.pack("<I", len(payload)) + payload + padding
+
+
+def _minimal_webp(*chunks: tuple[bytes, bytes]) -> bytes:
+    body = b"WEBP" + b"".join(_webp_chunk(fourcc, payload) for fourcc, payload in chunks)
+    return b"RIFF" + struct.pack("<I", len(body)) + body
+
+
+def test_webp_c2pa_and_xmp_are_detected_and_removed(tmp_path: Path):
+    data = _minimal_webp(
+        (b"VP8X", b"\x04" + b"\x00" * 9),
+        (b"VP8 ", b"image-data"),
+        (b"XMP ", b"generator=OpenAI"),
+        (b"C2PA", b"jumb c2pa manifest"),
+    )
+    assert detect_format(data) == "webp"
+    has_c2pa, has_ai, findings = inspect_webp(data)
+    assert has_c2pa and has_ai
+    assert "WebP C2PA chunk" in findings
+
+    cleaned, actions = strip_webp(data)
+    assert any("C2PA" in action for action in actions)
+    assert any("XMP" in action for action in actions)
+    assert struct.unpack("<I", cleaned[4:8])[0] == len(cleaned) - 8
+    assert cleaned[20] & 0x04 == 0
+    assert inspect_webp(cleaned)[0:2] == (False, False)
+
+    src = tmp_path / "marked.webp"
+    dest = tmp_path / "marked.cleaned.webp"
+    src.write_bytes(data)
+    result = clean_image(src, dest)
+    assert result["format"] == "webp"
+    assert not result["still_has_c2pa"]
+    assert not result["still_has_ai_metadata"]
+
+
+def test_webp_image_payload_text_is_not_a_metadata_false_positive():
+    data = _minimal_webp((b"VP8 ", b"ordinary pixels mentioning c2pa"))
+    has_c2pa, has_ai, findings = inspect_webp(data)
+    assert not has_c2pa
+    assert not has_ai
+    assert findings == []
+
+
+def test_truncated_webp_is_reported_and_not_rewritten():
+    data = b"RIFF\x10\x00\x00\x00WEBPC2PA\x10\x00\x00\x00short"
+    has_c2pa, has_ai, findings = inspect_webp(data)
+    assert not has_c2pa
+    assert not has_ai
+    assert any("truncated" in finding for finding in findings)
+    try:
+        strip_webp(data)
+    except ValueError as error:
+        assert "malformed WebP" in str(error)
+    else:
+        raise AssertionError("truncated WebP should not be rewritten")
+
+
+def test_webp_size_mismatch_is_not_rewritten():
+    data = _minimal_webp((b"VP8 ", b"image-data"))
+    malformed = data[:4] + struct.pack("<I", len(data)) + data[8:]
+    assert any("size mismatch" in finding for finding in inspect_webp(malformed)[2])
+
+    try:
+        strip_webp(malformed)
+    except ValueError as error:
+        assert "size mismatch" in str(error)
+    else:
+        raise AssertionError("WebP with a size mismatch should not be rewritten")
