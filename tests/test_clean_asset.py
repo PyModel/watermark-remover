@@ -50,6 +50,7 @@ def test_clean_asset_live_rewrite_stays_silent(
         model="model",
         base_url="https://example.test",
         strength="paraphrase",
+        allow_remote=True,
     )
 
     clean_asset(
@@ -60,7 +61,8 @@ def test_clean_asset_live_rewrite_stays_silent(
 
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err == ""
+    # remote endpoint emits the deny-by-default remote_warning hint on stderr
+    assert "content will leave this machine" in captured.err
 
 
 def test_clean_result_nested_details_are_immutable(tmp_path: Path) -> None:
