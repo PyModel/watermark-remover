@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Strip C2PA and AI-related metadata from PNG/JPEG."""
+"""Strip C2PA and AI-related metadata from PNG/JPEG/WebP/AVIF/HEIF/BMP/GIF/TIFF."""
 
 from __future__ import annotations
 
@@ -15,15 +15,19 @@ from image_meta import (
     clean_image,
     detect_format,
     strip_avif,
+    strip_bmp,
+    strip_gif,
     strip_heic,
     strip_jpeg,
     strip_png,
+    strip_tiff,
+    strip_webp,
 )
 
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("path", type=Path, help="Input PNG or JPEG")
+    p.add_argument("path", type=Path, help="Input PNG/JPEG/WebP/AVIF/HEIF/BMP/GIF/TIFF")
     p.add_argument("-o", "--output", type=Path, help="Output path (default: *.cleaned.*)")
     p.add_argument(
         "--in-place",
@@ -83,6 +87,14 @@ def main() -> int:
                 strip_heic(data, strip_all=strip_all)
             elif fmt == "avif":
                 strip_avif(data, strip_all=strip_all)
+            elif fmt == "webp":
+                strip_webp(data, strip_all_metadata=strip_all)
+            elif fmt == "bmp":
+                strip_bmp(data, strip_all_metadata=strip_all)
+            elif fmt == "gif":
+                strip_gif(data, strip_all_metadata=strip_all)
+            elif fmt == "tiff":
+                strip_tiff(data, strip_all_metadata=strip_all)
             else:
                 raise ValueError(f"unsupported format: {fmt}")
             src = create_backup(args.path)
