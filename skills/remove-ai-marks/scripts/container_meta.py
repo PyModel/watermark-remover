@@ -1621,8 +1621,14 @@ def inspect_pdf(path: Path, data: bytes) -> tuple[bool, bool, list[str], dict]:
     return has_c2pa, has_ai or has_c2pa, findings, {"tools": tools}
 
 
-def clean_pdf_pypdf(path: Path, dest: Path) -> tuple[list[str], dict]:
-    """Clean PDF metadata. exiftool > full-document pypdf clone > unchanged copy."""
+def clean_pdf_pypdf(
+    path: Path, dest: Path, *, skip_exiftool: bool = False
+) -> tuple[list[str], dict]:
+    """Clean PDF metadata. exiftool > full-document pypdf clone > unchanged copy.
+
+    *skip_exiftool* is used by clean_pdf when exiftool already ran and failed,
+    so the fallback does not invoke the same failing command a second time.
+    """
     actions: list[str] = []
     data = path.read_bytes()
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -1630,7 +1636,7 @@ def clean_pdf_pypdf(path: Path, dest: Path) -> tuple[list[str], dict]:
     exiftool = which("exiftool")
 
     # Strategy 1: exiftool (most reliable)
-    if exiftool:
+    if exiftool and not skip_exiftool:
         dest.write_bytes(data)
         try:
             result = external_command.run_command(
@@ -1740,6 +1746,7 @@ def clean_pdf(path: Path, dest: Path) -> tuple[list[str], dict]:
     exiftool = which("exiftool")
     if exiftool:
         atomic_write_bytes(dest, data)
+        exiftool_ok = False
         try:
             r = run_command(
                 [exiftool, "-all=", "-overwrite_original", str(dest)],
@@ -1747,10 +1754,18 @@ def clean_pdf(path: Path, dest: Path) -> tuple[list[str], dict]:
                 output_limit=2 * 1024 * 1024,
             )
             actions.append(f"exiftool -all= (rc={r.returncode})")
-            if r.returncode != 0:
+            exiftool_ok = r.returncode == 0
+            if not exiftool_ok:
                 actions.append(f"exiftool degraded (rc={r.returncode})")
         except Exception as e:
             actions.append(f"exiftool failed: {e}")
+        if not exiftool_ok:
+            # exiftool ran but did not strip; dest still holds the original
+            # bytes. Hand off to the pypdf path rather than publishing
+            # unstripped output under mode "exiftool" with no degraded flag.
+            actions.append("trying pypdf fallback")
+            fallback_actions, fallback_meta = clean_pdf_pypdf(path, dest, skip_exiftool=True)
+            return actions + fallback_actions, fallback_meta
         rewritten = _pdf_structural_rewrite(dest, actions)
         c2patool = which("c2patool")
         if c2patool:

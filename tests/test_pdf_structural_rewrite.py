@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import shutil
 import sys
 from pathlib import Path
@@ -39,7 +40,14 @@ def _ai_pdf() -> bytes:
     return bytes(out)
 
 
-def _fake_tools(monkeypatch, *, qpdf: bool, qpdf_rc: int = 0, qpdf_writes: bool = True):
+def _fake_tools(
+    monkeypatch,
+    *,
+    qpdf: bool,
+    qpdf_rc: int = 0,
+    qpdf_writes: bool = True,
+    exiftool_rc: int = 0,
+):
     seen: list[list[str]] = []
 
     def fake_which(cmd: str):
@@ -55,7 +63,7 @@ def _fake_tools(monkeypatch, *, qpdf: bool, qpdf_rc: int = 0, qpdf_writes: bool 
             if qpdf_writes:
                 Path(cmd[-1]).write_bytes(b"%PDF-1.4\n% rebuilt\n%%EOF\n")
             return SimpleNamespace(returncode=qpdf_rc, stdout=b"", stderr=b"")
-        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        return SimpleNamespace(returncode=exiftool_rc, stdout=b"", stderr=b"")
 
     monkeypatch.setattr(container_meta, "which", fake_which)
     monkeypatch.setattr(container_meta, "run_command", fake_run)
@@ -107,6 +115,46 @@ def test_qpdf_failure_keeps_exiftool_output_and_warns(monkeypatch, tmp_path: Pat
     assert dest.is_file()
     assert any("recoverable" in a for a in actions), actions
     assert not list(tmp_path.glob("*.qpdf-tmp"))
+
+
+def test_exiftool_failure_falls_back_to_pypdf(monkeypatch, tmp_path: Path):
+    # Regression: exiftool present but failing used to publish the original
+    # bytes under mode "exiftool" with no degraded flag and no fallback.
+    src = tmp_path / "in.pdf"
+    dest = tmp_path / "out.pdf"
+    src.write_bytes(_ai_pdf())
+    seen = _fake_tools(monkeypatch, qpdf=True, exiftool_rc=1)
+
+    actions, meta = clean_pdf(src, dest)
+
+    assert meta == {"mode": "pypdf", "degraded": False}
+    assert any("exiftool degraded (rc=1)" in a for a in actions), actions
+    assert any("pypdf" in a for a in actions), actions
+    assert dest.read_bytes().startswith(b"%PDF")
+    # The qpdf structural rewrite belongs to the exiftool path only.
+    assert not any(c[0].endswith("qpdf") for c in seen)
+
+
+def test_exiftool_failure_without_pypdf_copies_degraded(monkeypatch, tmp_path: Path):
+    src = tmp_path / "in.pdf"
+    dest = tmp_path / "out.pdf"
+    original = _ai_pdf()
+    src.write_bytes(original)
+    _fake_tools(monkeypatch, qpdf=True, exiftool_rc=1)
+
+    real_import = builtins.__import__
+
+    def no_pypdf(name, *args, **kwargs):
+        if name == "pypdf":
+            raise ImportError("simulated missing optional dependency")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_pypdf)
+    actions, meta = clean_pdf(src, dest)
+
+    assert meta == {"mode": "copy", "degraded": True}
+    assert dest.read_bytes() == original
+    assert any("copied unchanged" in a for a in actions), actions
 
 
 @pytest.mark.skipif(
