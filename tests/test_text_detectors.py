@@ -251,6 +251,8 @@ def test_markllm_reports_are_json_safe_with_bytes_output(monkeypatch, tmp_path):
 
 def test_markllm_passes_rlimit_as_to_child_at_subprocess_boundary(monkeypatch, tmp_path):
     """WATERMARKS_MARKLLM_RLIMIT_AS must reach the child via --rlimit-as."""
+    if os.name == "nt":
+        pytest.skip("rlimit is POSIX-only; the adapter omits --rlimit-as on Windows")
     upstream = tmp_path / "MarkLLM"
     upstream.mkdir()
     monkeypatch.setenv("WATERMARKS_MARKLLM_RLIMIT_AS", "0x10000000")
