@@ -35,6 +35,7 @@ def main() -> int:
         action="store_true",
         help="Also run zero-LLM statistical and stylometric AI cadence scoring",
     )
+
     def _valid_threshold(raw: str) -> float:
         value = float(raw)
         if math.isnan(value) or math.isinf(value) or not (0.0 <= value <= 1.0):

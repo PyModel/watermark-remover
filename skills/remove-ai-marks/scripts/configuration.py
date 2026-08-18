@@ -117,8 +117,8 @@ def _read_env_file(path: Path) -> dict[str, str]:
     """Read key=value lines from a .env-style file, ignoring comments."""
     result: dict[str, str] = {}
     try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
             if not line or line.startswith("#"):
                 continue
             if "=" not in line:

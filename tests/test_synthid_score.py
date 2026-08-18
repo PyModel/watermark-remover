@@ -31,6 +31,7 @@ def test_score_synthid_cli_unavailable_without_upstream(
         [sys.executable, str(SCORE_SCRIPT), str(dummy)],
         capture_output=True,
         text=True,
+        check=False,
     )
 
     assert r.returncode == 3
@@ -52,7 +53,7 @@ def test_run_synthid_score_unavailable_returns_none(
         "run_command",
         lambda *args, **kwargs: fake_command_result(3, stderr="unavailable"),
     )
-    assert run_synthid_score(Path("x.png"), upstream_dir="/tmp/upstream") is None
+    assert run_synthid_score(Path("x.png"), upstream_dir="/tmp/upstream") is None  # noqa: S108
 
 
 def test_run_synthid_score_parses_json(
@@ -71,12 +72,12 @@ def test_run_synthid_score_parses_json(
         return fake_command_result(0, stdout=json.dumps(payload))
 
     monkeypatch.setattr(image_meta.external_command, "run_command", fake_run)
-    result = run_synthid_score(Path("img.png"), upstream_dir="/tmp/upstream")
+    result = run_synthid_score(Path("img.png"), upstream_dir="/tmp/upstream")  # noqa: S108
 
     assert result == payload
     assert "--json" in captured["cmd"]
     assert "--upstream-dir" in captured["cmd"]
-    assert "/tmp/upstream" in captured["cmd"]
+    assert "/tmp/upstream" in captured["cmd"]  # noqa: S108
 
 
 def test_run_synthid_score_runtime_error_is_reported(
@@ -87,7 +88,7 @@ def test_run_synthid_score_runtime_error_is_reported(
         "run_command",
         lambda *args, **kwargs: fake_command_result(1, stderr="boom"),
     )
-    result = run_synthid_score(Path("img.png"), upstream_dir="/tmp/upstream")
+    result = run_synthid_score(Path("img.png"), upstream_dir="/tmp/upstream")  # noqa: S108
 
     assert result is not None
     assert result.get("available") is False

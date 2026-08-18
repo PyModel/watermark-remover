@@ -186,7 +186,7 @@ _default_logger: Logger | None = None
 
 def get_logger() -> Logger:
     """Return the global logger singleton, initializing it lazily."""
-    global _default_logger
+    global _default_logger  # noqa: PLW0603
     if _default_logger is None:
         _default_logger = init_logger()
     return _default_logger

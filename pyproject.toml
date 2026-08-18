@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "watermark-remover"
-version = "0.3.0"
+version = "0.4.0"
 description = "Pure-Python AI watermark remover for text, images, and documents"
 requires-python = ">=3.10"
 license = {text = "MIT"}
@@ -48,6 +48,9 @@ all = [
 
 [project.scripts]
 wm = "skills.remove_ai_marks.scripts.clean_file:main"
+wm-serve = "skills.remove_ai_marks.scripts.server:main"
+wm-audit-dir = "skills.remove_ai_marks.scripts.audit_dir:main"
+wm-audit-site = "skills.remove_ai_marks.scripts.audit_website:main"
 
 [tool.setuptools]
 # The on-disk directory uses a hyphen (skills/remove-ai-marks) while the
@@ -55,14 +58,33 @@ wm = "skills.remove_ai_marks.scripts.clean_file:main"
 package-dir = {"skills.remove_ai_marks" = "skills/remove-ai-marks"}
 packages = ["skills.remove_ai_marks", "skills.remove_ai_marks.scripts"]
 
+[tool.setuptools.package-data]
+# Ship the skill documentation and bootstrap assets so a wheel install is
+# self-sufficient for the CLI surfaces that read them at runtime.
+"skills.remove_ai_marks" = ["SKILL.md", "references/*.md"]
+"skills.remove_ai_marks.scripts" = ["*.txt", "setup_*.sh", "setup_*.ps1"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"
 extend-exclude = ["research", ".venv", "__pycache__", ".pytest_cache"]
 
 [tool.ruff.lint]
-select = ["E4", "E7", "E9", "F", "I", "B", "SIM", "UP", "RUF"]
-ignore = ["E501", "RUF001", "RUF002", "RUF003"]
+# E4/E7/E9: pycodestyle + pyflakes core; I: import sorting; UP: pyupgrade;
+# B: bugbear; SIM: simplify; RUF: ruff-specific; PLW: pylint warnings;
+# S: bandit security checks (port parity with the upstream reference).
+select = ["E4", "E7", "E9", "F", "I", "B", "SIM", "UP", "RUF", "PLW", "S"]
+ignore = [
+    "E501",
+    "RUF001",
+    "RUF002",
+    "RUF003",
+    # S101: asserts are idiomatic in this test suite.
+    "S101",
+    # S603: subprocess args are shell-free by construction (external_command
+    # runs argv directly; no shell=True anywhere in the codebase).
+    "S603",
+]
 
 [tool.ruff.lint.per-file-ignores]
 "demo.py" = ["E402"]

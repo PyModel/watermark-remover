@@ -255,7 +255,7 @@ _bootstrapped = False
 
 def get_backends() -> list[InpaintBackend]:
     """Return the current backend registry (lazy-initialised)."""
-    global _bootstrapped
+    global _bootstrapped  # noqa: PLW0603
     if not _bootstrapped:
         _bootstrap_registry()
         _bootstrapped = True

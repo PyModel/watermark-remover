@@ -193,6 +193,7 @@ def test_clean_image_preserves_preexisting_backup_on_rejection(tmp_path: Path):
         [sys.executable, str(script), str(src), "--in-place"],
         capture_output=True,
         text=True,
+        check=False,
     )
     assert result.returncode == 1
     assert backup.read_bytes() == b"old backup"
@@ -210,6 +211,7 @@ def test_clean_image_in_place_rejects_backup_symlink(tmp_path: Path):
         [sys.executable, str(script), str(src), "--in-place"],
         capture_output=True,
         text=True,
+        check=False,
     )
     assert result.returncode == 1
     assert outside.read_bytes() == b"preserve"
@@ -228,6 +230,7 @@ def test_clean_image_json_preserves_residual_exit_code(tmp_path: Path):
         [sys.executable, str(script), str(src), "--json"],
         capture_output=True,
         text=True,
+        check=False,
     )
     assert result.returncode == 1
     report = json.loads(result.stdout)

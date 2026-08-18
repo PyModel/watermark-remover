@@ -79,7 +79,7 @@ def resolve_device(raw: str | None) -> str:
         # Never auto-select mps: SynthID/KGW build torch.Generator(device=...),
         # which supports only cpu/cuda and raises RuntimeError on 'mps' (Apple
         # Silicon). Fall through to cpu. Pass --device mps explicitly to override.
-    except Exception:
+    except Exception:  # noqa: S110
         pass
     return "cpu"
 

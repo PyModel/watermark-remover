@@ -125,6 +125,7 @@ class TestCli:
             ],
             capture_output=True,
             text=True,
+            check=False,
         )
         assert proc.returncode == 0, proc.stderr
         assert dest.is_file()
@@ -145,6 +146,7 @@ class TestCli:
             ],
             capture_output=True,
             text=True,
+            check=False,
         )
         assert proc.returncode == 0, proc.stderr
         assert dest.is_file()

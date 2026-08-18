@@ -221,7 +221,7 @@ def _inspect_embedded_data_uris(text: str) -> tuple[bool, bool, list[str]]:
                 data = base64.b64decode(raw_b64)
             else:
                 data = urllib.parse.unquote_to_bytes(payload)
-        except Exception:
+        except Exception:  # noqa: S112 — skip malformed payloads, keep scanning
             continue
 
         if not data:
@@ -1035,7 +1035,7 @@ def _scrub_ooxml_zip(
                         cleaned_bytes, sub_actions = strip_tiff(raw, strip_all_metadata=True)
                     elif name.lower().endswith(".svg") or raw.lstrip().startswith(b"<"):
                         cleaned_bytes, sub_actions = clean_svg(raw)
-                except Exception:
+                except Exception:  # noqa: S110
                     pass
                 if any("drop" in a.lower() for a in sub_actions) and cleaned_bytes != raw:
                     actions.append(f"clean embedded media in {name} ({', '.join(sub_actions[:2])})")
@@ -1504,7 +1504,7 @@ def clean_epub(data: bytes, *, also_layer_a_text: bool = True) -> tuple[bytes, l
                         cleaned, sub_actions = strip_tiff(raw, strip_all_metadata=True)
                     elif low.endswith(".svg") or raw.lstrip().startswith(b"<"):
                         cleaned, sub_actions = clean_svg(raw)
-                except Exception:
+                except Exception:  # noqa: S110
                     pass
                 if any("drop" in a.lower() for a in sub_actions) and cleaned != raw:
                     actions.append(f"clean embedded media in {name} ({', '.join(sub_actions[:2])})")

@@ -62,7 +62,7 @@ def perturb_text(
         raise ValueError(f"unknown mode: {mode}")
     if not 0.0 <= strength <= 1.0:
         raise ValueError("strength must be a finite number in [0, 1]")
-    rng = random.Random(seed)
+    rng = random.Random(seed)  # noqa: S311
     out: list[str] = []
     changed = 0
 

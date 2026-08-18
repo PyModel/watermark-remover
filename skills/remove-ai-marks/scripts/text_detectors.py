@@ -101,7 +101,7 @@ def _verdict_is_watermarked(verdict: str | None) -> bool | None:
     if not verdict:
         return None
     low = verdict.strip().lower()
-    if re.search(r'\b(?:unlikely|no|not)\b', low):
+    if re.search(r"\b(?:unlikely|no|not)\b", low):
         return False
     return any(marker in low for marker in _WATERMARKED_VERDICTS)
 
@@ -166,9 +166,7 @@ def parse_gemini_detect_response(data: dict[str, Any]) -> dict[str, Any]:
         is_watermarked = score >= 0.5
 
     if verdict is None and score is None:
-        raise DetectorError(
-            "unexpected Gemini response (no verdict or score)"
-        )
+        raise DetectorError("unexpected Gemini response (no verdict or score)")
 
     raw = {
         key: candidate[key]
@@ -357,7 +355,9 @@ class MarkLLMTextDetector:
         # Persist text to a temp file for the child process.
         tmp = None
         try:
-            with tempfile.NamedTemporaryFile("w", suffix=".txt", encoding="utf-8", delete=False) as f:
+            with tempfile.NamedTemporaryFile(
+                "w", suffix=".txt", encoding="utf-8", delete=False
+            ) as f:
                 tmp = f.name
                 f.write(text)
 

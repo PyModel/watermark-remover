@@ -468,14 +468,14 @@ def _synthid_score_http(
     if urlparse(base_url).scheme not in ("http", "https"):
         return {"available": False, "error": f"refusing non-http(s) scorer endpoint: {base_url}"}
     # S310: URL scheme is restricted to http/https just above.
-    req = urllib.request.Request(
+    req = urllib.request.Request(  # noqa: S310
         base_url.rstrip("/") + "/score",
         data=body,
         headers=headers,
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
             payload = json.loads(resp.read().decode("utf-8"))
     except (
         urllib.error.HTTPError,

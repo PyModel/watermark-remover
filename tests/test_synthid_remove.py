@@ -102,6 +102,7 @@ class TestEmbedDetectRemove:
             capture_output=True,
             text=True,
             cwd=str(SCRIPTS),
+            check=False,
         )
         assert proc.returncode == 0, proc.stderr
         assert "cv2" not in proc.stdout
