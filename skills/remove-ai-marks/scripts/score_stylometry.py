@@ -34,6 +34,7 @@ from common import (
 DEFAULT_THRESHOLD = 0.65
 MIN_SAMPLE_WORDS = 30
 FULL_WEIGHT_WORDS = 100
+MAX_SCAN_CHARS = 2_000_000
 
 # High-frequency formulaic transition markers, hedging verbs, and structural
 # boilerplate commonly overrepresented in AI-generated text across frontier LLMs.
@@ -244,13 +245,20 @@ def scan_ai_phrases(text: str) -> list[MarkerMatch]:
 
 def score_text_stylometry(text: str, path: str = "<text>") -> StylometryReport:
     """Run full multi-dimensional stylometric analysis and return a structured report."""
+    notes: list[str] = []
+    if len(text) > MAX_SCAN_CHARS:
+        notes.append(
+            f"Input length {len(text)} exceeds MAX_SCAN_CHARS ({MAX_SCAN_CHARS}); "
+            f"analysis truncated to first {MAX_SCAN_CHARS} characters"
+        )
+        text = text[:MAX_SCAN_CHARS]
+
     words = extract_words(text)
     word_count = len(words)
     sentences = extract_sentences(text)
     sentence_count = len(sentences)
 
     findings: list[str] = []
-    notes: list[str] = []
 
     # 1. Length Guard
     if word_count < MIN_SAMPLE_WORDS:

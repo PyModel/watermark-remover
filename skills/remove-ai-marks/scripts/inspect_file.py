@@ -15,7 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from asset_kind import SUPPORTED_EXTENSIONS, classify_asset
 from batch_inputs import select_inputs
-from common import MAX_INPUT_BYTES, emit_json, eprint, read_text_input
+from common import EXIT_PARTIAL, MAX_INPUT_BYTES, emit_json, eprint, read_text_input
 from container_meta import inspect_container
 from image_meta import inspect_image
 from inspect_soft_binding import inspect_soft_binding
@@ -51,6 +51,10 @@ def main() -> int:
         emit_json({"total": len(results), "results": results} if batch else results[0])
     elif batch:
         eprint(f"inspected {len(results)} file(s)")
+    # An incomplete audit is the more important CI signal: any input that was
+    # not scanned (unrecognized or refused) outranks both clean and suspicious.
+    if any(r.get("unscanned") for r in results):
+        return EXIT_PARTIAL
     return 0 if all(not r.get("suspicious", False) for r in results) else 1
 
 
@@ -61,6 +65,7 @@ def _inspect_single(path: Path, args) -> dict:
             "path": str(path),
             "note": f"input larger than {MAX_INPUT_BYTES} bytes",
             "suspicious": False,
+            "unscanned": True,
         }
     kind = classify_asset(path, forced_kind=args.force_type)
     if kind == "text":
@@ -111,6 +116,7 @@ def _inspect_single(path: Path, args) -> dict:
             "path": str(path),
             "note": note,
             "suspicious": False,
+            "unscanned": True,
         }
 
     report = inspect_container(path)

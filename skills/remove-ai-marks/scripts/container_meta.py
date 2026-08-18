@@ -198,6 +198,19 @@ RE_DATA_IMAGE_URI = re.compile(
 )
 
 
+def _media_strip_succeeded(sub_actions: list[str], cleaned: bytes, raw: bytes) -> bool:
+    """True when a media stripper changed bytes while reporting a removal.
+
+    Most raster strippers "drop" chunks/segments; heif_meta neutralizes in
+    place ("neutralized"/"zeroed") to preserve offsets, so accept both
+    vocabularies. The no-op case always returns the input bytes unchanged.
+    """
+    if cleaned == raw:
+        return False
+    verbs = ("drop", "neutraliz", "zero")
+    return any(verb in action.lower() for action in sub_actions for verb in verbs)
+
+
 def _inspect_embedded_data_uris(text: str) -> tuple[bool, bool, list[str]]:
     has_c2pa = False
     has_ai = False
@@ -236,7 +249,7 @@ def _inspect_embedded_data_uris(text: str) -> tuple[bool, bool, list[str]]:
             sub_c2pa, sub_ai, sub_findings = inspect_webp(data)
         elif fmt == "avif":
             sub_c2pa, sub_ai, sub_findings = inspect_avif(data)
-        elif fmt == "heic":
+        elif fmt == "heif":
             sub_c2pa, sub_ai, sub_findings = inspect_heic(data)
         elif "svg" in mime or data.lstrip().startswith(b"<"):
             sub_c2pa, sub_ai, sub_findings, _ = inspect_svg(data)
@@ -296,14 +309,14 @@ def _clean_embedded_data_uris(
                 cleaned_bytes, sub_actions = strip_webp(data, strip_all_metadata=strip_all_metadata)
             elif fmt == "avif":
                 cleaned_bytes, sub_actions = strip_avif(data, strip_all=strip_all_metadata)
-            elif fmt == "heic":
+            elif fmt == "heif":
                 cleaned_bytes, sub_actions = strip_heic(data, strip_all=strip_all_metadata)
             elif "svg" in mime.lower() or data.lstrip().startswith(b"<"):
                 cleaned_bytes, sub_actions = clean_svg(data)
         except Exception:
             return full_match
 
-        if not any("drop" in a.lower() for a in sub_actions) or cleaned_bytes == data:
+        if not _media_strip_succeeded(sub_actions, cleaned_bytes, data):
             return full_match
 
         actions.append(f"cleaned embedded data:image/{mime} ({', '.join(sub_actions[:2])})")
@@ -820,7 +833,7 @@ def _inspect_ooxml_zip(data: bytes, fmt: str) -> tuple[bool, bool, list[str], di
                         sub_c2pa, sub_ai, sub_findings = inspect_webp(raw)
                     elif img_fmt == "avif":
                         sub_c2pa, sub_ai, sub_findings = inspect_avif(raw)
-                    elif img_fmt == "heic":
+                    elif img_fmt == "heif":
                         sub_c2pa, sub_ai, sub_findings = inspect_heic(raw)
                     elif img_fmt == "gif":
                         sub_c2pa, sub_ai, sub_findings = inspect_gif(raw)
@@ -1025,7 +1038,7 @@ def _scrub_ooxml_zip(
                         cleaned_bytes, sub_actions = strip_webp(raw, strip_all_metadata=True)
                     elif img_fmt == "avif":
                         cleaned_bytes, sub_actions = strip_avif(raw, strip_all=True)
-                    elif img_fmt == "heic":
+                    elif img_fmt == "heif":
                         cleaned_bytes, sub_actions = strip_heic(raw, strip_all=True)
                     elif img_fmt == "gif":
                         cleaned_bytes, sub_actions = strip_gif(raw, strip_all_metadata=True)
@@ -1037,7 +1050,7 @@ def _scrub_ooxml_zip(
                         cleaned_bytes, sub_actions = clean_svg(raw)
                 except Exception:  # noqa: S110
                     pass
-                if any("drop" in a.lower() for a in sub_actions) and cleaned_bytes != raw:
+                if _media_strip_succeeded(sub_actions, cleaned_bytes, raw):
                     actions.append(f"clean embedded media in {name} ({', '.join(sub_actions[:2])})")
                     raw = cleaned_bytes
                 kept.append((info, raw))
@@ -1494,7 +1507,7 @@ def clean_epub(data: bytes, *, also_layer_a_text: bool = True) -> tuple[bytes, l
                         cleaned, sub_actions = strip_webp(raw, strip_all_metadata=True)
                     elif img_fmt == "avif":
                         cleaned, sub_actions = strip_avif(raw, strip_all=True)
-                    elif img_fmt == "heic":
+                    elif img_fmt == "heif":
                         cleaned, sub_actions = strip_heic(raw, strip_all=True)
                     elif img_fmt == "gif":
                         cleaned, sub_actions = strip_gif(raw, strip_all_metadata=True)
@@ -1506,7 +1519,7 @@ def clean_epub(data: bytes, *, also_layer_a_text: bool = True) -> tuple[bytes, l
                         cleaned, sub_actions = clean_svg(raw)
                 except Exception:  # noqa: S110
                     pass
-                if any("drop" in a.lower() for a in sub_actions) and cleaned != raw:
+                if _media_strip_succeeded(sub_actions, cleaned, raw):
                     actions.append(f"clean embedded media in {name} ({', '.join(sub_actions[:2])})")
                     raw = cleaned
                 kept.append((info, raw))

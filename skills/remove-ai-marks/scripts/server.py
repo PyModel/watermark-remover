@@ -241,7 +241,9 @@ _OPENAPI_PATHS: dict[str, dict[str, Any]] = {
                     type="object",
                     properties={
                         "ok": _schema(type="boolean"),
-                        "kind": _schema(type="string", enum=["text", "image", "container"]),
+                        "kind": _schema(
+                            type="string", enum=["text", "image", "container", "unknown"]
+                        ),
                         "suspicious": _schema(type="boolean"),
                         "report": _schema(type="object"),
                     },
@@ -283,8 +285,11 @@ _OPENAPI_PATHS: dict[str, dict[str, Any]] = {
                     type="object",
                     properties={
                         "ok": _schema(type="boolean"),
-                        "kind": _schema(type="string", enum=["text", "image", "container"]),
+                        "kind": _schema(
+                            type="string", enum=["text", "image", "container", "unknown"]
+                        ),
                         "detections": _schema(type="array", items=_schema(type="object")),
+                        "report": _schema(type="object"),
                     },
                 )
             },
@@ -531,6 +536,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_detect(self, data: bytes, name: str) -> None:
         kind = classify_bytes(data, Path(name).suffix)
+        if kind == "unknown":
+            self._respond(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "kind": "unknown",
+                    "detections": [],
+                    "report": {
+                        "note": "unrecognized format; use a filename with a known extension",
+                    },
+                },
+            )
+            return
         with tempfile.TemporaryDirectory(prefix="wm-detect-") as tmp:
             path = _tmp_path(Path(tmp), name or "input")
             path.write_bytes(data)

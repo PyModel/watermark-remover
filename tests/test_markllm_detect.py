@@ -8,6 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
@@ -361,3 +363,62 @@ def test_cli_watermark_runtime_error(tmp_path: Path):
     )
     assert r.returncode == 1
     assert "boom" in (r.stderr or "")
+
+
+def test_cli_watermark_json_stdout_stays_pure_without_output(tmp_path: Path):
+    """--json must never mix generated text with the JSON payload on stdout.
+
+    With no -o, the watermarked sample previously went to stdout and made
+    json.loads() fail; it must be routed to stderr instead.
+    """
+    upstream = _make_fake_upstream(tmp_path)
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("write about capybaras")
+    r = _run_adapter(
+        "watermark",
+        str(prompt),
+        "--scheme",
+        "kgw",
+        "--upstream-dir",
+        str(upstream),
+        "--device",
+        "cpu",
+        "--json",
+    )
+    assert r.returncode == 0, r.stderr
+    payload = json.loads(r.stdout)
+    assert payload["available"] is True
+    assert payload["watermarked_output"] == "-"
+    assert "WATERMARKED SAMPLE" in (r.stderr or "")
+    assert "WATERMARKED SAMPLE" not in (r.stdout or "")
+
+
+def test_cli_detect_applies_rlimit_as_in_child(tmp_path: Path):
+    """--rlimit-as must cap the child's address space before heavy imports."""
+    if os.name == "nt":
+        pytest.skip("RLIMIT_AS is POSIX-only")
+    upstream = _make_fake_upstream(tmp_path)
+    (upstream / "transformers" / "__init__.py").write_text(
+        FAKE_TRANSFORMERS + "import resource, sys\n"
+        "print('RLIMIT_AS=' + str(resource.getrlimit(resource.RLIMIT_AS)[0]), file=sys.stderr)\n"
+    )
+    f = tmp_path / "t.txt"
+    f.write_text("hello world")
+    # 512 GiB: high enough to clear the macOS arm64 dyld VM reservation, low
+    # enough to prove the cap is applied (the default soft limit is unlimited).
+    limit = 512 * 2**30
+    r = _run_adapter(
+        "detect",
+        str(f),
+        "--scheme",
+        "kgw",
+        "--upstream-dir",
+        str(upstream),
+        "--device",
+        "cpu",
+        "--json",
+        "--rlimit-as",
+        str(limit),
+    )
+    assert r.returncode == 0, r.stderr
+    assert f"RLIMIT_AS={limit}" in (r.stderr or "")

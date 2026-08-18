@@ -226,7 +226,11 @@ def _cmd_watermark(args: argparse.Namespace, upstream: Path, alg: str) -> int:
 
     wm_out = "-" if args.watermarked_output is None else args.watermarked_output
     if wm_out == "-":
-        sys.stdout.write(watermarked)
+        # Never mix generated text with the --json payload on stdout: a batch
+        # consumer json.loads()ing stdout would choke on the sample. In JSON
+        # mode the sample goes to stderr; non-JSON mode keeps the CLI contract
+        # of writing the sample to stdout.
+        (sys.stderr if args.json else sys.stdout).write(watermarked)
     else:
         atomic_write_text(Path(wm_out), watermarked)
     if unwatermarked is not None:
@@ -265,6 +269,12 @@ def _add_common(p: argparse.ArgumentParser) -> None:
         help="MarkLLM checkout root (default: $MARKLLM_DIR)",
     )
     p.add_argument(
+        "--rlimit-as",
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    p.add_argument(
         "--scheme",
         required=True,
         choices=sorted(SCHEMES),
@@ -296,6 +306,36 @@ def _add_common(p: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Process input even when it looks like a binary container",
     )
+
+
+def _apply_rlimit_as(bytes_: int | None) -> None:
+    """Cap this process's address space before any heavy import (POSIX only).
+
+    Runs as the first thing the child does, so the limit is in force for the
+    whole MarkLLM harness (torch, transformers, ...) — equivalent to a
+    preexec_fn-set rlimit, applied at the subprocess boundary. The adapter
+    (text_detectors.MarkLLMTextDetector) passes --rlimit-as when
+    WATERMARKS_MARKLLM_RLIMIT_AS is configured. Failures degrade silently,
+    matching common.subprocess_rlimits().
+    """
+    if bytes_ is None:
+        return
+    try:
+        import resource
+    except ImportError:
+        return
+    try:
+        resource.setrlimit(resource.RLIMIT_AS, (bytes_, bytes_))
+    except ValueError:
+        # macOS rejects lowering the hard limit while the current soft limit
+        # is still RLIM_INFINITY; lower the soft limit first, then the hard.
+        try:
+            resource.setrlimit(resource.RLIMIT_AS, (bytes_, resource.RLIM_INFINITY))
+            resource.setrlimit(resource.RLIMIT_AS, (bytes_, bytes_))
+        except (OSError, ValueError):
+            pass
+    except OSError:
+        pass
 
 
 def main() -> int:
@@ -330,6 +370,7 @@ def main() -> int:
     wm.set_defaults(handler=_cmd_watermark)
 
     args = p.parse_args()
+    _apply_rlimit_as(args.rlimit_as)
 
     raw_upstream = args.upstream_dir or os.environ.get("MARKLLM_DIR")
     upstream = resolve_upstream(str(raw_upstream) if raw_upstream else None)

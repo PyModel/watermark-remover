@@ -393,7 +393,10 @@ def _call_openai_compatible(
         "messages": [{"role": "user", "content": prompt}],
         "temperature": temperature,
     }
-    if reasoning_effort:
+    # "off" is a documented sentinel that omits the parameter entirely
+    # (generic OpenAI-compatible servers may reject it); every other value,
+    # including "none", is a real reasoning-effort request and is sent.
+    if reasoning_effort and reasoning_effort != "off":
         payload["reasoning_effort"] = reasoning_effort
     if disable_thinking:
         # Supported by Qwen/Transformers-compatible servers; opt-in so generic

@@ -525,6 +525,32 @@ def test_openai_compatible_sends_reasoning_effort_when_set():
         server.shutdown()
 
 
+def test_openai_compatible_omits_reasoning_effort_when_off(monkeypatch):
+    """'off' disables the parameter entirely; enabled values are still sent."""
+    captured: dict = {}
+
+    def fake_request_json(base_url, route, payload, **kwargs):
+        captured["payload"] = payload
+        return {"choices": [{"message": {"content": "rewritten"}}]}
+
+    monkeypatch.setattr(rewrite_text.layer_b_http, "request_json", fake_request_json)
+
+    rewrite_text._call_openai_compatible(
+        "http://127.0.0.1:9", "m", "hello", "key", 5.0, reasoning_effort="off"
+    )
+    assert "reasoning_effort" not in captured["payload"]
+
+    rewrite_text._call_openai_compatible(
+        "http://127.0.0.1:9", "m", "hello", "key", 5.0, reasoning_effort="low"
+    )
+    assert captured["payload"]["reasoning_effort"] == "low"
+
+    rewrite_text._call_openai_compatible(
+        "http://127.0.0.1:9", "m", "hello", "key", 5.0, reasoning_effort=None
+    )
+    assert "reasoning_effort" not in captured["payload"]
+
+
 def test_rewrite_denies_remote_host_without_opt_in():
     with pytest.raises(LayerBHTTPError, match="endpoint"):
         rewrite("secret text", _http_plan("http://example.com:11434"))

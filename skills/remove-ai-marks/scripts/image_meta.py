@@ -28,6 +28,11 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 
 OPTIONAL_TOOL_OUTPUT_LIMIT = 2 * 1024 * 1024
 SYNTHID_OUTPUT_LIMIT = 2 * 1024 * 1024
+#: Hard cap on the decompressed size of a PNG zTXt/iTXt text chunk.
+#: Compressed chunks that would expand past this are treated as
+#: decompression bombs: fail closed (no text entry) rather than allocating
+#: unbounded output.
+MAX_PNG_TEXT_BYTES = 8 * 1024 * 1024
 
 PNG_SIG = b"\x89PNG\r\n\x1a\n"
 JPEG_SOI = b"\xff\xd8"
@@ -178,6 +183,34 @@ def _contains_any(blob: bytes, needles: tuple[bytes, ...]) -> list[str]:
     return found
 
 
+def _zlib_decompress_bounded(data: bytes, max_bytes: int = MAX_PNG_TEXT_BYTES) -> bytes | None:
+    """Decompress a zlib stream with an explicit output cap.
+
+    Returns the decompressed bytes when the stream is valid and its output
+    fits in *max_bytes*; returns None for corrupt/truncated streams and when
+    the output would exceed the cap. None means "no usable text": callers
+    fail closed (skip the chunk) instead of allocating unbounded memory.
+    """
+    decompressor = zlib.decompressobj()
+    out = bytearray()
+    remaining = data
+    while True:
+        budget = max_bytes + 1 - len(out)
+        if budget <= 0:
+            return None
+        try:
+            out += decompressor.decompress(remaining, budget)
+        except zlib.error:
+            return None
+        if len(out) > max_bytes:
+            return None
+        if decompressor.eof:
+            return bytes(out)
+        if not decompressor.unconsumed_tail:
+            return None
+        remaining = decompressor.unconsumed_tail
+
+
 def _png_text_entries(payload: bytes, ctype: bytes) -> list[tuple[str, str]]:
     """Parse a PNG text-chunk payload into (key, value) pairs.
 
@@ -199,9 +232,8 @@ def _png_text_entries(payload: bytes, ctype: bytes) -> list[tuple[str, str]]:
         key, sep, rest = payload.partition(b"\x00")
         if not sep or len(rest) < 2:
             return entries
-        try:
-            text = zlib.decompress(rest[1:])
-        except zlib.error:
+        text = _zlib_decompress_bounded(rest[1:])
+        if text is None:
             return entries
         entries.append(
             (
@@ -222,9 +254,8 @@ def _png_text_entries(payload: bytes, ctype: bytes) -> list[tuple[str, str]]:
         if not sep3:
             return entries
         if comp_flag == 1:
-            try:
-                text = zlib.decompress(text)
-            except zlib.error:
+            text = _zlib_decompress_bounded(text)
+            if text is None:
                 return entries
         entries.append(
             (
@@ -568,6 +599,7 @@ def inspect_image(
         has_c2pa, has_ai, findings = inspect_tiff(data)
     else:
         has_c2pa, has_ai, findings = False, False, ["unsupported format"]
+        notes.append(f"format '{fmt}' is not inspected")
 
     tools = run_optional_tools(path)
     # Elevate flags from tools

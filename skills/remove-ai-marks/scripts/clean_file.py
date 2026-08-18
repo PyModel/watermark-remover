@@ -244,6 +244,14 @@ def main() -> int:
             eprint(f"error on {error.path}: {error}")
         return ExitCode.RESIDUAL_OR_ERROR.value
     except ValueError as error:
+        # Preflight refusals (unrecognized format, binary-as-text, oversized
+        # input, output collisions) must not vanish as a bare exit code when
+        # --json is requested: emit the same structured shape a batch consumer
+        # can parse, while keeping the human message and the usage-error exit.
+        if args.json:
+            entry = {"error": str(error), "exit_code": ExitCode.USAGE_ERROR.value}
+            payload = {"total": 1, "results": [entry]} if batch else entry
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
         eprint(f"invalid output selection: {error}")
         return ExitCode.USAGE_ERROR.value
     if args.dry_run:
@@ -329,12 +337,22 @@ def _plan_work(
         if kind == "text" and not args.force_text:
             with item.path.open("rb") as source:
                 head = source.read(8192)
-            guard_binary(
-                head,
-                str(item.path),
-                allow_binary=args.force_text,
-                advice=ROUTER_ADVICE,
-            )
+            try:
+                guard_binary(
+                    head,
+                    str(item.path),
+                    allow_binary=args.force_text,
+                    advice=ROUTER_ADVICE,
+                )
+            except SystemExit as error:
+                # guard_binary raises SystemExit(2) directly, which would blow
+                # past the preflight error handling below and swallow the
+                # structured JSON report in --json mode. Convert to ValueError
+                # so main() reports it like every other preflight refusal while
+                # preserving the usage-error exit mapping.
+                raise ValueError(
+                    f"refusing to treat {item.path} as text: binary content"
+                ) from error
         try:
             plan = _build_clean_plan(args, dest, kind)
         except Exception as error:
