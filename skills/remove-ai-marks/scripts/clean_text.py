@@ -11,6 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from common import (
+    TEXT_TOOL_ADVICE,
     cleaned_path,
     create_backup,
     eprint,
@@ -41,6 +42,11 @@ def main() -> int:
         action="store_true",
         help="Aggressive: also strip contextual ZWJ/ZWNJ, variation selectors, math and balanced bidi controls",
     )
+    p.add_argument(
+        "--force-text",
+        action="store_true",
+        help="Treat binary-looking input as text anyway",
+    )
     p.add_argument("--stats", action="store_true", help="Print stats JSON to stderr")
     p.add_argument(
         "--in-place",
@@ -58,7 +64,7 @@ def main() -> int:
             eprint(f"not a regular file: {source}")
             return 2
 
-    text = read_text_input(args.path)
+    text = read_text_input(args.path, allow_binary=args.force_text, advice=TEXT_TOOL_ADVICE)
     cleaned, stats = clean_text(
         text,
         nfkc=args.nfkc,

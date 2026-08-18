@@ -10,7 +10,7 @@ from pathlib import Path
 # Allow running as script from any cwd
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from common import emit_json, read_text_input
+from common import TEXT_TOOL_ADVICE, emit_json, read_text_input
 from text_unicode import human_report, inspect_text
 
 
@@ -23,9 +23,14 @@ def main() -> int:
         action="store_true",
         help="Also flag Latin confusable / fullwidth lookalikes",
     )
+    p.add_argument(
+        "--force-text",
+        action="store_true",
+        help="Treat binary-looking input as text anyway",
+    )
     args = p.parse_args()
 
-    text = read_text_input(args.path)
+    text = read_text_input(args.path, allow_binary=args.force_text, advice=TEXT_TOOL_ADVICE)
     report = inspect_text(text, aggressive=args.aggressive)
     if args.json:
         emit_json(report.to_dict())

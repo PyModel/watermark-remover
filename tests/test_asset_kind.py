@@ -35,7 +35,7 @@ def _ftyp(brand: bytes) -> bytes:
         ("unknown-avif.blob", _ftyp(b"avif"), "image"),
         ("unknown-svg.blob", b'<svg xmlns="http://www.w3.org/2000/svg"></svg>', "container"),
         ("unknown.data", b"%PDF-1.7\n", "container"),
-        ("unknown.payload", b"plain text", "text"),
+        ("unknown.payload", b"plain text", "unknown"),
     ],
 )
 def test_classify_asset_preserves_override_extension_sniffing_order(
@@ -90,4 +90,4 @@ def test_classify_asset_avoids_unbounded_read_for_unknown_suffix(tmp_path: Path,
 
     monkeypatch.setattr(Path, "read_bytes", reject_unbounded_read)
 
-    assert _routing_module().classify_asset(path) == "text"
+    assert _routing_module().classify_asset(path) == "unknown"
