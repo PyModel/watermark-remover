@@ -3,10 +3,10 @@ name: remove-ai-marks
 description: >
   Inspect and clean multi-vendor AI provenance signals: hidden Unicode (Layer A),
   statistical text watermarks via rewrite/TSAPA (Layer B), visible image marks via
-  mask+dilation+inpainting, and C2PA/EXIF/XMP/container metadata on PNG/JPEG/HEIC/
-  HEIF/AVIF/SVG/PDF/DOCX/ODT/HTML/Markdown. Detects (does not remove) C2PA soft-
-  binding risk. Use for watermark/C2PA/Content Credentials/AI metadata/hidden
-  Unicode requests or /remove-ai-marks.
+  mask+dilation+inpainting, and C2PA/EXIF/XMP/container metadata on PNG/JPEG/WebP/
+  BMP/GIF/TIFF/HEIC/HEIF/AVIF/SVG/PDF/DOCX/XLSX/PPTX/EPUB/ODT/HTML/Markdown.
+  Detects (does not remove) C2PA soft-binding risk. Use for watermark/C2PA/
+  Content Credentials/AI metadata/hidden Unicode requests or /remove-ai-marks.
 ---
 
 # Remove AI marks
@@ -20,6 +20,8 @@ Read when needed:
 - `references/removal-matrix.md`
 - `references/ethics.md`
 - `references/how-claude-marks.md`
+- `references/markdiffusion.md` — optional MarkDiffusion image harness
+- `references/service-mode.md` — optional HTTP thin-client pattern
 
 Resolve scripts from this skill directory:
 
@@ -35,10 +37,11 @@ SCRIPTS="<skill_dir>/scripts"
 | --- | --- |
 | Pasted text / `.txt` / code | Layer A; offer Layer B for prose |
 | Markdown / HTML | container metadata + Layer A; offer Layer B for prose |
-| PNG / JPEG | image metadata; visible pipeline only when a mask/localizer is available |
+| PNG / JPEG / WebP / BMP / GIF / TIFF | image metadata; visible pipeline only when a mask/localizer is available |
 | HEIC / HEIF / AVIF | ISO-BMFF metadata neutralization |
-| SVG / PDF / DOCX / ODT | container cleaner |
+| SVG / PDF / DOCX / XLSX / PPTX / EPUB / ODT | container cleaner |
 | Directory / mixed files | unified batch CLI |
+| Directory / website audit | `wm-audit-dir` / `wm-audit-site` (JSON/SARIF) |
 
 ### 2. Inspect first
 
@@ -71,7 +74,7 @@ python3 "$SCRIPTS/clean_text.py" INPUT -o OUTPUT --stats
 # aggressive: --strip-semantic-format --aggressive-homoglyphs --nfkc
 ```
 
-Optional tools are auto-detected. PDF order: exiftool → full-document pypdf clone → byte-exact unchanged copy with residual warning. Encrypted PDFs are never regex-edited. DOCX customXml is inspected but preserved because it may contain application data.
+Optional tools are auto-detected. PDF order: exiftool → qpdf structural rewrite (when present) → full-document pypdf clone → byte-exact unchanged copy with residual warning. Encrypted PDFs are never regex-edited. DOCX customXml parts are dropped and dangling relationships/Content-Type overrides pruned, because leftover customXml can re-carry provenance data.
 
 ### 4. Visible image marks (only when requested)
 
@@ -135,15 +138,20 @@ python3 "$SCRIPTS/perturb_text.py" INPUT --mode zero-width --strength 0.1 --seed
 
 This deliberately adds anti-watermark noise after Layer A. `zero-width` and `space-swap` are Layer-A reversible. `confusable` and `case` are not and can harm search/copy/accessibility. Do not present this as hygiene.
 
-### 7. Optional SynthID score
+### 7. Optional SynthID score and best-effort pixel removal
 
-When `REVERSE_SYNTHID_DIR` is configured, image inspect/clean can invoke the external scorer. It is not bundled, not an official Google detector, and does not remove pixel watermarks.
+When `REVERSE_SYNTHID_DIR` is configured, image inspect/clean can invoke the external scorer. It is not bundled, not an official Google detector. Scoring does not remove pixel watermarks.
 
 ```bash
 "$SCRIPTS/setup_synthid.sh"
 REVERSE_SYNTHID_DIR=~/reverse-SynthID \
   ~/reverse-SynthID/.venv/bin/python "$SCRIPTS/score_synthid.py" IMAGE
 ```
+
+Best-effort pixel-domain removal options, all opt-in and all labeled best-effort:
+
+- `--remove-synthid` — seed-independent DCT mid-band suppression (PNG only, no external code);
+- `--remove-pixel ctrlregen` / `--remove-pixel diffusion` — heavy external backends (CtrlRegen checkout / MarkDiffusion PyPI package); check the backend is installed first, and never present either as a verified vendor defeat.
 
 ### 8. Report
 
@@ -160,5 +168,5 @@ Always include:
 - Layer A does not remove token-distribution watermarks.
 - Layer B cannot be gold-verified without vendor detectors/keys.
 - Visible inpainting can damage texture or miss regions.
-- Soft-binding removal, pixel/audio/video watermark removal, training backdoors, and secret-key detector emulation are out of scope.
+- Pixel-domain removal (CtrlRegen / diffusion / DCT suppression) is best-effort and drifts image content; audio/video watermark removal, soft-binding removal, training backdoors, and secret-key detector emulation are out of scope.
 - Hard-bound C2PA stripping does not clear in-content binding or remote-manifest recovery.
