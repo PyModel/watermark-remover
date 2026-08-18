@@ -106,7 +106,10 @@ def _publish_image_artifacts(
                     backup_file.write(source_snapshot.data)
                     backup_file.flush()
                     os.fsync(backup_fd)
-                os.fchmod(backup_fd, source_snapshot.mode)
+                if hasattr(os, "fchmod"):
+                    os.fchmod(backup_fd, source_snapshot.mode)
+                else:
+                    os.chmod(backup_temp, source_snapshot.mode)
             finally:
                 os.close(backup_fd)
 

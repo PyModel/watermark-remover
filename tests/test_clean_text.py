@@ -6,10 +6,14 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+import clean_text as clean_text_cli
+import common
 from text_unicode import clean_text, inspect_text
 
 
@@ -141,6 +145,21 @@ def test_cli_roundtrips_invalid_utf8_and_backup_is_byte_exact(tmp_path: Path):
     assert r.returncode == 0, r.stderr
     assert src.with_suffix(".txt.bak").read_bytes() == original
     assert src.read_bytes() == b"abc\xffdef"
+
+
+def test_text_in_place_without_fchmod_preserves_backup_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src = tmp_path / "input.txt"
+    original = b"hello\xe2\x80\x8bworld"
+    src.write_bytes(original)
+    monkeypatch.delattr(common.os, "fchmod", raising=False)
+    monkeypatch.setattr(sys, "argv", [str(SCRIPTS / "clean_text.py"), str(src), "--in-place"])
+
+    assert clean_text_cli.main() == 0
+
+    assert src.with_suffix(".txt.bak").read_bytes() == original
+    assert src.read_bytes() == b"helloworld"
 
 
 def test_aggressive_confusable():

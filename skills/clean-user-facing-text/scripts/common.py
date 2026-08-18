@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import sys
 import tempfile
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -126,28 +128,99 @@ def _default_file_mode() -> int:
 def safe_write_bytes(path: str | Path, data: bytes) -> None:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
+    parent = destination.parent.resolve(strict=True)
+    destination = parent / destination.name
     if destination.is_symlink():
         raise OSError(f"refusing to write through symlink: {destination}")
 
-    fd, temporary = tempfile.mkstemp(
-        prefix=f".{destination.name}.",
-        suffix=".tmp",
-        dir=str(destination.parent),
-    )
+    parent_fd: int | None = None
+    if os.name != "nt":
+        flags = os.O_RDONLY
+        if hasattr(os, "O_DIRECTORY"):
+            flags |= os.O_DIRECTORY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        parent_fd = os.open(parent, flags)
+
+    parent_identity = os.fstat(parent_fd) if parent_fd is not None else os.lstat(parent)
+    fd = -1
+    temporary: Path | None = None
+
+    def validate_paths(staged_identity: os.stat_result) -> None:
+        current_parent = os.lstat(parent)
+        if stat.S_ISLNK(current_parent.st_mode) or not os.path.samestat(
+            parent_identity, current_parent
+        ):
+            raise OSError(f"destination directory changed while writing: {parent}")
+
+        if parent_fd is not None:
+            staged = os.stat(temporary.name, dir_fd=parent_fd, follow_symlinks=False)
+            try:
+                current_destination = os.stat(
+                    destination.name, dir_fd=parent_fd, follow_symlinks=False
+                )
+            except FileNotFoundError:
+                current_destination = None
+        else:
+            staged = os.lstat(temporary)
+            try:
+                current_destination = os.lstat(destination)
+            except FileNotFoundError:
+                current_destination = None
+
+        if not os.path.samestat(staged_identity, staged):
+            raise OSError(f"temporary path changed while writing: {temporary}")
+        if current_destination is None:
+            return
+        if stat.S_ISLNK(current_destination.st_mode):
+            raise OSError(f"refusing to write through symlink: {destination}")
+        if os.path.samestat(staged_identity, current_destination):
+            raise OSError(f"destination aliases temporary file: {destination}")
+
     try:
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            dir=str(parent),
+        )
+        temporary = Path(temporary_name)
+        staged_identity = os.fstat(fd)
+        validate_paths(staged_identity)
         if hasattr(os, "fchmod"):
             os.fchmod(fd, _default_file_mode())
-        with os.fdopen(fd, "wb") as handle:
+        handle = os.fdopen(fd, "wb")
+        fd = -1
+        with handle:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, destination)
+        validate_paths(staged_identity)
+        if parent_fd is not None:
+            os.replace(
+                temporary.name,
+                destination.name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+        else:
+            os.replace(temporary, destination)
+        temporary = None
     except BaseException:
-        try:
-            os.unlink(temporary)
-        except OSError:
-            pass
+        if fd >= 0:
+            with suppress(OSError):
+                os.close(fd)
+        if temporary is not None:
+            try:
+                if parent_fd is not None:
+                    os.unlink(temporary.name, dir_fd=parent_fd)
+                else:
+                    os.unlink(temporary)
+            except OSError:
+                pass
         raise
+    finally:
+        if parent_fd is not None:
+            os.close(parent_fd)
 
 
 def write_text_output(text: str, path: str | None) -> None:

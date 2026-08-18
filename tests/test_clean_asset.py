@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import stat
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
@@ -190,6 +191,30 @@ def test_late_in_place_failure_preserves_source_without_backup(
     assert not source.with_suffix(".png.bak").exists()
 
 
+def test_image_in_place_publication_without_fchmod_preserves_backup_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "input.png"
+    original = encode_png(Raster(8, 8, 3, bytearray([10, 20, 30] * 64)))
+    source.write_bytes(original)
+    monkeypatch.delattr(clean_asset_module.os, "fchmod", raising=False)
+
+    result = clean_asset(
+        source,
+        source,
+        CleanPlan(
+            forced_kind="image",
+            in_place=True,
+            degrade=ImageDegradePlan(strategy="jpeg"),
+        ),
+    )
+
+    assert source.with_suffix(".png.bak").read_bytes() == original
+    assert result.output == source
+    assert result.to_dict()["degrade"]["strategy"] == "jpeg"
+    assert source.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+
+
 def _inject_failure_after_atomic_publish(
     monkeypatch: pytest.MonkeyPatch,
     failure_target: Path,
@@ -251,9 +276,10 @@ def test_image_publication_failure_rolls_back_destination_and_mask(
         clean_asset(source, destination, _visible_plan(mask_output))
 
     assert destination.read_bytes() == b"prior destination"
-    assert stat.S_IMODE(destination.stat().st_mode) == 0o640
     assert mask_output.read_bytes() == b"prior mask"
-    assert stat.S_IMODE(mask_output.stat().st_mode) == 0o604
+    if os.name == "posix":
+        assert stat.S_IMODE(destination.stat().st_mode) == 0o640
+        assert stat.S_IMODE(mask_output.stat().st_mode) == 0o604
 
 
 def test_mask_publication_failure_rolls_back_destination_and_mask(
@@ -273,9 +299,10 @@ def test_mask_publication_failure_rolls_back_destination_and_mask(
         clean_asset(source, destination, _visible_plan(mask_output))
 
     assert destination.read_bytes() == b"prior destination"
-    assert stat.S_IMODE(destination.stat().st_mode) == 0o640
     assert mask_output.read_bytes() == b"prior mask"
-    assert stat.S_IMODE(mask_output.stat().st_mode) == 0o604
+    if os.name == "posix":
+        assert stat.S_IMODE(destination.stat().st_mode) == 0o640
+        assert stat.S_IMODE(mask_output.stat().st_mode) == 0o604
 
 
 def test_backup_publication_failure_rolls_back_all_artifacts(
@@ -289,27 +316,23 @@ def test_backup_publication_failure_rolls_back_all_artifacts(
     mask_output.write_bytes(b"prior mask")
     mask_output.chmod(0o604)
     backup = source.with_suffix(".png.bak")
-    original_fchmod = clean_asset_module.os.fchmod
-    failed = False
 
-    def fail_once_after_chmod(fd: int, mode: int) -> None:
-        nonlocal failed
-        original_fchmod(fd, mode)
-        if not failed:
-            failed = True
+    def fail_backup_link(_source: Path, target: Path, **_kwargs) -> None:
+        if target == backup:
             raise OSError(f"injected publication failure: {backup.name}")
 
-    monkeypatch.setattr(clean_asset_module.os, "fchmod", fail_once_after_chmod)
+    monkeypatch.setattr(clean_asset_module.os, "link", fail_backup_link)
     plan = _visible_plan(mask_output)
 
     with pytest.raises(OSError, match="publication failure"):
         clean_asset(source, source, replace(plan, in_place=True))
 
     assert source.read_bytes() == original
-    assert stat.S_IMODE(source.stat().st_mode) == 0o640
     assert mask_output.read_bytes() == b"prior mask"
-    assert stat.S_IMODE(mask_output.stat().st_mode) == 0o604
     assert not backup.exists()
+    if os.name == "posix":
+        assert stat.S_IMODE(source.stat().st_mode) == 0o640
+        assert stat.S_IMODE(mask_output.stat().st_mode) == 0o604
 
 
 def test_backup_fstat_failure_closes_fd_and_removes_partial_backup(
@@ -365,9 +388,10 @@ def test_backup_fstat_failure_closes_fd_and_removes_partial_backup(
     assert fstat_failed is True
     assert fd_closed is True
     assert source.read_bytes() == original
-    assert stat.S_IMODE(source.stat().st_mode) == 0o640
     assert not backup.exists()
     assert not list(tmp_path.glob(f".{backup.name}.*"))
+    if os.name == "posix":
+        assert stat.S_IMODE(source.stat().st_mode) == 0o640
 
 
 def test_competing_backup_created_during_publication_is_preserved(
@@ -403,8 +427,9 @@ def test_competing_backup_created_during_publication_is_preserved(
         )
 
     assert source.read_bytes() == original
-    assert stat.S_IMODE(source.stat().st_mode) == 0o640
     assert backup.read_bytes() == competing_data
+    if os.name == "posix":
+        assert stat.S_IMODE(source.stat().st_mode) == 0o640
 
 
 def test_keyboard_interrupt_after_in_place_source_publish_restores_source(
@@ -452,8 +477,9 @@ def test_keyboard_interrupt_after_in_place_source_publish_restores_source(
     assert caught.value is interruption
     assert publication_targets[:2] == [backup, source]
     assert source.read_bytes() == original
-    assert stat.S_IMODE(source.stat().st_mode) == 0o640
     assert not backup.exists()
+    if os.name == "posix":
+        assert stat.S_IMODE(source.stat().st_mode) == 0o640
 
 
 def test_final_bytes_and_outside_mask_failure_are_reported(tmp_path: Path) -> None:
