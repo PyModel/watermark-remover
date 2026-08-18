@@ -28,9 +28,12 @@ Detectors:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import re
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Protocol
@@ -98,7 +101,7 @@ def _verdict_is_watermarked(verdict: str | None) -> bool | None:
     if not verdict:
         return None
     low = verdict.strip().lower()
-    if low.startswith(("unlikely", "no", "not")):
+    if re.search(r'\b(?:unlikely|no|not)\b', low):
         return False
     return any(marker in low for marker in _WATERMARKED_VERDICTS)
 
@@ -164,7 +167,7 @@ def parse_gemini_detect_response(data: dict[str, Any]) -> dict[str, Any]:
 
     if verdict is None and score is None:
         raise DetectorError(
-            f"unexpected Gemini response (no verdict or score): {json.dumps(data)[:400]}"
+            "unexpected Gemini response (no verdict or score)"
         )
 
     raw = {
@@ -255,40 +258,16 @@ class GeminiSynthIDTextDetector:
                 "is_watermarked": None,
             }
 
-        model = (
-            os.environ.get("WATERMARKS_GEMINI_MODEL", DEFAULT_GEMINI_MODEL) or DEFAULT_GEMINI_MODEL
-        )
-        timeout = _env_float("WATERMARKS_GEMINI_TIMEOUT", DEFAULT_GEMINI_TIMEOUT)
-        body = {
-            "contents": [{"role": "user", "parts": [{"text": text}]}],
-            "generationConfig": {"taskType": "DETECT_TEXT_WATERMARK"},
-        }
-        report: dict[str, Any] = {
+        return {
             "detector": self.name,
             "vendor": self.vendor,
-            "model": model,
-            "available": True,
+            "available": False,
+            "error": (
+                "DETECT_TEXT_WATERMARK task type is not supported by the "
+                "Gemini generateContent API; this detector is disabled until "
+                "a supported watermark-detection endpoint is available."
+            ),
         }
-        try:
-            data = _call_gemini(
-                GEMINI_DETECT_URL,
-                GEMINI_DETECT_ROUTE_TEMPLATE.format(model=model),
-                body,
-                api_key,
-                timeout,
-            )
-        except DetectorError as e:
-            report["available"] = False
-            report["error"] = str(e)
-            return report
-        try:
-            parsed = parse_gemini_detect_response(data)
-        except DetectorError as e:
-            report["available"] = False
-            report["error"] = str(e)
-            return report
-        report.update(parsed)
-        return report
 
 
 # ---------------------------------------------------------------------------
@@ -376,19 +355,18 @@ class MarkLLMTextDetector:
         python = str(venv_python) if venv_python is not None else sys.executable
 
         # Persist text to a temp file for the child process.
-        import tempfile
-
-        with tempfile.NamedTemporaryFile("w", suffix=".txt", encoding="utf-8", delete=False) as f:
-            f.write(text)
-            tmp = f.name
-
-        cmd = [python, str(script), "detect", tmp, "--scheme", scheme, "--json"]
-        if self._model:
-            cmd += ["--model", self._model]
-        if self._upstream_dir:
-            cmd += ["--upstream-dir", str(Path(upstream).expanduser().resolve())]
-
+        tmp = None
         try:
+            with tempfile.NamedTemporaryFile("w", suffix=".txt", encoding="utf-8", delete=False) as f:
+                tmp = f.name
+                f.write(text)
+
+            cmd = [python, str(script), "detect", tmp, "--scheme", scheme, "--json"]
+            if self._model:
+                cmd += ["--model", self._model]
+            if self._upstream_dir:
+                cmd += ["--upstream-dir", str(Path(upstream).expanduser().resolve())]
+
             try:
                 result = run_command(
                     cmd,
@@ -412,19 +390,21 @@ class MarkLLMTextDetector:
                 report["error"] = f"bad MarkLLM JSON: {e}"
                 return report
         finally:
-            with __import__("contextlib").suppress(OSError):
-                Path(tmp).unlink()
+            if tmp is not None:
+                with contextlib.suppress(OSError):
+                    Path(tmp).unlink()
 
         if not isinstance(payload, dict):
             report["error"] = "bad MarkLLM response"
             return report
-        payload["available"] = True
-        payload["detector"] = self.name
-        payload["note"] = (
+        report["available"] = True
+        report.update(payload)
+        report["detector"] = self.name
+        report["note"] = (
             "MarkLLM is a research harness: detection is only valid against the "
             "same scheme config and keys used at generation; not a vendor detector."
         )
-        return payload
+        return report
 
 
 # ---------------------------------------------------------------------------
