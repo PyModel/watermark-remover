@@ -17,14 +17,14 @@ def test_watermark_opacity_changes_composited_pixels() -> None:
         source,
         80,
         0,
-        random.Random(7),
+        random.Random(7),  # noqa: S311
         (0.0,),
     )
     opaque, opaque_mask = _apply_synthetic_watermark(
         source,
         80,
         0,
-        random.Random(7),
+        random.Random(7),  # noqa: S311
         (1.0,),
     )
 
@@ -57,7 +57,7 @@ def test_changed_pixels_are_contained_by_ground_truth_mask() -> None:
         source,
         80,
         0,
-        random.Random(11),
+        random.Random(11),  # noqa: S311
         (1.0,),
     )
 

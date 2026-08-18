@@ -100,6 +100,7 @@ def _run_cli(*argv: str) -> subprocess.CompletedProcess[str]:
         [sys.executable, str(SCRIPTS / "morpho_perturb.py"), *argv],
         capture_output=True,
         text=True,
+        check=False,
     )
 
 

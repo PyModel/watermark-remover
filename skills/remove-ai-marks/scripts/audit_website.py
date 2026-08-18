@@ -75,7 +75,7 @@ def parse_sitemap(data: bytes) -> tuple[str, list[str]]:
     if b"<!DOCTYPE" in data or b"<!ENTITY" in data:
         raise ValueError("sitemap declares a DTD / entities; refusing to parse")
 
-    root = ET.fromstring(data)
+    root = ET.fromstring(data)  # noqa: S314
     kind = _local(root.tag)
     urls = []
     for el in root.iter():
@@ -395,7 +395,7 @@ def discover_sitemap(base_url: str, timeout: int) -> str | None:
             )
             parse_sitemap(data)
             return candidate
-        except Exception:
+        except Exception:  # noqa: S112 — skip malformed candidates, keep scanning
             continue
 
     try:
@@ -418,7 +418,7 @@ def discover_sitemap(base_url: str, timeout: int) -> str | None:
 
                 return candidate
 
-    except Exception:
+    except Exception:  # noqa: S110
         pass
 
     return None

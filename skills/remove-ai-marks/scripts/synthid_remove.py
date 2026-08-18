@@ -81,7 +81,7 @@ def _pattern_seed(seed: int, width: int, height: int, block_size: int) -> list[l
     robust; the detector correlates the band coefficients against this sign
     matrix.  A different ``seed`` produces an uncorrelated pattern.
     """
-    rng = random.Random(seed)
+    rng = random.Random(seed)  # noqa: S311
     rows = (height + block_size - 1) // block_size
     cols = (width + block_size - 1) // block_size
     return [[1.0 if rng.random() < 0.5 else -1.0 for _ in range(cols)] for _ in range(rows)]

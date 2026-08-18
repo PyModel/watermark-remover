@@ -195,7 +195,7 @@ def test_crossover_uses_parent_sentences():
 
     a = Candidate("Alpha one. Alpha two. Alpha three.")
     b = Candidate("Beta one. Beta two. Beta three.")
-    child = crossover(a, b, random.Random(7))
+    child = crossover(a, b, random.Random(7))  # noqa: S311
     assert child.text
     assert "Alpha" in child.text or "Beta" in child.text
 
@@ -386,6 +386,7 @@ def test_clean_file_tsapa_requires_live_backend(tmp_path: Path):
         capture_output=True,
         text=True,
         env=env,
+        check=False,
     )
     assert r.returncode == 1
     assert "requires a live backend" in r.stderr
@@ -408,6 +409,7 @@ def test_tsapa_cli_print_prompt(tmp_path: Path):
         ],
         capture_output=True,
         text=True,
+        check=False,
     )
     assert r.returncode == 0, r.stderr
     assert "3 generations" in r.stdout

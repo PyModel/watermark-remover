@@ -82,6 +82,7 @@ def test_perturb_cli_rejects_output_alias(tmp_path: Path):
         ],
         capture_output=True,
         text=True,
+        check=False,
     )
     assert result.returncode == 2
     assert source.read_text(encoding="utf-8") == "preserve"
@@ -109,6 +110,7 @@ def test_clean_file_character_perturbation(tmp_path: Path):
         ],
         capture_output=True,
         text=True,
+        check=False,
     )
     assert r.returncode == 0, r.stderr
     report = __import__("json").loads(r.stdout)
@@ -223,10 +225,12 @@ def test_soft_binding_cli_exit_codes(tmp_path: Path):
     r1 = subprocess.run(
         [sys.executable, str(SCRIPTS / "inspect_soft_binding.py"), str(sealed)],
         capture_output=True,
+        check=False,
     )
     r0 = subprocess.run(
         [sys.executable, str(SCRIPTS / "inspect_soft_binding.py"), str(plain)],
         capture_output=True,
+        check=False,
     )
     assert r1.returncode == 1
     assert r0.returncode == 0

@@ -33,6 +33,7 @@ def _run_cli(*argv: str) -> subprocess.CompletedProcess[str]:
         [sys.executable, str(SCRIPTS / "clean_file.py"), *argv],
         capture_output=True,
         text=True,
+        check=False,
     )
 
 

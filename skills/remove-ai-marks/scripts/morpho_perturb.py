@@ -136,7 +136,7 @@ def morpho_grid(
         raise ValueError("spacing must be >= 2")
     if not 0.0 <= opacity <= 1.0:
         raise ValueError("opacity must be in [0, 1]")
-    rng = random.Random(seed)
+    rng = random.Random(seed)  # noqa: S311
     pixels = _pixels_from_bytes(raw, channels)
     color_channels = _color_channels(channels)
 
@@ -180,7 +180,7 @@ def morpho_diagonal(
     rad = math.radians(angle)
     cos_a = math.cos(rad)
     sin_a = math.sin(rad)
-    rng = random.Random(seed)
+    rng = random.Random(seed)  # noqa: S311
     pixels = _pixels_from_bytes(raw, channels)
     color_channels = _color_channels(channels)
 
@@ -220,7 +220,7 @@ def morpho_noise(
     _validate_input(raw, width, height, channels)
     if sigma < 0:
         raise ValueError("sigma must be >= 0")
-    rng = random.Random(seed)
+    rng = random.Random(seed)  # noqa: S311
     pixels = _pixels_from_bytes(raw, channels)
     color_channels = _color_channels(channels)
 

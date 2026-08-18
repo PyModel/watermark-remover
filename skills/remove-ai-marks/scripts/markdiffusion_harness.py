@@ -92,7 +92,7 @@ def resolve_device(raw: str | None) -> str:
         mps = getattr(torch.backends, "mps", None)
         if mps is not None and mps.is_available():
             return "mps"
-    except Exception:
+    except Exception:  # noqa: S110
         pass
     return "cpu"
 
@@ -175,14 +175,14 @@ def _json_safe(obj: Any) -> Any:
 
         if isinstance(obj, np.generic):
             return obj.item()
-    except Exception:
+    except Exception:  # noqa: S110
         pass
     try:
         import torch
 
         if isinstance(obj, torch.Tensor):
             return obj.item()
-    except Exception:
+    except Exception:  # noqa: S110
         pass
     try:
         return float(obj)

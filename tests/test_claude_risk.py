@@ -90,6 +90,7 @@ def test_fresh_process_import_path_has_no_heavy_deps() -> None:
         cwd=str(SCRIPTS),
         capture_output=True,
         text=True,
+        check=False,
     )
     assert proc.returncode == 0, proc.stderr
     assert "claude_risk" in proc.stdout
@@ -105,6 +106,7 @@ def test_cli_json_and_error(tmp_path: Path) -> None:
         [sys.executable, str(RISK), str(src), "--json"],
         capture_output=True,
         text=True,
+        check=False,
     )
     assert ok.returncode == 0, ok.stderr
     assert json.loads(ok.stdout)["kind"] == "text"
@@ -114,6 +116,7 @@ def test_cli_json_and_error(tmp_path: Path) -> None:
         [sys.executable, str(RISK), str(missing), "--json"],
         capture_output=True,
         text=True,
+        check=False,
     )
     assert bad.returncode != 0
     assert "not a regular file" in bad.stderr

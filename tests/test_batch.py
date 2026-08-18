@@ -41,6 +41,7 @@ def _run(script: str, *args: str) -> subprocess.CompletedProcess:
         [sys.executable, str(SCRIPTS / script), *map(str, args)],
         capture_output=True,
         text=True,
+        check=False,
     )
 
 
@@ -270,6 +271,7 @@ def test_image_tsapa_flag_does_not_resolve_text_backend(tmp_path: Path, name: st
         capture_output=True,
         text=True,
         env=env,
+        check=False,
     )
 
     assert result.returncode == 0, result.stderr
@@ -324,6 +326,7 @@ def test_mixed_batch_preflights_tsapa_plan_before_writes(tmp_path: Path):
         capture_output=True,
         text=True,
         env=env,
+        check=False,
     )
 
     assert result.returncode == 1

@@ -123,6 +123,7 @@ def test_clean_file_cli_wmct_marker(tmp_path: Path) -> None:
         [sys.executable, str(CLEAN_FILE), str(src), "-o", str(dest), "--wmct-marker", "--json"],
         capture_output=True,
         text=True,
+        check=False,
     )
     assert result.returncode == 0, result.stderr
     assert _wmct_chunks(dest.read_bytes()) and WMCT_KEYWORD.encode("latin-1") in dest.read_bytes()
@@ -135,6 +136,7 @@ def test_clean_file_cli_no_marker_by_default(tmp_path: Path) -> None:
         [sys.executable, str(CLEAN_FILE), str(src), "-o", str(dest), "--json"],
         capture_output=True,
         text=True,
+        check=False,
     )
     assert result.returncode == 0, result.stderr
     assert WMCT_KEYWORD.encode("latin-1") not in dest.read_bytes()

@@ -498,7 +498,7 @@ def tsapa(
     if sum(weights) <= 0:
         raise ValueError("weights must have a positive sum")
 
-    rng = random.Random(seed)
+    rng = random.Random(seed)  # noqa: S311
     chunks = chunk_text(text, max_chars=chunk_chars)
     out_chunks: list[str] = []
     stats: list[dict] = []

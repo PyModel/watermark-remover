@@ -52,7 +52,7 @@ def resolve_device(raw: str | None) -> str:
         mps = getattr(torch.backends, "mps", None)
         if mps is not None and mps.is_available():
             return "mps"
-    except Exception:
+    except Exception:  # noqa: S110
         pass
     return "cpu"
 

@@ -149,7 +149,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
-    global API_KEY
+    global API_KEY  # noqa: PLW0603
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--host", default=os.environ.get("WATERMARKS_SYNTHID_SERVER_HOST", "127.0.0.1"))
     p.add_argument(

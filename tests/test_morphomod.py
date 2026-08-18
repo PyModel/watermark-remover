@@ -475,6 +475,7 @@ def test_clean_file_in_place_batch_preflights_generated_masks(tmp_path: Path):
         ],
         capture_output=True,
         text=True,
+        check=False,
     )
     assert result.returncode == 2
     assert "mask output aliases an input" in result.stderr
@@ -500,6 +501,7 @@ def test_clean_file_rejects_output_aliasing_visible_mask(tmp_path: Path):
         ],
         capture_output=True,
         text=True,
+        check=False,
     )
     assert result.returncode == 2
     assert mask.read_bytes() == original_mask
@@ -526,6 +528,7 @@ def test_clean_file_visible_pipeline(tmp_path: Path):
         ],
         capture_output=True,
         text=True,
+        check=False,
     )
     assert r.returncode == 0, r.stderr
     report = json.loads(r.stdout)
@@ -540,6 +543,7 @@ def test_clean_file_refuses_dilation_without_mask_source(tmp_path: Path):
         [sys.executable, str(SCRIPTS / "clean_file.py"), str(src), "--dilate", "3"],
         capture_output=True,
         text=True,
+        check=False,
     )
     assert r.returncode == 1
     assert "requires a localization source" in r.stderr
@@ -570,6 +574,7 @@ def test_clean_file_rejects_visible_options_without_localization_before_writing(
         ],
         capture_output=True,
         text=True,
+        check=False,
     )
 
     assert result.returncode == 1
@@ -598,6 +603,7 @@ def test_morphomod_cli(tmp_path: Path):
         ],
         capture_output=True,
         text=True,
+        check=False,
     )
     assert r.returncode == 0, r.stderr
     report = json.loads(r.stdout)
@@ -628,6 +634,7 @@ def test_clean_file_frictionless_no_mask_artifact_by_default(tmp_path: Path):
         ],
         capture_output=True,
         text=True,
+        check=False,
     )
     assert r.returncode == 0, r.stderr
     report = json.loads(r.stdout)
@@ -657,6 +664,7 @@ def test_clean_file_frictionless_no_mask_artifact_by_default(tmp_path: Path):
         ],
         capture_output=True,
         text=True,
+        check=False,
     )
     assert r2.returncode == 0, r2.stderr
     assert dest2.with_name("kept.mask.pgm").is_file()

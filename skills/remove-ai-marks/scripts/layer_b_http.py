@@ -136,7 +136,7 @@ class SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
                 for name, value in forwarded.items()
                 if name.lower() not in {"content-length", "content-type"}
             }
-        return urllib.request.Request(
+        return urllib.request.Request(  # noqa: S310
             newurl,
             data=data,
             headers=forwarded,
@@ -275,7 +275,7 @@ def request_json(
     request_headers = _validate_headers(headers)
     body = json.dumps(payload).encode("utf-8")
     try:
-        request = urllib.request.Request(
+        request = urllib.request.Request(  # noqa: S310
             url,
             data=body,
             headers=request_headers,

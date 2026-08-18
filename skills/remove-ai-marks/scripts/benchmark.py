@@ -59,7 +59,7 @@ def generate_synthetic_benchmark(config: BenchmarkConfig) -> list[BenchmarkImage
 
     Returns a list of BenchmarkImage entries.
     """
-    rng = random.Random(config.seed)
+    rng = random.Random(config.seed)  # noqa: S311
     images: list[BenchmarkImage] = []
     config.output_dir.mkdir(parents=True, exist_ok=True)
 

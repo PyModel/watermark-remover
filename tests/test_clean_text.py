@@ -103,6 +103,7 @@ def test_clean_text_preserves_preexisting_backup_on_rejection(tmp_path: Path):
         [sys.executable, str(script), str(src), "--in-place"],
         capture_output=True,
         text=True,
+        check=False,
     )
     assert result.returncode == 1
     assert backup.read_text(encoding="utf-8") == "old backup"
@@ -120,6 +121,7 @@ def test_clean_text_in_place_rejects_backup_symlink(tmp_path: Path):
         [sys.executable, str(script), str(src), "--in-place"],
         capture_output=True,
         text=True,
+        check=False,
     )
     assert result.returncode == 1
     assert outside.read_text(encoding="utf-8") == "preserve"
@@ -134,6 +136,7 @@ def test_cli_roundtrips_invalid_utf8_and_backup_is_byte_exact(tmp_path: Path):
     r = subprocess.run(
         [sys.executable, str(script), str(src), "--in-place"],
         capture_output=True,
+        check=False,
     )
     assert r.returncode == 0, r.stderr
     assert src.with_suffix(".txt.bak").read_bytes() == original

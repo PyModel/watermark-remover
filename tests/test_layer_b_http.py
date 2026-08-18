@@ -19,7 +19,7 @@ sys.path.insert(0, str(SCRIPTS))
 import layer_b_http
 from layer_b_http import LayerBHTTPError, request_json
 
-FAKE_SECRET = "unit-test-secret-never-real"
+FAKE_SECRET = "unit-test-secret-never-real"  # noqa: S105
 
 
 class FakeResponse:

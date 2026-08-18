@@ -50,13 +50,13 @@ def test_init_logger_invalid_level_falls_back_to_info(
 
 
 def test_log_info_with_extras_emits_json_to_stderr_only(capsys) -> None:
-    log_info("cleaned asset", module="clean_asset", path="/tmp/out.png")
+    log_info("cleaned asset", module="clean_asset", path="/tmp/out.png")  # noqa: S108
     captured = capsys.readouterr()
     assert captured.out == ""
     payload = json.loads(captured.err.strip())
     assert payload["level"] == "INFO"
     assert payload["module"] == "clean_asset"
-    assert payload["extra"]["path"] == "/tmp/out.png"
+    assert payload["extra"]["path"] == "/tmp/out.png"  # noqa: S108
 
 
 def test_logger_plain_entries_go_to_stderr(capsys) -> None:
