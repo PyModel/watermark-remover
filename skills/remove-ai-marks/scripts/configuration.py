@@ -16,6 +16,8 @@ Supported environment variables (all optional):
     WATERMARKS_REWRITE_MODEL        — Backend model name
     WATERMARKS_REWRITE_API_KEY      — Backend API key
     WATERMARKS_REWRITE_DISABLE_THINKING — Disable thinking on reasoning models
+    WATERMARKS_REWRITE_ALLOW_REMOTE — Allow non-loopback rewrite endpoints
+    WATERMARKS_REWRITE_REASONING_EFFORT — OpenAI-compatible reasoning effort
     WATERMARKS_PLL_MODEL            — PLL scorer model
     WATERMARKS_EMBED_MODEL          — Embedding scorer model
     WATERMARKS_MAX_INPUT_BYTES      — Max input bytes (default: 256 MiB)
@@ -206,6 +208,18 @@ _SETTINGS_DEF: list[tuple[str, Any, str, ConfigSource]] = [
         "rewrite_disable_thinking",
         False,
         "Disable thinking mode on reasoning-capable models",
+        ConfigSource.DEFAULT,
+    ),
+    (
+        "rewrite_allow_remote",
+        False,
+        "Allow non-loopback Layer B rewrite endpoints",
+        ConfigSource.DEFAULT,
+    ),
+    (
+        "rewrite_reasoning_effort",
+        "none",
+        "OpenAI-compatible reasoning effort: none, low, medium, high, off",
         ConfigSource.DEFAULT,
     ),
     (
@@ -412,6 +426,8 @@ def load_configuration(project_root: Path | None = None) -> ConfigSummary:
         "rewrite_model": ("WATERMARKS_REWRITE_MODEL", "str"),
         "rewrite_api_key": ("WATERMARKS_REWRITE_API_KEY", "str"),
         "rewrite_disable_thinking": ("WATERMARKS_REWRITE_DISABLE_THINKING", "bool"),
+        "rewrite_allow_remote": ("WATERMARKS_REWRITE_ALLOW_REMOTE", "bool"),
+        "rewrite_reasoning_effort": ("WATERMARKS_REWRITE_REASONING_EFFORT", "str"),
         "pll_model": ("WATERMARKS_PLL_MODEL", "str"),
         "embed_model": ("WATERMARKS_EMBED_MODEL", "str"),
         "max_input_bytes": ("WATERMARKS_MAX_INPUT_BYTES", "int"),

@@ -10,16 +10,26 @@ Env (optional):
   WATERMARKS_REWRITE_BACKEND
   WATERMARKS_REWRITE_BASE_URL
   WATERMARKS_REWRITE_MODEL
-  WATERMARKS_REWRITE_API_KEY
+  WATERMARKS_REWRITE_API_KEY      (env-only; never pass keys on argv)
   WATERMARKS_REWRITE_DISABLE_THINKING  — true/false; OpenAI-compatible extension
+  WATERMARKS_REWRITE_ALLOW_REMOTE     — set to 1 to allow non-loopback endpoints
+  WATERMARKS_REWRITE_REASONING_EFFORT — none/low/medium/high/off for OpenAI-compatible
+
+Security notes:
+  - Only http(s) endpoints are accepted; redirects are refused outright so an
+    Authorization header (API key) can never be re-sent to an unvalidated host.
+  - Non-loopback endpoints are denied unless WATERMARKS_REWRITE_ALLOW_REMOTE=1
+    (or --allow-remote) is set explicitly.
 """
 
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import math
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,6 +46,7 @@ from common import (
     validate_output_path,
     write_text_output,
 )
+from layer_b_http import LayerBHTTPError
 from text_unicode import clean_text
 
 PROMPTS = {
@@ -43,6 +54,20 @@ PROMPTS = {
         "Rewrite the following text so that every sentence uses different wording and "
         "structure while preserving all facts, numbers, names, and technical identifiers. "
         "Do not add or remove claims. Output only the rewritten text.\n\n---\n{TEXT}"
+    ),
+    "humanize": (
+        "Rewrite the following text so it reads as if a human wrote it from scratch. "
+        "Vary sentence rhythm and length, replace formulaic AI-style transitions and "
+        "filler with concrete natural phrasing, and use plain, varied wording. Preserve "
+        "all facts, numbers, names, and technical identifiers. Do not add or remove "
+        "claims. Output only the rewritten text.\n\n---\n{TEXT}"
+    ),
+    "code": (
+        "Rewrite the natural-language parts of this code — comments, docstrings, and "
+        "string literals — using different wording. Rename local variables, function "
+        "parameters, and private helper names to semantically equivalent names. Preserve "
+        "program behavior, public API names, and all values that affect output. Output "
+        "only the rewritten code.\n\n---\n{TEXT}"
     ),
 }
 
@@ -64,7 +89,9 @@ TSAPA_PACK = (
 
 REWRITE_BACKENDS = ("print-prompt", "ollama", "openai-compatible")
 LIVE_REWRITE_BACKENDS = ("ollama", "openai-compatible")
-REWRITE_STRENGTHS = ("paraphrase", "backtranslate", "structural", "tsapa")
+REWRITE_STRENGTHS = ("paraphrase", "backtranslate", "structural", "humanize", "code", "tsapa")
+REASONING_EFFORTS = ("none", "low", "medium", "high", "off")
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 class RewriteConfigurationError(ValueError):
@@ -87,6 +114,14 @@ class RewritePlan:
     generations: int = 5
     population: int = 12
     disable_thinking: bool = False
+    temperature: float = 0.9
+    candidates: int = 1
+    reasoning_effort: str | None = None
+    allow_remote: bool = False
+    markllm_scheme: str | None = None
+    markllm_dir: str | None = None
+    markllm_model: str | None = None
+    markllm_timeout: float = 180.0
 
     def __post_init__(self) -> None:
         if self.backend not in REWRITE_BACKENDS:
@@ -99,6 +134,24 @@ class RewritePlan:
             raise TypeError("timeout must be a finite positive number")
         if not math.isfinite(self.timeout) or self.timeout <= 0:
             raise RewriteConfigurationError("timeout must be a finite positive number")
+        if isinstance(self.temperature, bool) or not isinstance(self.temperature, (int, float)):
+            raise TypeError("temperature must be a finite positive number")
+        if not math.isfinite(self.temperature) or self.temperature <= 0:
+            raise RewriteConfigurationError("temperature must be a finite positive number")
+        if isinstance(self.candidates, bool) or not isinstance(self.candidates, int):
+            raise TypeError("candidates must be an integer")
+        if self.candidates < 1:
+            raise RewriteConfigurationError("candidates must be >= 1")
+        if self.reasoning_effort not in (None, *REASONING_EFFORTS):
+            raise RewriteConfigurationError(f"unknown reasoning_effort: {self.reasoning_effort}")
+        if not isinstance(self.allow_remote, bool):
+            raise TypeError("allow_remote must be a bool")
+        if isinstance(self.markllm_timeout, bool) or not isinstance(
+            self.markllm_timeout, (int, float)
+        ):
+            raise TypeError("markllm_timeout must be a finite positive number")
+        if not math.isfinite(self.markllm_timeout) or self.markllm_timeout <= 0:
+            raise RewriteConfigurationError("markllm_timeout must be a finite positive number")
         if self.strength == "tsapa":
             if not isinstance(self.generations, int) or isinstance(self.generations, bool):
                 raise TypeError("generations must be an integer")
@@ -175,6 +228,91 @@ def _env(name: str, default: str | None = None) -> str | None:
     return v
 
 
+def _flag_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _tokens(text: str) -> list[str]:
+    return re.findall(r"[A-Za-z0-9]+", text.lower())
+
+
+def _bigrams(tokens: list[str]) -> set[tuple[str, str]]:
+    return set(itertools.pairwise(tokens))
+
+
+def _lexical_divergence(original: str, candidate: str) -> float:
+    """Bigram Jaccard distance: 0.0 identical, 1.0 fully different."""
+    a = _tokens(original)
+    b = _tokens(candidate)
+    if not a and not b:
+        return 0.0
+    if not a or not b:
+        return 1.0
+    ba = _bigrams(a)
+    bb = _bigrams(b)
+    union = ba | bb
+    if not union:
+        return 0.0
+    return 1.0 - len(ba & bb) / len(union)
+
+
+def _select_candidate(original: str, candidates: list[str]) -> tuple[str, list[float]]:
+    """Pick the most lexically diverged rewrite, gently guarding extreme length drift."""
+    scores: list[float] = []
+    for cand in candidates:
+        score = _lexical_divergence(original, cand)
+        if original:
+            ratio = len(cand) / len(original)
+            if ratio > 2.0 or ratio < 0.5:
+                score -= 0.15
+        scores.append(score)
+    best_idx = max(range(len(candidates)), key=lambda i: scores[i])
+    return candidates[best_idx], scores
+
+
+def _check_remote(base_url: str, allow_remote: bool) -> None:
+    """Enforce the rewrite-endpoint allowlist.
+
+    Default-deny: only loopback endpoints are accepted. Anything else requires
+    an explicit opt-in (--allow-remote / WATERMARKS_REWRITE_ALLOW_REMOTE=1),
+    and non-http(s) schemes (e.g. file://) are always refused.
+    """
+    u = urlparse(base_url)
+    if u.scheme not in ("http", "https"):
+        raise SystemExit(
+            f"error: rewrite base URL must be http(s), got scheme '{u.scheme}': {base_url}"
+        )
+    host = u.hostname or ""
+    if host in _LOOPBACK_HOSTS:
+        return
+    if not allow_remote:
+        raise SystemExit(
+            "error: rewrite base URL host is not loopback "
+            f"('{host}'); refusing to send content off-machine. "
+            "Set WATERMARKS_REWRITE_ALLOW_REMOTE=1 or pass --allow-remote to override."
+        )
+    eprint(
+        f"warning: rewrite base URL host is '{host}' (not localhost); "
+        "content will leave this machine"
+    )
+
+
+def _enforce_endpoint(base_url: str, allow_remote: bool) -> None:
+    """Enforce the loopback allowlist inside rewrite, normalized to LayerBHTTPError."""
+    if not base_url:
+        return
+    try:
+        scheme = urlparse(base_url).scheme
+    except ValueError:
+        return
+    if scheme not in ("http", "https"):
+        return
+    try:
+        _check_remote(base_url, allow_remote)
+    except SystemExit as error:
+        raise LayerBHTTPError(f"{error} (endpoint: {base_url})") from None
+
+
 def remote_warning(base_url: str | None) -> str | None:
     if base_url is None:
         return None
@@ -193,6 +331,10 @@ def remote_warning(base_url: str | None) -> str | None:
 def build_prompt(strength: str, text: str, *, lang: str, original_lang: str) -> str:
     if strength == "paraphrase":
         return PROMPTS["paraphrase"].format(TEXT=text)
+    if strength == "humanize":
+        return PROMPTS["humanize"].format(TEXT=text)
+    if strength == "code":
+        return PROMPTS["code"].format(TEXT=text)
     if strength == "backtranslate":
         # single combined instruction for print-prompt / one-shot backends
         return (
@@ -210,7 +352,7 @@ def build_prompt(strength: str, text: str, *, lang: str, original_lang: str) -> 
     raise ValueError(f"unknown strength: {strength}")
 
 
-def _call_ollama(base_url: str, model: str, prompt: str, timeout: float) -> str:
+def _call_ollama(base_url: str, model: str, prompt: str, timeout: float, temperature: float) -> str:
     data = layer_b_http.request_json(
         base_url,
         "/api/chat",
@@ -218,6 +360,7 @@ def _call_ollama(base_url: str, model: str, prompt: str, timeout: float) -> str:
             "model": model,
             "stream": False,
             "messages": [{"role": "user", "content": prompt}],
+            "options": {"temperature": temperature},
         },
         timeout=timeout,
     )
@@ -237,6 +380,8 @@ def _call_openai_compatible(
     api_key: str | None,
     timeout: float,
     *,
+    temperature: float = 0.9,
+    reasoning_effort: str | None = None,
     disable_thinking: bool = False,
 ) -> str:
     route = "/v1/chat/completions"
@@ -246,8 +391,10 @@ def _call_openai_compatible(
     payload: dict = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.7,
+        "temperature": temperature,
     }
+    if reasoning_effort:
+        payload["reasoning_effort"] = reasoning_effort
     if disable_thinking:
         # Supported by Qwen/Transformers-compatible servers; opt-in so generic
         # OpenAI-compatible endpoints never receive an unknown extension.
@@ -283,16 +430,23 @@ def rewrite(text: str, plan: RewritePlan) -> tuple[str, dict]:
     generations = plan.generations
     population = plan.population
     disable_thinking = plan.disable_thinking
+    temperature = plan.temperature
+    candidates = plan.candidates
+    reasoning_effort = plan.reasoning_effort
+    allow_remote = plan.allow_remote
 
     info: dict = {
         "backend": backend,
         "strength": strength,
         "model": model,
         "base_url": base_url,
+        "temperature": temperature,
         "input_chars": len(text),
     }
     if backend == "openai-compatible":
         info["disable_thinking"] = disable_thinking
+    if reasoning_effort:
+        info["reasoning_effort"] = reasoning_effort
 
     if strength == "tsapa":
         return _rewrite_tsapa(
@@ -305,7 +459,10 @@ def rewrite(text: str, plan: RewritePlan) -> tuple[str, dict]:
             layer_a_after=layer_a_after,
             generations=generations,
             population=population,
+            temperature=temperature,
+            reasoning_effort=reasoning_effort,
             disable_thinking=disable_thinking,
+            allow_remote=allow_remote,
             info=info,
         )
 
@@ -314,21 +471,48 @@ def rewrite(text: str, plan: RewritePlan) -> tuple[str, dict]:
 
     if backend == "print-prompt":
         info["mode"] = "print-prompt"
+        if candidates > 1:
+            eprint("note: --candidates ignored in print-prompt mode")
         return prompt, info
 
-    if backend == "ollama":
-        out = _call_ollama(base_url, model, prompt, timeout)
-    elif backend == "openai-compatible":
-        out = _call_openai_compatible(
-            base_url,
-            model,
-            prompt,
-            api_key,
-            timeout,
-            disable_thinking=disable_thinking,
-        )
+    _enforce_endpoint(base_url, allow_remote)
+
+    n = max(1, candidates)
+    outs: list[str] = []
+    for _ in range(n):
+        if backend == "ollama":
+            outs.append(_call_ollama(base_url, model, prompt, timeout, temperature))
+        elif backend == "openai-compatible":
+            outs.append(
+                _call_openai_compatible(
+                    base_url,
+                    model,
+                    prompt,
+                    api_key,
+                    timeout,
+                    temperature=temperature,
+                    reasoning_effort=reasoning_effort,
+                    disable_thinking=disable_thinking,
+                )
+            )
+        else:
+            raise RewriteConfigurationError(f"unknown backend: {backend}")
+
+    if len(outs) == 1:
+        out = outs[0]
     else:
-        raise RewriteConfigurationError(f"unknown backend: {backend}")
+        info["candidates"] = n
+        out, scores = _select_candidate(text, outs)
+        selected_idx = max(range(len(outs)), key=lambda i: scores[i])
+        info["candidate_scores"] = []
+        for i, cand in enumerate(outs):
+            info["candidate_scores"].append(
+                {
+                    "lexical_divergence": _lexical_divergence(text, cand),
+                    "selection_score": scores[i],
+                    "selected": i == selected_idx,
+                }
+            )
 
     if layer_a_after:
         out, stats = clean_text(out)
@@ -354,7 +538,10 @@ def _rewrite_tsapa(
     layer_a_after: bool,
     generations: int,
     population: int,
+    temperature: float,
+    reasoning_effort: str | None,
     disable_thinking: bool,
+    allow_remote: bool,
     info: dict,
 ) -> tuple[str, dict]:
     from tsapa import TSAPAAdapterError, heuristic_pll, http_embed, http_pll, tsapa
@@ -372,10 +559,14 @@ def _rewrite_tsapa(
         )
         return prompt, info
 
+    if backend not in ("ollama", "openai-compatible"):
+        raise RewriteConfigurationError(f"unknown backend: {backend}")
+    _enforce_endpoint(base_url, allow_remote)
+
     if backend == "ollama":
 
         def llm(prompt: str) -> str:
-            return _call_ollama(base_url, model, prompt, timeout)
+            return _call_ollama(base_url, model, prompt, timeout, temperature)
     elif backend == "openai-compatible":
 
         def llm(prompt: str) -> str:
@@ -385,10 +576,10 @@ def _rewrite_tsapa(
                 prompt,
                 api_key,
                 timeout,
+                temperature=temperature,
+                reasoning_effort=reasoning_effort,
                 disable_thinking=disable_thinking,
             )
-    else:
-        raise RewriteConfigurationError(f"unknown backend: {backend}")
 
     pll_model = os.environ.get("WATERMARKS_PLL_MODEL", model or "")
     embed_model = os.environ.get("WATERMARKS_EMBED_MODEL", model or "")
@@ -456,8 +647,25 @@ def main() -> int:
         default=_env("WATERMARKS_REWRITE_BASE_URL", "http://127.0.0.1:11434"),
     )
     p.add_argument(
+        "--allow-remote",
+        action="store_true",
+        default=None,
+        help="Allow non-loopback rewrite endpoints (default: deny; "
+        "WATERMARKS_REWRITE_ALLOW_REMOTE=1 has the same effect)",
+    )
+    p.add_argument(
+        "--reasoning-effort",
+        choices=("none", "low", "medium", "high", "off"),
+        default=_env("WATERMARKS_REWRITE_REASONING_EFFORT", "none"),
+        help="OpenAI-compatible reasoning_effort; 'none' skips chain-of-thought "
+        "(reasoning models otherwise burn minutes on a rewrite). 'off' omits "
+        "the parameter entirely.",
+    )
+    # NOTE: no --api-key flag on purpose — keys on argv are visible in `ps`
+    # and shell history. Set WATERMARKS_REWRITE_API_KEY instead.
+    p.add_argument(
         "--strength",
-        choices=("paraphrase", "backtranslate", "structural", "tsapa"),
+        choices=("paraphrase", "backtranslate", "structural", "humanize", "code", "tsapa"),
         default="paraphrase",
         help="tsapa: evolutionary multi-objective attack (ACL 2026 class)",
     )
@@ -466,6 +674,18 @@ def main() -> int:
     p.add_argument("--lang", default="French", help="Pivot language for backtranslate")
     p.add_argument("--original-lang", default="English")
     p.add_argument("--timeout", type=float, default=120.0)
+    p.add_argument(
+        "--temperature",
+        type=float,
+        default=0.9,
+        help="Sampling temperature for the rewrite backend",
+    )
+    p.add_argument(
+        "--candidates",
+        type=int,
+        default=1,
+        help="Number of rewrite candidates to generate and score",
+    )
     thinking = p.add_mutually_exclusive_group()
     thinking.add_argument(
         "--disable-thinking",
@@ -494,6 +714,11 @@ def main() -> int:
             if args.disable_thinking is None
             else args.disable_thinking
         )
+        allow_remote = (
+            _flag_env("WATERMARKS_REWRITE_ALLOW_REMOTE")
+            if args.allow_remote is None
+            else args.allow_remote
+        )
         plan = RewritePlan(
             backend=args.backend,
             model=args.model,
@@ -507,6 +732,10 @@ def main() -> int:
             generations=args.generations,
             population=args.population,
             disable_thinking=disable_thinking,
+            temperature=args.temperature,
+            candidates=args.candidates,
+            reasoning_effort=args.reasoning_effort,
+            allow_remote=allow_remote,
         )
         if warning := remote_warning(plan.base_url):
             eprint(warning)
