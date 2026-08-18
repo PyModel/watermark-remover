@@ -455,7 +455,6 @@ def main() -> int:
         "--base-url",
         default=_env("WATERMARKS_REWRITE_BASE_URL", "http://127.0.0.1:11434"),
     )
-    p.add_argument("--api-key", default=_env("WATERMARKS_REWRITE_API_KEY"))
     p.add_argument(
         "--strength",
         choices=("paraphrase", "backtranslate", "structural", "tsapa"),
@@ -499,7 +498,7 @@ def main() -> int:
             backend=args.backend,
             model=args.model,
             base_url=args.base_url,
-            api_key=args.api_key,
+            api_key=os.environ.get("WATERMARKS_REWRITE_API_KEY"),
             strength=args.strength,
             lang=args.lang,
             original_lang=args.original_lang,
