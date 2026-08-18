@@ -32,10 +32,10 @@ from pathlib import Path
 SCRIPTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-from common import (  # noqa: E402
+from common import (
     atomic_write_text,
-    eprint,
     emit_json,
+    eprint,
     read_text_input,
 )
 
@@ -79,7 +79,7 @@ def resolve_device(raw: str | None) -> str:
         # Never auto-select mps: SynthID/KGW build torch.Generator(device=...),
         # which supports only cpu/cuda and raises RuntimeError on 'mps' (Apple
         # Silicon). Fall through to cpu. Pass --device mps explicitly to override.
-    except Exception:  # noqa: S110 - optional torch device detection
+    except Exception:
         pass
     return "cpu"
 
