@@ -1,9 +1,7 @@
-.git
-.pi
-.venv
-research
-__pycache__
-.pytest_cache
-*.pyc
-.DS_Store
-tests
+# Deny by default: only what is explicitly allowed below enters a build
+# context. Images copy skills/ and pyproject.toml only; everything else
+# (tests, research reference checkout, venvs, tooling) stays out.
+*
+!skills/
+!skills/**
+!pyproject.toml
