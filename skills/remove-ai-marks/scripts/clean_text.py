@@ -47,6 +47,16 @@ def main() -> int:
         action="store_true",
         help="Treat binary-looking input as text anyway",
     )
+    p.add_argument(
+        "--strip-emoji-glue",
+        action="store_true",
+        help="Strip load-bearing emoji glue (ZWJ/ZWNJ/variation) even in context",
+    )
+    p.add_argument(
+        "--strip-bidi",
+        action="store_true",
+        help="Strip RTL directional marks and paired embeddings",
+    )
     p.add_argument("--stats", action="store_true", help="Print stats JSON to stderr")
     p.add_argument(
         "--in-place",
@@ -70,6 +80,8 @@ def main() -> int:
         nfkc=args.nfkc,
         aggressive_homoglyphs=args.aggressive_homoglyphs,
         normalize_spaces=not args.no_normalize_spaces,
+        strip_emoji_glue=args.strip_emoji_glue,
+        strip_bidi=args.strip_bidi,
         preserve_semantic=not args.strip_semantic_format,
     )
 

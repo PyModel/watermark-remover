@@ -50,6 +50,51 @@ SUPPORTED_EXTENSIONS = _IMAGE_EXTENSIONS | _CONTAINER_EXTENSIONS | _TEXT_EXTENSI
 _ASSET_KINDS: tuple[AssetKind, ...] = ("text", "image", "container", "unknown")
 _SNIFF_BYTES = 4096  # HEIF brand detection scans at most the first 4 KiB.
 
+#: Bytes read for header-only sniffing. Every supported image/container
+#: magic lives in the prefix; zip-based containers (docx/odt/...) need the
+#: full central directory, which sits at the end of the archive, so only a
+#: PK header triggers a whole-file read.
+CLASSIFY_HEADER_BYTES = 4096
+
+
+def classify_bytes(data: bytes, suffix: str | None = None) -> AssetKind:
+    """Classify *data* by extension first, then by magic bytes."""
+    ext = (suffix or "").lower()
+    if ext in _IMAGE_EXTENSIONS:
+        return "image"
+    if ext in _CONTAINER_EXTENSIONS:
+        return "container"
+    if ext in _TEXT_EXTENSIONS:
+        return "text"
+    if detect_image_format(data) in ("png", "jpeg", "webp", "avif", "heic", "bmp", "gif", "tiff"):
+        return "image"
+    if data:
+        sniff_path = Path("input") if not ext else Path(f"input{ext}")
+        if detect_container_format(sniff_path, data) != "unknown":
+            return "container"
+    return "unknown"
+
+
+def classify(path: Path) -> AssetKind:
+    """Classify a file on disk by extension, then by its bytes."""
+    ext = path.suffix.lower()
+    if ext in _IMAGE_EXTENSIONS:
+        return "image"
+    if ext in _CONTAINER_EXTENSIONS:
+        return "container"
+    if ext in _TEXT_EXTENSIONS:
+        return "text"
+    with path.open("rb") as fh:
+        head = fh.read(CLASSIFY_HEADER_BYTES)
+    if detect_image_format(head) in ("png", "jpeg", "webp", "avif", "heic", "bmp", "gif", "tiff"):
+        return "image"
+    if head:
+        data = path.read_bytes() if head[:4] == b"PK" else head
+        sniff_path = Path("input") if not ext else Path(f"input{ext}")
+        if detect_container_format(sniff_path, data) != "unknown":
+            return "container"
+    return "unknown"
+
 
 def classify_asset(path: Path, *, forced_kind: str = "auto") -> AssetKind:
     """Return the processing family for a caller-validated regular file.

@@ -29,6 +29,7 @@ from clean_asset import (
     clean_asset,
 )
 from common import (
+    MAX_INPUT_BYTES,
     ROUTER_ADVICE,
     atomic_write_text,
     backup_path,
@@ -315,6 +316,8 @@ def _plan_work(
             destinations.append(output)
             dest = output
 
+        if item.path.stat().st_size > MAX_INPUT_BYTES:
+            raise ValueError(f"refusing input larger than {MAX_INPUT_BYTES} bytes: {item.path}")
         kind = classify_asset(item.path, forced_kind=args.force_type)
         if kind == "unknown" and not (args.force_text or args.force_type == "text"):
             raise ValueError(
