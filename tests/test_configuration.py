@@ -33,6 +33,25 @@ WATERMARKS_ENV = [
     "WATERMARKS_REWRITE_DISABLE_THINKING",
     "WATERMARKS_PLL_MODEL",
     "WATERMARKS_EMBED_MODEL",
+    "WATERMARKS_MAX_INPUT_BYTES",
+    "WATERMARKS_MAX_STDIN_BYTES",
+    "WATERMARKS_SERVER_HOST",
+    "WATERMARKS_SERVER_PORT",
+    "WATERMARKS_SERVER_API_KEY",
+    "WATERMARKS_GEMINI_API_KEY",
+    "WATERMARKS_GEMINI_MODEL",
+    "WATERMARKS_GEMINI_TIMEOUT",
+    "WATERMARKS_GEMINI_MAX_CHARS",
+    "WATERMARKS_MARKLLM_SCHEME",
+    "WATERMARKS_MARKLLM_TIMEOUT",
+    "WATERMARKS_MARKLLM_RLIMIT_AS",
+    "WATERMARKS_SYNTHID_SCORER_URL",
+    "WATERMARKS_SYNTHID_SCORER_API_KEY",
+    "WATERMARKS_SYNTHID_SCORER_TIMEOUT",
+    "WATERMARKS_SYNTHID_SERVER_HOST",
+    "WATERMARKS_SYNTHID_SERVER_PORT",
+    "WATERMARKS_SYNTHID_SERVER_VERSION",
+    "WATERMARKS_SERVICE_URL",
 ]
 
 
@@ -125,3 +144,45 @@ def test_missing_files_report_none_paths(tmp_path: Path) -> None:
     summary = load_configuration(tmp_path)
     assert summary.pyproject_path is None
     assert summary.env_file_path is None
+
+
+def test_new_keys_have_defaults(tmp_path: Path) -> None:
+    summary = load_configuration(tmp_path)
+    settings = get_config(summary)
+    assert settings["max_input_bytes"] == 256 * 1024 * 1024
+    assert settings["max_stdin_bytes"] == 64 * 1024 * 1024
+    assert settings["server_host"] == "127.0.0.1"
+    assert settings["server_port"] == 8765
+    assert settings["server_api_key"] is None
+    assert settings["synthid_scorer_timeout"] == 60.0
+    assert settings["service_url"] is None
+
+
+def test_max_input_bytes_env_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("WATERMARKS_MAX_INPUT_BYTES", "123456")
+    summary = load_configuration(tmp_path)
+    assert summary.settings["max_input_bytes"].value == 123456
+    assert summary.settings["max_input_bytes"].source is ConfigSource.ENV_VAR
+
+
+def test_max_file_size_alias_maps_onto_max_input_bytes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("WATERMARKS_MAX_FILE_SIZE", "777")
+    summary = load_configuration(tmp_path)
+    assert summary.settings["max_input_bytes"].value == 777
+    assert summary.settings["max_input_bytes"].source is ConfigSource.ENV_VAR
+
+
+def test_canonical_key_wins_over_alias(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("WATERMARKS_MAX_FILE_SIZE", "777")
+    monkeypatch.setenv("WATERMARKS_MAX_INPUT_BYTES", "888")
+    summary = load_configuration(tmp_path)
+    assert summary.settings["max_input_bytes"].value == 888
+
+
+def test_server_port_env_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("WATERMARKS_SERVER_PORT", "9000")
+    summary = load_configuration(tmp_path)
+    assert summary.settings["server_port"].value == 9000
+    assert summary.settings["server_port"].source is ConfigSource.ENV_VAR

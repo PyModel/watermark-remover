@@ -92,6 +92,20 @@ def _inspect_single(path: Path, args) -> dict:
             result["soft_binding"] = soft
         return result
 
+    if kind == "unknown":
+        note = "These bytes match no supported text, image or container format."
+        if not args.json:
+            print("Kind: unknown")
+            print(f"Path: {path}")
+            print(f"Note: {note}")
+            print("Use --as text|image|container to force a pipeline.")
+        return {
+            "kind": "unknown",
+            "path": str(path),
+            "note": note,
+            "suspicious": False,
+        }
+
     report = inspect_container(path)
     if not args.json:
         print("Kind: container")

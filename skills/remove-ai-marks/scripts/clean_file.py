@@ -29,10 +29,12 @@ from clean_asset import (
     clean_asset,
 )
 from common import (
+    ROUTER_ADVICE,
     atomic_write_text,
     backup_path,
     cleaned_path,
     eprint,
+    guard_binary,
     paths_alias,
     validate_output_path,
 )
@@ -82,6 +84,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--keep-non-ai-metadata", action="store_true")
     p.add_argument(
         "--as", dest="force_type", choices=("auto", "text", "image", "container"), default="auto"
+    )
+    p.add_argument(
+        "--force-text",
+        action="store_true",
+        help="Clean as text even when the bytes look like a binary container",
     )
 
     p.add_argument("--tsapa", action="store_true", help="Text: live TSAPA evolutionary rewrite")
@@ -308,8 +315,24 @@ def _plan_work(
             destinations.append(output)
             dest = output
 
+        kind = classify_asset(item.path, forced_kind=args.force_type)
+        if kind == "unknown" and not (args.force_text or args.force_type == "text"):
+            raise ValueError(
+                f"refusing to classify {item.path}: unrecognized format\n"
+                + "\n".join(ROUTER_ADVICE)
+            )
+        if kind == "unknown":
+            kind = "text"
+        if kind == "text" and not args.force_text:
+            with item.path.open("rb") as source:
+                head = source.read(8192)
+            guard_binary(
+                head,
+                str(item.path),
+                allow_binary=args.force_text,
+                advice=ROUTER_ADVICE,
+            )
         try:
-            kind = classify_asset(item.path, forced_kind=args.force_type)
             plan = _build_clean_plan(args, dest, kind)
         except Exception as error:
             raise _CleanPlanPreflightError(item.path, dest, error) from error

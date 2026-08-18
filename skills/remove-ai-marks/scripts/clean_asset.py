@@ -605,6 +605,8 @@ def clean_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
         )
     _validate_operation(path, dest, plan)
     kind = classify_asset(path, forced_kind=plan.forced_kind)
+    if kind == "unknown":
+        kind = "text"
     if plan.visible is not None and kind != "image":
         raise ValueError("visible cleaning is only valid for image assets")
     if plan.degrade is not None and kind != "image":

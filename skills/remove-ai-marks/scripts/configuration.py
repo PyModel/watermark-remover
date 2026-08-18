@@ -18,6 +18,26 @@ Supported environment variables (all optional):
     WATERMARKS_REWRITE_DISABLE_THINKING — Disable thinking on reasoning models
     WATERMARKS_PLL_MODEL            — PLL scorer model
     WATERMARKS_EMBED_MODEL          — Embedding scorer model
+    WATERMARKS_MAX_INPUT_BYTES      — Max input bytes (default: 256 MiB)
+    WATERMARKS_MAX_STDIN_BYTES      — Max stdin bytes (default: 64 MiB)
+    WATERMARKS_MAX_FILE_SIZE        — Deprecated alias of WATERMARKS_MAX_INPUT_BYTES
+    WATERMARKS_SERVER_HOST          — HTTP service bind host
+    WATERMARKS_SERVER_PORT          — HTTP service bind port
+    WATERMARKS_SERVER_API_KEY       — HTTP service bearer API key
+    WATERMARKS_GEMINI_API_KEY       — Gemini text-detector API key
+    WATERMARKS_GEMINI_MODEL         — Gemini text-detector model
+    WATERMARKS_GEMINI_TIMEOUT       — Gemini text-detector timeout
+    WATERMARKS_GEMINI_MAX_CHARS     — Gemini text-detector max chars
+    WATERMARKS_MARKLLM_SCHEME       — MarkLLM detection scheme
+    WATERMARKS_MARKLLM_TIMEOUT      — MarkLLM timeout
+    WATERMARKS_MARKLLM_RLIMIT_AS    — MarkLLM child RLIMIT_AS
+    WATERMARKS_SYNTHID_SCORER_URL   — SynthID scorer HTTP URL
+    WATERMARKS_SYNTHID_SCORER_API_KEY — SynthID scorer bearer API key
+    WATERMARKS_SYNTHID_SCORER_TIMEOUT — SynthID scorer timeout
+    WATERMARKS_SYNTHID_SERVER_HOST  — SynthID sidecar bind host
+    WATERMARKS_SYNTHID_SERVER_PORT  — SynthID sidecar bind port
+    WATERMARKS_SYNTHID_SERVER_VERSION — SynthID sidecar version
+    WATERMARKS_SERVICE_URL          — Optional thin-client service URL
 """
 
 from __future__ import annotations
@@ -200,6 +220,120 @@ _SETTINGS_DEF: list[tuple[str, Any, str, ConfigSource]] = [
         "Embedding scorer model",
         ConfigSource.DEFAULT,
     ),
+    (
+        "max_input_bytes",
+        256 * 1024 * 1024,
+        "Max input bytes (256 MiB default; WATERMARKS_MAX_FILE_SIZE aliases here)",
+        ConfigSource.DEFAULT,
+    ),
+    (
+        "max_stdin_bytes",
+        64 * 1024 * 1024,
+        "Max stdin bytes (64 MiB default)",
+        ConfigSource.DEFAULT,
+    ),
+    (
+        "server_host",
+        "127.0.0.1",
+        "HTTP service bind host",
+        ConfigSource.DEFAULT,
+    ),
+    (
+        "server_port",
+        8765,
+        "HTTP service bind port",
+        ConfigSource.DEFAULT,
+    ),
+    (
+        "server_api_key",
+        None,
+        "HTTP service bearer API key",
+        ConfigSource.DEFAULT,
+    ),
+    (
+        "gemini_api_key",
+        None,
+        "Gemini text-detector API key",
+        ConfigSource.DEFAULT,
+    ),
+    (
+        "gemini_model",
+        "gemini-2.5-flash",
+        "Gemini text-detector model",
+        ConfigSource.DEFAULT,
+    ),
+    (
+        "gemini_timeout",
+        30.0,
+        "Gemini text-detector timeout seconds",
+        ConfigSource.DEFAULT,
+    ),
+    (
+        "gemini_max_chars",
+        1_000_000,
+        "Gemini text-detector max chars",
+        ConfigSource.DEFAULT,
+    ),
+    (
+        "markllm_scheme",
+        "kgw",
+        "MarkLLM detection scheme",
+        ConfigSource.DEFAULT,
+    ),
+    (
+        "markllm_timeout",
+        600.0,
+        "MarkLLM timeout seconds",
+        ConfigSource.DEFAULT,
+    ),
+    (
+        "markllm_rlimit_as",
+        8 * 1024 * 1024 * 1024,
+        "MarkLLM child RLIMIT_AS",
+        ConfigSource.DEFAULT,
+    ),
+    (
+        "synthid_scorer_url",
+        None,
+        "SynthID scorer HTTP URL",
+        ConfigSource.DEFAULT,
+    ),
+    (
+        "synthid_scorer_api_key",
+        None,
+        "SynthID scorer bearer API key",
+        ConfigSource.DEFAULT,
+    ),
+    (
+        "synthid_scorer_timeout",
+        60.0,
+        "SynthID scorer timeout seconds",
+        ConfigSource.DEFAULT,
+    ),
+    (
+        "synthid_server_host",
+        "127.0.0.1",
+        "SynthID sidecar bind host",
+        ConfigSource.DEFAULT,
+    ),
+    (
+        "synthid_server_port",
+        8766,
+        "SynthID sidecar bind port",
+        ConfigSource.DEFAULT,
+    ),
+    (
+        "synthid_server_version",
+        None,
+        "SynthID sidecar version",
+        ConfigSource.DEFAULT,
+    ),
+    (
+        "service_url",
+        None,
+        "Optional thin-client service URL",
+        ConfigSource.DEFAULT,
+    ),
 ]
 
 
@@ -280,6 +414,25 @@ def load_configuration(project_root: Path | None = None) -> ConfigSummary:
         "rewrite_disable_thinking": ("WATERMARKS_REWRITE_DISABLE_THINKING", "bool"),
         "pll_model": ("WATERMARKS_PLL_MODEL", "str"),
         "embed_model": ("WATERMARKS_EMBED_MODEL", "str"),
+        "max_input_bytes": ("WATERMARKS_MAX_INPUT_BYTES", "int"),
+        "max_stdin_bytes": ("WATERMARKS_MAX_STDIN_BYTES", "int"),
+        "server_host": ("WATERMARKS_SERVER_HOST", "str"),
+        "server_port": ("WATERMARKS_SERVER_PORT", "int"),
+        "server_api_key": ("WATERMARKS_SERVER_API_KEY", "str"),
+        "gemini_api_key": ("WATERMARKS_GEMINI_API_KEY", "str"),
+        "gemini_model": ("WATERMARKS_GEMINI_MODEL", "str"),
+        "gemini_timeout": ("WATERMARKS_GEMINI_TIMEOUT", "float"),
+        "gemini_max_chars": ("WATERMARKS_GEMINI_MAX_CHARS", "int"),
+        "markllm_scheme": ("WATERMARKS_MARKLLM_SCHEME", "str"),
+        "markllm_timeout": ("WATERMARKS_MARKLLM_TIMEOUT", "float"),
+        "markllm_rlimit_as": ("WATERMARKS_MARKLLM_RLIMIT_AS", "int"),
+        "synthid_scorer_url": ("WATERMARKS_SYNTHID_SCORER_URL", "str"),
+        "synthid_scorer_api_key": ("WATERMARKS_SYNTHID_SCORER_API_KEY", "str"),
+        "synthid_scorer_timeout": ("WATERMARKS_SYNTHID_SCORER_TIMEOUT", "float"),
+        "synthid_server_host": ("WATERMARKS_SYNTHID_SERVER_HOST", "str"),
+        "synthid_server_port": ("WATERMARKS_SYNTHID_SERVER_PORT", "int"),
+        "synthid_server_version": ("WATERMARKS_SYNTHID_SERVER_VERSION", "str"),
+        "service_url": ("WATERMARKS_SERVICE_URL", "str"),
     }
 
     for key, default_val, description, _ in _SETTINGS_DEF:
@@ -305,6 +458,20 @@ def load_configuration(project_root: Path | None = None) -> ConfigSummary:
         if env_var_name and env_var_name[0] in os.environ:
             converted = _convert_or_record(
                 parse_errors, key, os.environ[env_var_name[0]], env_var_name[1]
+            )
+            if converted is not None:
+                value = converted
+                source = ConfigSource.ENV_VAR
+
+        # Deprecated alias: WATERMARKS_MAX_FILE_SIZE maps onto max_input_bytes.
+        # The canonical key WATERMARKS_MAX_INPUT_BYTES wins when both are set.
+        if (
+            key == "max_input_bytes"
+            and "WATERMARKS_MAX_FILE_SIZE" in os.environ
+            and "WATERMARKS_MAX_INPUT_BYTES" not in os.environ
+        ):
+            converted = _convert_or_record(
+                parse_errors, key, os.environ["WATERMARKS_MAX_FILE_SIZE"], "int"
             )
             if converted is not None:
                 value = converted
