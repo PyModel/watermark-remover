@@ -1,5 +1,5 @@
 # Test/lint dependencies for local dev and CI.
-pytest>=8,<10
+pytest>=9.1.1,<10
 pypdf>=6,<7
 ruff>=0.9,<1
 # OpenAPI contract validation for wm-serve (CI validates /openapi.json).
