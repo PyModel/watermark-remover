@@ -28,10 +28,14 @@ FAKE_TRANSFORMERS = (
     "        print('MARKLLM_PRETRAINED_KWARGS=' + repr(kwargs), file=sys.stderr)\n"
     "        return _LM()\n"
     "\n"
+    "class _Tok:\n"
+    "    def encode(self, s):\n"
+    "        return [0] * 512\n"
+    "\n"
     "class AutoTokenizer:\n"
     "    @staticmethod\n"
     "    def from_pretrained(name, **kwargs):\n"
-    "        return object()\n"
+    "        return _Tok()\n"
 )
 
 FAKE_TRANSFORMERS_CONFIG = (
@@ -75,6 +79,23 @@ def _fake_auto_watermark(*, fail_detect: bool = False, fail_generate: bool = Fal
     )
 
 
+def _fake_auto_watermark_detect(detect_json: str) -> str:
+    """Fake AutoWatermark returning a caller-supplied detect dict (JSON)."""
+    return (
+        "from types import SimpleNamespace\n"
+        "class _WM:\n"
+        "    def __init__(self):\n"
+        "        self.config = SimpleNamespace(gen_kwargs={})\n"
+        "    def detect_watermark(self, text, return_dict=True):\n"
+        f"        return {detect_json}\n"
+        "\n"
+        "class AutoWatermark:\n"
+        "    @staticmethod\n"
+        "    def load(algorithm_name, algorithm_config=None, transformers_config=None):\n"
+        "        return _WM()\n"
+    )
+
+
 def _make_fake_upstream(
     tmp_path: Path,
     *,
@@ -82,6 +103,7 @@ def _make_fake_upstream(
     fail_detect: bool = False,
     fail_generate: bool = False,
     missing_watermark_dir: bool = False,
+    detect_json: str | None = None,
 ) -> Path:
     upstream = tmp_path / "MarkLLM"
     config_dir = upstream / "config"
@@ -93,9 +115,12 @@ def _make_fake_upstream(
         watermark = upstream / "watermark"
         watermark.mkdir(parents=True)
         (watermark / "__init__.py").write_text("")
-        (watermark / "auto_watermark.py").write_text(
-            _fake_auto_watermark(fail_detect=fail_detect, fail_generate=fail_generate)
+        fake = (
+            _fake_auto_watermark_detect(detect_json)
+            if detect_json is not None
+            else _fake_auto_watermark(fail_detect=fail_detect, fail_generate=fail_generate)
         )
+        (watermark / "auto_watermark.py").write_text(fake)
     utils_dir = upstream / "utils"
     utils_dir.mkdir(parents=True)
     (utils_dir / "__init__.py").write_text("")
@@ -391,6 +416,220 @@ def test_cli_watermark_json_stdout_stays_pure_without_output(tmp_path: Path):
     assert payload["watermarked_output"] == "-"
     assert "WATERMARKED SAMPLE" in (r.stderr or "")
     assert "WATERMARKED SAMPLE" not in (r.stdout or "")
+
+
+def test_cli_detect_positive_verdict_detected(tmp_path: Path):
+    """A positive observation becomes DETECTED even with unknown provenance."""
+    upstream = _make_fake_upstream(tmp_path, detect_json='{"is_watermarked": True, "score": 9.2}')
+    f = tmp_path / "t.txt"
+    f.write_text("hello world")
+    r = _run_adapter("detect", str(f), "--scheme", "kgw", "--upstream-dir", str(upstream), "--json")
+    assert r.returncode == 0, r.stderr
+    payload = json.loads(r.stdout)
+    assert payload["verdict"] == "DETECTED"
+    assert payload["detector_verdict"] == "DETECTED"
+    assert payload["is_watermarked"] is True
+    assert payload["provenance_match"] is None
+    assert payload["input_tokens"] == 512
+
+
+def test_cli_detect_negative_no_key_inconclusive(tmp_path: Path):
+    """A negative with unknown provenance must NOT become 'clean'."""
+    upstream = _make_fake_upstream(tmp_path, detect_json='{"is_watermarked": False, "score": 0.25}')
+    f = tmp_path / "t.txt"
+    f.write_text("hello world")
+    r = _run_adapter("detect", str(f), "--scheme", "kgw", "--upstream-dir", str(upstream), "--json")
+    assert r.returncode == 0, r.stderr
+    payload = json.loads(r.stdout)
+    assert payload["verdict"] == "INCONCLUSIVE"
+    assert payload["detector_verdict"] == "NOT_DETECTED"
+    assert payload["is_watermarked"] is False
+    assert payload["provenance_match"] is None
+    assert "provenance/key match not confirmed" in payload["verdict_reason"]
+    # Human output carries the warning line (non-JSON mode).
+    r2 = _run_adapter("detect", str(f), "--scheme", "kgw", "--upstream-dir", str(upstream))
+    assert r2.returncode == 0, r2.stderr
+    assert "does NOT establish that the document is watermark-free" in r2.stdout
+
+
+def test_cli_detect_negative_with_key_not_detected(tmp_path: Path):
+    """A negative with an asserted key and enough tokens is a strong negative."""
+    upstream = _make_fake_upstream(tmp_path, detect_json='{"is_watermarked": False, "score": 0.25}')
+    f = tmp_path / "t.txt"
+    f.write_text("hello world")
+    r = _run_adapter(
+        "detect",
+        str(f),
+        "--scheme",
+        "kgw",
+        "--upstream-dir",
+        str(upstream),
+        "--key-id",
+        "kgw-test-v1",
+        "--json",
+    )
+    assert r.returncode == 0, r.stderr
+    payload = json.loads(r.stdout)
+    assert payload["verdict"] == "NOT_DETECTED"
+    assert payload["provenance_match"] is True
+    assert payload["key_id"] == "kgw-test-v1"
+
+
+def test_cli_detect_abstention_band_inconclusive(tmp_path: Path):
+    """A near-threshold score abstains even with a matching key."""
+    upstream = _make_fake_upstream(
+        tmp_path, detect_json='{"is_watermarked": False, "score": 0.503}'
+    )
+    f = tmp_path / "t.txt"
+    f.write_text("hello world")
+    r = _run_adapter(
+        "detect",
+        str(f),
+        "--scheme",
+        "synthid-text",
+        "--upstream-dir",
+        str(upstream),
+        "--key-id",
+        "synthid-test-v1",
+        "--json",
+    )
+    assert r.returncode == 0, r.stderr
+    payload = json.loads(r.stdout)
+    assert payload["verdict"] == "INCONCLUSIVE"
+    assert payload["threshold"] == 0.52
+    assert "abstention band" in payload["verdict_reason"]
+
+
+def test_cli_detect_short_text_inconclusive(tmp_path: Path):
+    """Too few scored tokens abstains even with a matching key."""
+    upstream = _make_fake_upstream(tmp_path, detect_json='{"is_watermarked": False, "score": 0.25}')
+    f = tmp_path / "t.txt"
+    f.write_text("hello world")
+    r = _run_adapter(
+        "detect",
+        str(f),
+        "--scheme",
+        "kgw",
+        "--upstream-dir",
+        str(upstream),
+        "--key-id",
+        "kgw-test-v1",
+        "--min-tokens",
+        "1000",
+        "--json",
+    )
+    assert r.returncode == 0, r.stderr
+    payload = json.loads(r.stdout)
+    assert payload["verdict"] == "INCONCLUSIVE"
+    assert "below minimum calibrated length" in payload["verdict_reason"]
+
+
+def test_cli_detect_unsupported_sidecar_scheme(tmp_path: Path):
+    """A sidecar declaring an unknown scheme yields UNSUPPORTED, no model load."""
+    upstream = _make_fake_upstream(tmp_path, detect_json='{"is_watermarked": True, "score": 9.2}')
+    f = tmp_path / "t.txt"
+    f.write_text("hello world")
+    (tmp_path / "t.txt.wm.json").write_text(
+        json.dumps({"scheme": "anthropic-synthid", "key_id": "claude-key"})
+    )
+    r = _run_adapter("detect", str(f), "--scheme", "kgw", "--upstream-dir", str(upstream), "--json")
+    assert r.returncode == 0, r.stderr
+    payload = json.loads(r.stdout)
+    assert payload["verdict"] == "UNSUPPORTED"
+    assert payload["provenance_match"] is False
+    assert "anthropic-synthid" in payload["verdict_reason"]
+
+
+def test_cli_detect_sidecar_config_hash_match(tmp_path: Path):
+    """Sidecar config_hash matching the detected config confirms provenance."""
+    import hashlib
+
+    upstream = _make_fake_upstream(tmp_path, detect_json='{"is_watermarked": False, "score": 0.25}')
+    f = tmp_path / "t.txt"
+    f.write_text("hello world")
+    (tmp_path / "t.txt.wm.json").write_text(
+        json.dumps(
+            {
+                "scheme": "KGW",
+                "key_id": "kgw-test-v1",
+                "config_hash": hashlib.sha256(KGW_CONFIG.encode()).hexdigest(),
+            }
+        )
+    )
+    r = _run_adapter("detect", str(f), "--scheme", "kgw", "--upstream-dir", str(upstream), "--json")
+    assert r.returncode == 0, r.stderr
+    payload = json.loads(r.stdout)
+    assert payload["verdict"] == "NOT_DETECTED"
+    assert payload["provenance_match"] is True
+    assert payload["key_id"] == "kgw-test-v1"
+
+
+def test_cli_detect_sidecar_config_hash_mismatch(tmp_path: Path):
+    """Sidecar config_hash differing from the config is a provenance mismatch."""
+    upstream = _make_fake_upstream(tmp_path, detect_json='{"is_watermarked": False, "score": 0.25}')
+    f = tmp_path / "t.txt"
+    f.write_text("hello world")
+    (tmp_path / "t.txt.wm.json").write_text(
+        json.dumps({"scheme": "KGW", "key_id": "kgw-test-v1", "config_hash": "deadbeef"})
+    )
+    r = _run_adapter("detect", str(f), "--scheme", "kgw", "--upstream-dir", str(upstream), "--json")
+    assert r.returncode == 0, r.stderr
+    payload = json.loads(r.stdout)
+    assert payload["verdict"] == "INCONCLUSIVE"
+    assert payload["provenance_match"] is False
+
+
+def test_cli_detect_sidecar_different_scheme_mismatch(tmp_path: Path):
+    """A sidecar declaring a different supported scheme is a mismatch."""
+    import hashlib
+
+    upstream = _make_fake_upstream(tmp_path, detect_json='{"is_watermarked": False, "score": 0.25}')
+    f = tmp_path / "t.txt"
+    f.write_text("hello world")
+    (tmp_path / "t.txt.wm.json").write_text(
+        json.dumps(
+            {
+                "scheme": "SynthID",
+                "key_id": "synthid-key",
+                "config_hash": hashlib.sha256(SYNTHID_CONFIG.encode()).hexdigest(),
+            }
+        )
+    )
+    r = _run_adapter("detect", str(f), "--scheme", "kgw", "--upstream-dir", str(upstream), "--json")
+    assert r.returncode == 0, r.stderr
+    payload = json.loads(r.stdout)
+    assert payload["verdict"] == "INCONCLUSIVE"
+    assert payload["provenance_match"] is False
+
+
+def test_cli_watermark_writes_sidecar(tmp_path: Path):
+    """watermark -o writes a provenance sidecar next to the sample."""
+    upstream = _make_fake_upstream(tmp_path)
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("write about capybaras")
+    wm_out = tmp_path / "wm.txt"
+    r = _run_adapter(
+        "watermark",
+        str(prompt),
+        "--scheme",
+        "kgw",
+        "-o",
+        str(wm_out),
+        "--key-id",
+        "kgw-test-v1",
+        "--upstream-dir",
+        str(upstream),
+        "--device",
+        "cpu",
+        "--json",
+    )
+    assert r.returncode == 0, r.stderr
+    sidecar = json.loads((tmp_path / "wm.txt.wm.json").read_text())
+    assert sidecar["scheme"] == "KGW"
+    assert sidecar["key_id"] == "kgw-test-v1"
+    assert sidecar["config_hash"]
+    assert sidecar["implementation_commit"] is None  # fake upstream has no git
+    assert "timestamp" in sidecar
 
 
 def test_cli_detect_applies_rlimit_as_in_child(tmp_path: Path):
