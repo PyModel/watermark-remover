@@ -35,7 +35,10 @@ and `release-images.yml`, which pushes the GHCR images.
 3. Tag the merged commit and push it: `git tag -a v1.2.3 -m "…" && git push origin v1.2.3`.
 
 The GitHub release is gated on the PyPI publish succeeding, so a release never
-announces an artifact that failed to ship.
+announces an artifact that failed to ship. A tag that is not a plain `vX.Y.Z`
+(`v1.2.3-rc1`, `v1.2.3b1`) is published as a prerelease and is never marked
+"Latest", so it does not move the README release badge. Re-running the job on an
+existing release updates it rather than failing.
 
 ## Prerequisites
 
