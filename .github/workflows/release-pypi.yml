@@ -1,7 +1,8 @@
 name: release-pypi
 
-# Pushing a v* tag is the only trigger. Every step derives the version from the
-# tag, so a branch dispatch could only ever fail the ref check.
+# Pushing a v* tag is the only trigger. The build takes its version from
+# pyproject.toml, so the tag must match it — the artifact check below enforces
+# that, and a branch dispatch could only ever fail it.
 on:
   push:
     tags:
