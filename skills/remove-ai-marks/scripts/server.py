@@ -59,6 +59,9 @@ API_KEY = os.environ.get("WATERMARKS_SERVER_API_KEY", "").strip()
 # stays well under MAX_INPUT_BYTES for the same cap.
 MAX_BODY_BYTES = MAX_INPUT_BYTES + (MAX_INPUT_BYTES >> 1)
 
+TEXT_DETECTION_STATUSES = ("DETECTED", "INCONCLUSIVE", "NOT_DETECTED", "NOT_RUN")
+_UNRESOLVED_TEXT_VERDICTS = frozenset({"INCONCLUSIVE", "UNSUPPORTED", "ERROR"})
+
 ALLOWED_CLEAN_OPTIONS = {
     "nfkc": bool,
     "aggressive_homoglyphs": bool,
@@ -76,6 +79,31 @@ ALLOWED_CLEAN_OPTIONS = {
 
 def _json_ok(payload: dict[str, Any]) -> bytes:
     return json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+
+
+def _text_detection_status(reports: list[dict[str, Any]]) -> str:
+    """Aggregate available text-detector reports without treating unknown as clean."""
+    unresolved = False
+    not_detected = False
+    for report in reports:
+        if not isinstance(report, dict) or report.get("available") is not True:
+            continue
+        verdict = report.get("verdict")
+        if report.get("is_watermarked") is True or verdict == "DETECTED":
+            return "DETECTED"
+        if verdict in _UNRESOLVED_TEXT_VERDICTS:
+            unresolved = True
+        elif verdict == "NOT_DETECTED" or report.get("is_watermarked") is False:
+            not_detected = True
+        else:
+            # An available detector that produced no recognized decision did
+            # run, but cannot support a clean result.
+            unresolved = True
+    if unresolved:
+        return "INCONCLUSIVE"
+    if not_detected:
+        return "NOT_DETECTED"
+    return "NOT_RUN"
 
 
 def capabilities() -> dict[str, Any]:
@@ -245,6 +273,15 @@ _OPENAPI_PATHS: dict[str, dict[str, Any]] = {
                             type="string", enum=["text", "image", "container", "unknown"]
                         ),
                         "suspicious": _schema(type="boolean"),
+                        "detection_status": _schema(
+                            type="string",
+                            enum=list(TEXT_DETECTION_STATUSES),
+                            description=(
+                                "Aggregate text-watermark detector state. INCONCLUSIVE means "
+                                "the service cannot rule out a watermark; it is not a confirmed "
+                                "detection."
+                            ),
+                        ),
                         "report": _schema(type="object"),
                     },
                 )
@@ -498,6 +535,7 @@ class Handler(BaseHTTPRequestHandler):
                         "note": "unrecognized format; use a filename with a known extension",
                     },
                     "suspicious": False,
+                    "detection_status": "NOT_RUN",
                 },
             )
             return
@@ -520,18 +558,22 @@ class Handler(BaseHTTPRequestHandler):
                 report = inspect_image(path).to_dict()
             else:
                 report = inspect_container(path).to_dict()
-        detected_wm = any(
-            entry.get("available") and entry.get("is_watermarked")
-            for entry in report.get("text_detectors") or []
-        )
+        detection_status = _text_detection_status(report.get("text_detectors") or [])
         suspicious = (
             bool(report.get("suspicious_total"))
             or bool(report.get("has_c2pa") or report.get("has_ai_metadata"))
             or bool(report.get("stylometry", {}).get("score", 0.0) >= 0.65)
-            or detected_wm
+            or detection_status in {"DETECTED", "INCONCLUSIVE"}
         )
         self._respond(
-            HTTPStatus.OK, {"ok": True, "kind": kind, "report": report, "suspicious": suspicious}
+            HTTPStatus.OK,
+            {
+                "ok": True,
+                "kind": kind,
+                "report": report,
+                "suspicious": suspicious,
+                "detection_status": detection_status,
+            },
         )
 
     def _handle_detect(self, data: bytes, name: str) -> None:
