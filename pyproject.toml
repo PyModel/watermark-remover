@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "watermark-remover"
-version = "0.4.0"
+version = "0.5.0"
 description = "Pure-Python AI watermark remover for text, images, and documents"
 readme = "README.md"
 requires-python = ">=3.10"

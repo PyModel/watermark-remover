@@ -1,10 +1,11 @@
 name: release-images
 
+# Pushing a v* tag is the only trigger. Both jobs derive their image tags from
+# the ref, so a branch dispatch could only ever fail the ref check.
 on:
   push:
     tags:
       - "v*"
-  workflow_dispatch:
 
 permissions:
   contents: read
