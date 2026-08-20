@@ -175,6 +175,30 @@ def test_inspect_text_treats_inconclusive_detector_as_suspicious(conn, monkeypat
     assert body["detection_status"] == "INCONCLUSIVE"
 
 
+def test_inspect_text_treats_failed_configured_detector_as_suspicious(conn, monkeypatch):
+    """A configured detector that ran and failed is unresolved, not 'never ran'."""
+    monkeypatch.setattr(
+        server,
+        "run_all_text_detectors",
+        lambda _text: [
+            {
+                "detector": "markllm",
+                "available": False,
+                "configured": True,
+                "error": "MarkLLM detection timed out",
+            }
+        ],
+    )
+    status, body = _post(
+        conn,
+        "/inspect",
+        {"file": _b64(b"ordinary text"), "name": "note.txt", "detect": True},
+    )
+    assert status == 200
+    assert body["detection_status"] == "INCONCLUSIVE"
+    assert body["suspicious"] is True
+
+
 @pytest.mark.parametrize(
     ("reports", "expected"),
     [
@@ -189,7 +213,19 @@ def test_inspect_text_treats_inconclusive_detector_as_suspicious(conn, monkeypat
         ([{"available": True, "verdict": "UNSUPPORTED"}], "INCONCLUSIVE"),
         ([{"available": True, "error": "detector failed"}], "INCONCLUSIVE"),
         ([{"available": True, "verdict": "NOT_DETECTED", "is_watermarked": False}], "NOT_DETECTED"),
+        ([{"available": False, "configured": False, "error": "not configured"}], "NOT_RUN"),
         ([{"available": False, "error": "not configured"}], "NOT_RUN"),
+        (
+            [{"available": False, "configured": True, "error": "MarkLLM detection timed out"}],
+            "INCONCLUSIVE",
+        ),
+        (
+            [
+                {"available": False, "configured": True, "error": "MarkLLM detection timed out"},
+                {"available": True, "verdict": "NOT_DETECTED", "is_watermarked": False},
+            ],
+            "INCONCLUSIVE",
+        ),
         ([], "NOT_RUN"),
     ],
 )

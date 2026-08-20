@@ -18,7 +18,8 @@ Decision model:
         NOT_DETECTED   below threshold AND provenance/key match confirmed AND
                        enough scored tokens
         INCONCLUSIVE   below threshold but provenance unknown/mismatched, or
-                       score inside the abstention band, or too short
+                       score inside the abstention band, or too few (or an
+                       unknown number of) scored tokens
         UNSUPPORTED    document provenance declares a scheme we cannot run
         ERROR          detector returned no score/threshold
   A negative with unknown provenance must never be read as "watermark-free".
@@ -261,7 +262,7 @@ def _decide(
     score: float | None,
     threshold: float | None,
     provenance_match: bool | None,
-    input_tokens: int | None,
+    scored_tokens: int | None,
     min_tokens: int,
     abstention_band: float,
 ) -> tuple[str, str]:
@@ -298,10 +299,15 @@ def _decide(
             VERDICT_INCONCLUSIVE,
             "detector below threshold but provenance/key match not confirmed",
         )
-    if input_tokens is not None and input_tokens < min_tokens:
+    if min_tokens > 0 and scored_tokens is None:
         return (
             VERDICT_INCONCLUSIVE,
-            f"below minimum calibrated length ({input_tokens} < {min_tokens} tokens)",
+            f"scored token count unknown (minimum {min_tokens} tokens)",
+        )
+    if min_tokens > 0 and scored_tokens < min_tokens:
+        return (
+            VERDICT_INCONCLUSIVE,
+            f"below minimum calibrated length ({scored_tokens} < {min_tokens} tokens)",
         )
     return (
         VERDICT_NOT_DETECTED,
@@ -399,10 +405,13 @@ def _cmd_detect(args: argparse.Namespace, upstream: Path, alg: str) -> int:
 
     key_id = args.key_id or sidecar.get("key_id")
     # provenance_match: True only when the sidecar's config matches the config
-    # we detected with (content hash), or the operator asserted a key id.
+    # we detected with (content hash), or the *operator* asserted a key id on
+    # the command line. A sidecar key_id alone is document-supplied and cannot
+    # confirm provenance: the `watermark` subcommand always writes config_hash,
+    # so a sidecar without one did not come from this tool.
     if sidecar_config_hash is not None:
         provenance_match = sidecar_config_hash == config_hash
-    elif key_id is not None:
+    elif args.key_id is not None:
         provenance_match = True
     else:
         provenance_match = None
@@ -431,7 +440,7 @@ def _cmd_detect(args: argparse.Namespace, upstream: Path, alg: str) -> int:
         score=score,
         threshold=threshold,
         provenance_match=provenance_match,
-        input_tokens=input_tokens,
+        scored_tokens=effective,
         min_tokens=args.min_tokens,
         abstention_band=args.abstention_band,
     )
@@ -492,6 +501,23 @@ def _cmd_detect(args: argparse.Namespace, upstream: Path, alg: str) -> int:
     return 0
 
 
+_SECRET_KEY_PARTS = ("key", "seed", "secret", "salt", "password")
+
+
+def _redact_secrets(value: object) -> object:
+    """Strip secret-bearing fields from a config before it travels with the sample."""
+    if isinstance(value, dict):
+        return {
+            k: "[redacted]"
+            if any(part in str(k).lower() for part in _SECRET_KEY_PARTS)
+            else _redact_secrets(v)
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_secrets(v) for v in value]
+    return value
+
+
 def _cmd_watermark(args: argparse.Namespace, upstream: Path, alg: str) -> int:
     prompt = read_text_input(args.prompt, allow_binary=args.force_text)
 
@@ -530,11 +556,11 @@ def _cmd_watermark(args: argparse.Namespace, upstream: Path, alg: str) -> int:
         atomic_write_text(Path(wm_out), watermarked)
         # Provenance sidecar: record how this sample was marked so detection
         # of it later is deterministic instead of guesswork. key_id is an
-        # identifier, never the raw secret. The full config is embedded so a
-        # later detection can verify config_hash without re-reading the file.
-        config = _resolve_config(upstream, alg, args.config)
+        # identifier, never the raw secret. The config is embedded for human
+        # inspection with secret-bearing fields redacted; a later detection
+        # verifies provenance through config_hash alone, never these values.
         try:
-            params = json.loads(config.read_text("utf-8"))
+            params = _redact_secrets(json.loads(config.read_text("utf-8")))
         except (OSError, ValueError):
             params = None
         sidecar = {

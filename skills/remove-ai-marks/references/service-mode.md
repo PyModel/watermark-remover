@@ -64,8 +64,9 @@ When writing a temp file for pasted text, keep a known extension (`.txt` /
 For `/inspect`, `detection_status` is `DETECTED`, `INCONCLUSIVE`,
 `NOT_DETECTED`, or `NOT_RUN`. `INCONCLUSIVE` means an available detector ran but
 could not rule out a watermark; it sets `suspicious: true` conservatively but is
-not a confirmed detection. `NOT_RUN` means detection was not requested or no
-configured detector produced an available report. Pass `"detect": true` only
+not a confirmed detection. A configured detector that ran and failed (timeout,
+crash, unreadable output) also aggregates to `INCONCLUSIVE`, never `NOT_RUN`.
+`NOT_RUN` means detection was not requested or no detector was configured. Pass `"detect": true` only
 with consent when a configured vendor detector may send text to its provider.
 
 The machine-readable contract lives at `$WM/openapi.json` — plug it into any

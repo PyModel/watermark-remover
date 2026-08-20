@@ -86,7 +86,14 @@ def _text_detection_status(reports: list[dict[str, Any]]) -> str:
     unresolved = False
     not_detected = False
     for report in reports:
-        if not isinstance(report, dict) or report.get("available") is not True:
+        if not isinstance(report, dict):
+            continue
+        if report.get("available") is not True:
+            # A detector that was configured to run but reported unavailable
+            # ran and failed (timeout, crash, bad output). That is unresolved
+            # evidence, not "detection was never requested".
+            if report.get("configured") is True:
+                unresolved = True
             continue
         verdict = report.get("verdict")
         if report.get("is_watermarked") is True or verdict == "DETECTED":
@@ -279,7 +286,8 @@ _OPENAPI_PATHS: dict[str, dict[str, Any]] = {
                             description=(
                                 "Aggregate text-watermark detector state. INCONCLUSIVE means "
                                 "the service cannot rule out a watermark; it is not a confirmed "
-                                "detection."
+                                "detection. A configured detector that ran and failed reports "
+                                "INCONCLUSIVE, not NOT_RUN."
                             ),
                         ),
                         "report": _schema(type="object"),
