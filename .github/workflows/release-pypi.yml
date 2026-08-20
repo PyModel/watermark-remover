@@ -62,7 +62,7 @@ jobs:
           fi
           # Anything that is not a plain vX.Y.Z is a prerelease, so an rc never
           # becomes "Latest" or moves the README release badge.
-          if [[ "${REF_NAME#v}" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+          if [[ "${REF_NAME#v}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             FLAGS=(--latest)
           else
             FLAGS=(--prerelease --latest=false)
