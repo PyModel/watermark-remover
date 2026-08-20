@@ -52,7 +52,7 @@ field and writes it to the output path itself.
 | GET | `/health` | — | `{"ok": true, "version": ...}` |
 | GET | `/capabilities` | — | optional tools / backends present |
 | GET | `/openapi.json` | — | dynamically generated OpenAPI 3.0.3 spec |
-| POST | `/inspect` | `{"file": "<base64>", "name": "notes.md"}` | `{"ok", "kind", "suspicious", "report"}` |
+| POST | `/inspect` | `{"file": "<base64>", "name": "notes.md", "detect": true}` | `{"ok", "kind", "suspicious", "detection_status", "report"}` |
 | POST | `/detect` | `{"file": "<base64>", "name": "notes.txt"}` | `{"ok", "kind", "detections": [...]}` |
 | POST | `/clean` | `{"file": "<base64>", "name": "notes.md", "options": {...}}` | `{"ok", "kind", "cleaned": "<base64>", "report"}` |
 
@@ -60,6 +60,13 @@ field and writes it to the output path itself.
 unrecognized formats answer `kind: "unknown"` (`/inspect`) or 400 (`/clean`).
 When writing a temp file for pasted text, keep a known extension (`.txt` /
 `.md`) in the `name` you send.
+
+For `/inspect`, `detection_status` is `DETECTED`, `INCONCLUSIVE`,
+`NOT_DETECTED`, or `NOT_RUN`. `INCONCLUSIVE` means an available detector ran but
+could not rule out a watermark; it sets `suspicious: true` conservatively but is
+not a confirmed detection. `NOT_RUN` means detection was not requested or no
+configured detector produced an available report. Pass `"detect": true` only
+with consent when a configured vendor detector may send text to its provider.
 
 The machine-readable contract lives at `$WM/openapi.json` — plug it into any
 OpenAPI tooling instead of hand-rolling clients.
