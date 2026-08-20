@@ -36,3 +36,41 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: test -f "dist/watermark_remover-${TAG#v}.tar.gz"
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+
+  github-release:
+    name: Create the GitHub release
+    runs-on: ubuntu-latest
+    # Gated on the PyPI publish so a release never announces an artifact that
+    # failed to ship. Images publish in parallel from release-images.yml.
+    needs: publish
+    permissions:
+      # Creating a release is the only write this job needs.
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Create the release from the curated notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Never interpolate the ref into the script body; see release-images.yml.
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$REF_NAME" =~ ^v[0-9][0-9A-Za-z.+-]*$ ]]; then
+            echo "invalid release ref: $REF_NAME" >&2
+            exit 1
+          fi
+          # The notes file must be committed BEFORE its tag is pushed. A tag that
+          # outruns its notes silently falls back to commit-generated notes.
+          NOTES="docs/release-notes/${REF_NAME}.md"
+          if [[ -f "$NOTES" ]]; then
+            # First line is the release title (`# v1.2.3 — summary`); rest is the body.
+            TITLE="$(head -n 1 "$NOTES" | sed -e 's/^#\{1,\}[[:space:]]*//')"
+            tail -n +2 "$NOTES" > "$RUNNER_TEMP/body.md"
+            gh release create "$REF_NAME" --verify-tag \
+              --title "$TITLE" --notes-file "$RUNNER_TEMP/body.md"
+          else
+            echo "no curated notes at $NOTES; generating from commits" >&2
+            gh release create "$REF_NAME" --verify-tag \
+              --title "$REF_NAME" --generate-notes
+          fi

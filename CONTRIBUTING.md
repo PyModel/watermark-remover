@@ -21,6 +21,22 @@ non-admins.
 To suggest a release without a code change: open a **Release suggestion**
 issue.
 
+## Cutting a release (maintainer)
+
+Pushing a `v*` tag is the whole release. It triggers `release-pypi.yml`, which
+publishes to PyPI via Trusted Publishing and then creates the GitHub release,
+and `release-images.yml`, which pushes the GHCR images.
+
+1. Bump `version` in `pyproject.toml` and merge that to `main`.
+2. **Write `docs/release-notes/v<version>.md` and merge it before tagging.**
+   The first line is the release title (`# v1.2.3 — short summary`); everything
+   after it is the release body. A tag pushed without its notes file still
+   releases, but silently falls back to commit-generated notes.
+3. Tag the merged commit and push it: `git tag -a v1.2.3 -m "…" && git push origin v1.2.3`.
+
+The GitHub release is gated on the PyPI publish succeeding, so a release never
+announces an artifact that failed to ship.
+
 ## Prerequisites
 
 - **Python 3.10+** (stdlib only for the skill scripts; optional rewrite backends
