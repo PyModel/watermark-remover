@@ -433,6 +433,53 @@ def test_cli_detect_positive_verdict_detected(tmp_path: Path):
     assert payload["input_tokens"] == 512
 
 
+def test_cli_detect_positive_inside_abstention_band_stays_detected(tmp_path: Path):
+    """A positive observation is not downgraded by the abstention band."""
+    upstream = _make_fake_upstream(tmp_path, detect_json='{"is_watermarked": True, "score": 0.54}')
+    f = tmp_path / "t.txt"
+    f.write_text("hello world")
+    r = _run_adapter(
+        "detect",
+        str(f),
+        "--scheme",
+        "synthid-text",
+        "--upstream-dir",
+        str(upstream),
+        "--json",
+    )
+    assert r.returncode == 0, r.stderr
+    payload = json.loads(r.stdout)
+    assert payload["verdict"] == "DETECTED"
+    assert payload["detector_verdict"] == "DETECTED"
+    assert payload["threshold"] == 0.52
+
+
+def test_cli_detect_positive_without_threshold_stays_detected(tmp_path: Path):
+    """A positive observation remains DETECTED without a config threshold."""
+    upstream = _make_fake_upstream(tmp_path, detect_json='{"is_watermarked": True, "score": 2.0}')
+    config = tmp_path / "no-threshold.json"
+    config.write_text('{"algorithm_name": "KGW"}')
+    f = tmp_path / "t.txt"
+    f.write_text("hello world")
+    r = _run_adapter(
+        "detect",
+        str(f),
+        "--scheme",
+        "kgw",
+        "--upstream-dir",
+        str(upstream),
+        "--config",
+        str(config),
+        "--json",
+    )
+    assert r.returncode == 0, r.stderr
+    payload = json.loads(r.stdout)
+    assert payload["verdict"] == "DETECTED"
+    assert payload["detector_verdict"] == "DETECTED"
+    assert payload["threshold"] is None
+    assert payload["verdict_reason"] == "detector reported watermarked"
+
+
 def test_cli_detect_negative_no_key_inconclusive(tmp_path: Path):
     """A negative with unknown provenance must NOT become 'clean'."""
     upstream = _make_fake_upstream(tmp_path, detect_json='{"is_watermarked": False, "score": 0.25}')
