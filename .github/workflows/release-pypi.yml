@@ -36,3 +36,63 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: test -f "dist/watermark_remover-${TAG#v}.tar.gz"
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+
+  github-release:
+    name: Create the GitHub release
+    runs-on: ubuntu-latest
+    # Gated on the PyPI publish so a release never announces an artifact that
+    # failed to ship. Images publish in parallel from release-images.yml.
+    needs: publish
+    permissions:
+      # Creating a release is the only write this job needs.
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Create the release from the curated notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Never interpolate the ref into the script body; see release-images.yml.
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$REF_NAME" =~ ^v[0-9][0-9A-Za-z.+-]*$ ]]; then
+            echo "invalid release ref: $REF_NAME" >&2
+            exit 1
+          fi
+          # Anything that is not a plain vX.Y.Z is a prerelease, so an rc never
+          # becomes "Latest" or moves the README release badge.
+          if [[ "${REF_NAME#v}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            FLAGS=(--latest)
+          else
+            FLAGS=(--prerelease --latest=false)
+          fi
+          # The notes file must be committed BEFORE its tag is pushed. A tag that
+          # outruns its notes silently falls back to commit-generated notes.
+          NOTES="docs/release-notes/${REF_NAME}.md"
+          if [[ -f "$NOTES" ]]; then
+            # First line is the release title (`# v1.2.3 — summary`); rest is the body.
+            TITLE="$(head -n 1 "$NOTES" | sed -e 's/^#\{1,\}[[:space:]]*//')"
+            # Catches a notes file copied from another release without retitling.
+            # The trailing class stops v1.2.30 from satisfying v1.2.3.
+            if [[ "$TITLE" != "$REF_NAME" && "$TITLE" != "$REF_NAME"[!0-9A-Za-z.]* ]]; then
+              echo "release title must start with $REF_NAME: $TITLE" >&2
+              exit 1
+            fi
+            tail -n +2 "$NOTES" > "$RUNNER_TEMP/body.md"
+            NOTES_ARGS=(--title "$TITLE" --notes-file "$RUNNER_TEMP/body.md")
+            EDIT_ARGS=("${NOTES_ARGS[@]}")
+          else
+            echo "no curated notes at $NOTES; generating from commits" >&2
+            NOTES_ARGS=(--title "$REF_NAME" --generate-notes)
+            # `gh release edit` cannot generate notes, so a rerun leaves them be.
+            EDIT_ARGS=(--title "$REF_NAME")
+          fi
+          # PyPI has already published by this point, so a retry of this job must
+          # not fail on a release that a previous attempt created.
+          if gh release view "$REF_NAME" >/dev/null 2>&1; then
+            echo "release $REF_NAME already exists; updating it" >&2
+            gh release edit "$REF_NAME" "${FLAGS[@]}" "${EDIT_ARGS[@]}"
+          else
+            gh release create "$REF_NAME" --verify-tag "${FLAGS[@]}" "${NOTES_ARGS[@]}"
+          fi
