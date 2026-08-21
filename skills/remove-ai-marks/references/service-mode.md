@@ -66,8 +66,9 @@ For `/inspect`, `detection_status` is `DETECTED`, `INCONCLUSIVE`,
 could not rule out a watermark; it sets `suspicious: true` conservatively but is
 not a confirmed detection. A configured detector that ran and failed (timeout,
 crash, unreadable output) also aggregates to `INCONCLUSIVE`, never `NOT_RUN`.
-`NOT_RUN` means detection was not requested or no detector was configured. Pass `"detect": true` only
-with consent when a configured vendor detector may send text to its provider.
+`NOT_RUN` means detection was not requested or no detector was configured.
+Pass `"detect": true` only with consent when a configured vendor detector may
+send text to its provider.
 
 The machine-readable contract lives at `$WM/openapi.json` — plug it into any
 OpenAPI tooling instead of hand-rolling clients.
@@ -100,15 +101,18 @@ default unless the user asked in-place) and summarize `report` honestly.
 
 ## Watermark detection before/after (when configured)
 
-When `/capabilities` reports a vendor detector (`text_detectors.gemini-synthid-text`)
-or an image scorer (`scorers.synthid_http` / `scorers.synthid`), measure the
+When `/capabilities` reports a text detector (`text_detectors.markllm`) or an
+image scorer (`scorers.synthid_http` / `scorers.synthid`), measure the
 result by detecting before and after cleaning — either `POST /detect` or fold
 it into the clean with `{"options": {"detect_before": true, "detect_after": true}}`
 (returns `text_detectors.before/after` for text or `synthid_before/after` for
-images). Vendor detection sends text to the configured provider (Gemini) —
-only use it with user consent, and report the vendor's verdict honestly
-(Gemini = Google's official SynthID-text detector; MarkLLM is same-config-only
-research; Claude's detector is not public yet).
+images). MarkLLM is same-config-only research, not a vendor oracle; report its
+verdict honestly.
+
+No vendor text detector is reachable today: `text_detectors.gemini-synthid-text`
+and `text_detectors.claude-text` always report `false` in `/capabilities` (see
+the detector list in the README). If one does become available, it sends text
+to that provider — only use it with explicit user consent.
 
 ## Aggregate audits (directories / websites)
 

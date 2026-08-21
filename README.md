@@ -296,7 +296,8 @@ Best-effort pixel-domain removal is opt-in on image cleans: `--remove-synthid` (
 Optional, stdlib-first, fail-soft:
 
 - `score_stylometry.py` — zero-LLM stylometry (burstiness, MATTR, AI-phrase density) with confidence bands and `--explain`.
-- `text_detectors.py` / `detect_text_watermark.py` — Gemini's official SynthID-text detector (needs `WATERMARKS_GEMINI_API_KEY`; env only) and a MarkLLM research harness (same-scheme-config only, not a vendor oracle). Claude detection is reserved but unavailable until a public API ships.
+- `text_detectors.py` / `detect_text_watermark.py` — a MarkLLM research harness (same-scheme-config only, not a vendor oracle). Both vendor detectors are reserved but unavailable, and `/capabilities` always reports them `false`: Gemini's official SynthID-text detector is wired for `WATERMARKS_GEMINI_API_KEY` (env only) but the Gemini API exposes no `DETECT_TEXT_WATERMARK` task type, and Claude detection waits on a public API.
+- MarkLLM detection reports a document-level `verdict` (`DETECTED`, `NOT_DETECTED`, `INCONCLUSIVE`, `UNSUPPORTED`, `ERROR`) alongside the raw `detector_verdict`. Only a below-threshold score with a confirmed key/provenance match and enough scored tokens reads as `NOT_DETECTED`; unknown provenance, a near-threshold score, a short sample, or an unsupported scheme stays `INCONCLUSIVE`. Provenance comes from the `<output>.wm.json` sidecar the `watermark` subcommand writes, or from an operator `--key-id` assertion.
 - `inspect_text.py --stylometry` and `rewrite_text.py` MarkLLM before/after hooks.
 
 ```bash
