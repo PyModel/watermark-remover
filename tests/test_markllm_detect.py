@@ -696,7 +696,9 @@ def test_cli_detect_unknown_scored_tokens_inconclusive(tmp_path: Path):
     upstream = _make_fake_upstream(tmp_path, detect_json='{"is_watermarked": False, "score": 0.25}')
     # A tokenizer without .encode() makes both counts unknown.
     (upstream / "transformers" / "__init__.py").write_text(
-        FAKE_TRANSFORMERS.replace("    def encode(self, s):\n        return [0] * 512\n", "    pass\n")
+        FAKE_TRANSFORMERS.replace(
+            "    def encode(self, s):\n        return [0] * 512\n", "    pass\n"
+        )
     )
     f = tmp_path / "t.txt"
     f.write_text("hello world")
