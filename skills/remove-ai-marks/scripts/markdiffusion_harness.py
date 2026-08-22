@@ -122,21 +122,37 @@ def _import_markdiffusion(upstream: Path | None) -> Any:
     return markdiffusion
 
 
+def _split_model_revision(model: str) -> tuple[str, str | None]:
+    """Split an optional ``org/repo@revision`` suffix from a --model value.
+
+    Pinning a revision keeps Hub loads reproducible and shrinks the
+    malicious-repository swap surface exposed by CVE-2026-44513-class
+    diffusers supply-chain attacks.
+    """
+    repo, sep, revision = model.partition("@")
+    if sep and (not repo or not revision):
+        raise ValueError(f"invalid model {model!r}: expected 'org/repo[@revision]'")
+    return (repo, revision) if sep else (model, None)
+
+
 def _load_diffusion(model: str, device: str, offline: bool, size: int):
     """Load the Stable Diffusion pipeline and scheduler used by the harness."""
     if offline:
         os.environ.setdefault("HF_HUB_OFFLINE", "1")
     load_kwargs = {"local_files_only": True} if offline else {}
+    repo, revision = _split_model_revision(model)
+    if revision is not None:
+        load_kwargs["revision"] = revision
 
     import torch
     from diffusers import DPMSolverMultistepScheduler, StableDiffusionPipeline
 
     scheduler = DPMSolverMultistepScheduler.from_pretrained(
-        model, subfolder="scheduler", **load_kwargs
+        repo, subfolder="scheduler", **load_kwargs
     )
     dtype = torch.float16 if device == "cuda" else torch.float32
     pipe = StableDiffusionPipeline.from_pretrained(
-        model,
+        repo,
         scheduler=scheduler,
         torch_dtype=dtype,
         safety_checker=None,
@@ -427,7 +443,8 @@ def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--model",
         default=os.environ.get("MARKDIFFUSION_MODEL", DEFAULT_MODEL),
-        help=f"HF Stable Diffusion model (default: $MARKDIFFUSION_MODEL or {DEFAULT_MODEL})",
+        help="HF Stable Diffusion model, optionally pinned as org/repo@revision "
+        f"(default: $MARKDIFFUSION_MODEL or {DEFAULT_MODEL})",
     )
     p.add_argument(
         "--device",
@@ -517,6 +534,12 @@ def main() -> int:
 
     try:
         scheme = normalize_scheme(args.scheme) if args.cmd in ("watermark", "detect") else None
+    except ValueError as e:
+        eprint(str(e))
+        return 2
+
+    try:
+        _split_model_revision(args.model)
     except ValueError as e:
         eprint(str(e))
         return 2
