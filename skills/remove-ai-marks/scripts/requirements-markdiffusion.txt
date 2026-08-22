@@ -11,4 +11,4 @@ markdiffusion==1.0.2
 # diffusers>=0.25; unpinned, pip resolves latest and load/audit behavior
 # drifts between runs. Bump deliberately after validating against the pinned
 # markdiffusion release.
-diffusers==0.40.0
+diffusers==0.39.0
