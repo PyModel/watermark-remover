@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import io
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -60,6 +61,10 @@ SCHEMES = {
 IMAGE_SCHEMES = {"TR", "RI", "ROBIN", "WIND", "SFW", "GS", "GM", "PRC", "SEAL"}
 
 DEFAULT_MODEL = "huanzi05/stable-diffusion-2-1-base"
+# Hub HEAD of DEFAULT_MODEL (verified via the HF API in 2026-08), pinned so the
+# default load is reproducible. Bump deliberately, never automatically.
+DEFAULT_MODEL_REVISION = "f71d7867a2745c420aa93441638b119c85995963"
+_DEFAULT_PINNED_MODEL = f"{DEFAULT_MODEL}@{DEFAULT_MODEL_REVISION}"
 
 # Algorithm configs are a few hundred bytes (TR.json/GS.json). Cap well above
 # that so a crafted or accidental huge file is refused before either this script
@@ -122,16 +127,25 @@ def _import_markdiffusion(upstream: Path | None) -> Any:
     return markdiffusion
 
 
+_FULL_COMMIT_SHA = re.compile(r"\A[0-9a-f]{40}\Z")
+
+
 def _split_model_revision(model: str) -> tuple[str, str | None]:
-    """Split an optional ``org/repo@revision`` suffix from a --model value.
+    """Split a mandatory ``org/repo@<full-commit-sha>`` suffix from a --model value.
 
     Pinning a revision keeps Hub loads reproducible and shrinks the
     malicious-repository swap surface exposed by CVE-2026-44513-class
-    diffusers supply-chain attacks.
+    diffusers supply-chain attacks, so mutable refs (branches, tags) are
+    rejected here and unrevisioned models must go through --offline.
     """
     repo, sep, revision = model.partition("@")
     if sep and (not repo or not revision):
-        raise ValueError(f"invalid model {model!r}: expected 'org/repo[@revision]'")
+        raise ValueError(f"invalid model {model!r}: expected 'org/repo@<full-commit-sha>'")
+    if sep and not _FULL_COMMIT_SHA.fullmatch(revision):
+        raise ValueError(
+            f"invalid revision {revision!r} in {model!r}: pass the full 40-character "
+            "commit ID (branches and tags are mutable refs)"
+        )
     return (repo, revision) if sep else (model, None)
 
 
@@ -442,9 +456,10 @@ def _add_common(p: argparse.ArgumentParser) -> None:
     )
     p.add_argument(
         "--model",
-        default=os.environ.get("MARKDIFFUSION_MODEL", DEFAULT_MODEL),
-        help="HF Stable Diffusion model, optionally pinned as org/repo@revision "
-        f"(default: $MARKDIFFUSION_MODEL or {DEFAULT_MODEL})",
+        default=os.environ.get("MARKDIFFUSION_MODEL", _DEFAULT_PINNED_MODEL),
+        help="HF Stable Diffusion model as org/repo@<full-commit-sha>; mutable refs "
+        "are rejected unless --offline "
+        f"(default: $MARKDIFFUSION_MODEL or {_DEFAULT_PINNED_MODEL})",
     )
     p.add_argument(
         "--device",
@@ -539,9 +554,15 @@ def main() -> int:
         return 2
 
     try:
-        _split_model_revision(args.model)
+        _, revision = _split_model_revision(args.model)
     except ValueError as e:
         eprint(str(e))
+        return 2
+    if revision is None and not args.offline:
+        eprint(
+            f"unpinned model {args.model!r}: pass org/repo@<full-commit-sha> "
+            "(or use --offline to load from the local cache only)"
+        )
         return 2
 
     raw_upstream = args.upstream_dir or os.environ.get("MARKDIFFUSION_DIR")
