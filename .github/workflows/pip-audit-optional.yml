@@ -1,0 +1,51 @@
+name: pip-audit (optional backends)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "skills/remove-ai-marks/scripts/requirements-*.txt"
+      - ".github/workflows/pip-audit-optional.yml"
+  pull_request:
+    paths:
+      - "skills/remove-ai-marks/scripts/requirements-*.txt"
+      - ".github/workflows/pip-audit-optional.yml"
+  schedule:
+    # Weekly Monday report so dismissed Dependabot alerts stay visible.
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install pip-audit
+        run: python -m pip install --upgrade pip pip-audit==2.10.1
+
+      - name: Audit optional-backend requirement files
+        # Report-only by design: the audited files pin research-backend versions
+        # deliberately (see skills/remove-ai-marks/scripts/requirements-ctrlregen.txt
+        # header and research/dependabot-ctrlregen-advisory-review.md). Findings must
+        # surface here without blocking CI, while checkout/setup/install failures
+        # above stay fatal.
+        continue-on-error: true
+        run: |
+          set +e
+          rc=0
+          for f in skills/remove-ai-marks/scripts/requirements-*.txt; do
+            echo "::group::pip-audit $f"
+            python -m pip_audit -r "$f" --progress-spinner off || rc=1
+            echo "::endgroup::"
+          done
+          echo "pip-audit sweep finished (rc=${rc}, report-only)"
+          exit "$rc"

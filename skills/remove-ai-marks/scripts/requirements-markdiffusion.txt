@@ -6,3 +6,9 @@
 # platform index (CUDA or CPU) and satisfies markdiffusion's own
 # torch>=2.4,<2.11 range, so it is intentionally not listed here.
 markdiffusion==1.0.2
+
+# diffusers is pinned explicitly because markdiffusion declares only
+# diffusers>=0.25; unpinned, pip resolves latest and load/audit behavior
+# drifts between runs. Bump deliberately after validating against the pinned
+# markdiffusion release.
+diffusers==0.40.0
