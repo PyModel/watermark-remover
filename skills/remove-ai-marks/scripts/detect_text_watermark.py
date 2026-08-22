@@ -353,7 +353,11 @@ def _cmd_detect(args: argparse.Namespace, upstream: Path, alg: str) -> int:
     sidecar_scheme = sidecar.get("scheme")
     sidecar_scheme_l = str(sidecar_scheme).lower() if sidecar_scheme else None
     sidecar_config_hash = sidecar.get("config_hash")
-    config_hash = _sha256_file(config)
+    try:
+        config_hash = _sha256_file(config)
+    except OSError as e:
+        eprint(f"cannot read watermarking config: {e}")
+        return 3
 
     # UNSUPPORTED: the document's provenance declares a scheme we cannot run.
     if sidecar_scheme is not None and sidecar_scheme_l not in SCHEMES:
@@ -525,6 +529,16 @@ def _cmd_watermark(args: argparse.Namespace, upstream: Path, alg: str) -> int:
 
     try:
         config = _resolve_config(upstream, alg, args.config)
+    except _Unavailable as e:
+        eprint(str(e))
+        return 3
+    try:
+        config_hash = _sha256_file(config)
+    except OSError as e:
+        eprint(f"cannot read watermarking config: {e}")
+        return 3
+
+    try:
         wm, _tokenizer = _load_algorithm(
             upstream, alg, config, args.model, device, offline=args.offline
         )
@@ -568,7 +582,7 @@ def _cmd_watermark(args: argparse.Namespace, upstream: Path, alg: str) -> int:
             "key_id": args.key_id,
             "tokenizer": args.model,
             "watermark_parameters": params,
-            "config_hash": _sha256_file(config),
+            "config_hash": config_hash,
             "generator": args.model,
             "generation_settings": {
                 "max_new_tokens": args.max_new_tokens,

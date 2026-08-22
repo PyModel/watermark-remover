@@ -125,6 +125,7 @@ def test_gemini_oversize_skips(monkeypatch):
     monkeypatch.setenv("WATERMARKS_GEMINI_MAX_CHARS", "10")
     report = text_detectors.GeminiSynthIDTextDetector().detect("x" * 100)
     assert report["available"] is True
+    assert report["configured"] is True
     assert report["skipped"] is True
     assert report["is_watermarked"] is None
 

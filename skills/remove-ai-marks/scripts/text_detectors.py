@@ -259,7 +259,7 @@ class GeminiSynthIDTextDetector:
                 "detector": self.name,
                 "vendor": self.vendor,
                 "available": True,
-                "configured": False,
+                "configured": True,
                 "skipped": True,
                 "reason": f"text longer than {max_chars} chars",
                 "is_watermarked": None,
