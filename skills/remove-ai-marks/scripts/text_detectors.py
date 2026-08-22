@@ -10,7 +10,10 @@ research detectors. Every detector implements the same small protocol:
 
 Reports follow the fail-soft contract: a detector that is unconfigured,
 times out, or errors returns {"available": False, "error": ...} and can
-never block cleaning.
+never block cleaning. Every report also carries "configured": whether the
+detector was set up to run at all, so an aggregator can tell a detector that
+never ran from one that ran and failed. A configured detector that failed is
+unresolved evidence, never a clean result.
 
 Detectors:
 
@@ -246,6 +249,7 @@ class GeminiSynthIDTextDetector:
                 "detector": self.name,
                 "vendor": self.vendor,
                 "available": False,
+                "configured": False,
                 "error": "WATERMARKS_GEMINI_API_KEY not set",
             }
 
@@ -255,6 +259,7 @@ class GeminiSynthIDTextDetector:
                 "detector": self.name,
                 "vendor": self.vendor,
                 "available": True,
+                "configured": True,
                 "skipped": True,
                 "reason": f"text longer than {max_chars} chars",
                 "is_watermarked": None,
@@ -264,6 +269,7 @@ class GeminiSynthIDTextDetector:
             "detector": self.name,
             "vendor": self.vendor,
             "available": False,
+            "configured": False,
             "error": (
                 "DETECT_TEXT_WATERMARK task type is not supported by the "
                 "Gemini generateContent API; this detector is disabled until "
@@ -342,6 +348,7 @@ class MarkLLMTextDetector:
             "scheme": scheme,
             "vendor": "open-llm",
             "available": False,
+            "configured": bool(upstream),
         }
         if not upstream:
             report["error"] = "MARKLLM_DIR not set"
@@ -441,6 +448,7 @@ class ClaudeTextDetector:
             "detector": self.name,
             "vendor": self.vendor,
             "available": False,
+            "configured": False,
             "error": (
                 "Anthropic has announced a text-watermark detection API for "
                 "Claude; no public endpoint is available yet. When it ships, "

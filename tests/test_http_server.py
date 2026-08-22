@@ -104,6 +104,7 @@ def test_openapi_spec_covers_all_endpoints(conn):
         "/openapi.json": {"get"},
         "/inspect": {"post"},
         "/clean": {"post"},
+        "/detect": {"post"},
     }
     for path, methods in expected.items():
         assert path in body["paths"]
@@ -122,6 +123,13 @@ def test_openapi_spec_describes_request_bodies(conn):
     assert "options" in schema["properties"]
     inspect = body["paths"]["/inspect"]["post"]
     assert "file" in inspect["requestBody"]["content"]["application/json"]["schema"]["properties"]
+    response = inspect["responses"]["200"]["content"]["application/json"]["schema"]
+    assert response["properties"]["detection_status"]["enum"] == [
+        "DETECTED",
+        "INCONCLUSIVE",
+        "NOT_DETECTED",
+        "NOT_RUN",
+    ]
 
 
 def test_openapi_spec_reflects_auth(conn, monkeypatch):
@@ -140,7 +148,89 @@ def test_inspect_text_finds_watermark(conn):
     assert status == 200
     assert body["kind"] == "text"
     assert body["suspicious"] is True
+    assert body["detection_status"] == "NOT_RUN"
     assert body["report"]["suspicious_total"] >= 1
+
+
+def test_inspect_text_treats_inconclusive_detector_as_suspicious(conn, monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "run_all_text_detectors",
+        lambda _text: [
+            {
+                "detector": "markllm",
+                "available": True,
+                "verdict": "INCONCLUSIVE",
+                "is_watermarked": False,
+            }
+        ],
+    )
+    status, body = _post(
+        conn,
+        "/inspect",
+        {"file": _b64(b"ordinary text"), "name": "note.txt", "detect": True},
+    )
+    assert status == 200
+    assert body["suspicious"] is True
+    assert body["detection_status"] == "INCONCLUSIVE"
+
+
+def test_inspect_text_treats_failed_configured_detector_as_suspicious(conn, monkeypatch):
+    """A configured detector that ran and failed is unresolved, not 'never ran'."""
+    monkeypatch.setattr(
+        server,
+        "run_all_text_detectors",
+        lambda _text: [
+            {
+                "detector": "markllm",
+                "available": False,
+                "configured": True,
+                "error": "MarkLLM detection timed out",
+            }
+        ],
+    )
+    status, body = _post(
+        conn,
+        "/inspect",
+        {"file": _b64(b"ordinary text"), "name": "note.txt", "detect": True},
+    )
+    assert status == 200
+    assert body["detection_status"] == "INCONCLUSIVE"
+    assert body["suspicious"] is True
+
+
+@pytest.mark.parametrize(
+    ("reports", "expected"),
+    [
+        ([{"available": True, "verdict": "DETECTED", "is_watermarked": True}], "DETECTED"),
+        (
+            [
+                {"available": True, "verdict": "INCONCLUSIVE", "is_watermarked": False},
+                {"available": True, "verdict": "NOT_DETECTED", "is_watermarked": False},
+            ],
+            "INCONCLUSIVE",
+        ),
+        ([{"available": True, "verdict": "UNSUPPORTED"}], "INCONCLUSIVE"),
+        ([{"available": True, "error": "detector failed"}], "INCONCLUSIVE"),
+        ([{"available": True, "verdict": "NOT_DETECTED", "is_watermarked": False}], "NOT_DETECTED"),
+        ([{"available": False, "configured": False, "error": "not configured"}], "NOT_RUN"),
+        ([{"available": False, "error": "not configured"}], "NOT_RUN"),
+        (
+            [{"available": False, "configured": True, "error": "MarkLLM detection timed out"}],
+            "INCONCLUSIVE",
+        ),
+        (
+            [
+                {"available": False, "configured": True, "error": "MarkLLM detection timed out"},
+                {"available": True, "verdict": "NOT_DETECTED", "is_watermarked": False},
+            ],
+            "INCONCLUSIVE",
+        ),
+        ([], "NOT_RUN"),
+    ],
+)
+def test_text_detection_status(reports, expected):
+    assert server._text_detection_status(reports) == expected
 
 
 def test_clean_text_roundtrip(conn):
@@ -220,6 +310,7 @@ def test_inspect_unknown_format_reports_kind(conn):
     assert status == 200
     assert body["kind"] == "unknown"
     assert body["suspicious"] is False
+    assert body["detection_status"] == "NOT_RUN"
     assert "note" in body["report"]
 
 

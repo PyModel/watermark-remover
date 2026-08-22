@@ -9,6 +9,23 @@ MarkLLM is Apache-2.0. It is a research/verification harness: detection is only
 valid against the SAME scheme config + keys used at generation. It cannot
 certify that a vendor detector will fail on the given text.
 
+Decision model:
+  A detector may say what it observed; only the decision engine may say what
+  that observation means. Each report therefore carries:
+    - detector_verdict: the raw MarkLLM observation (DETECTED / NOT_DETECTED)
+    - verdict: the document-level decision, one of
+        DETECTED       score at/above threshold
+        NOT_DETECTED   below threshold AND provenance/key match confirmed AND
+                       enough scored tokens
+        INCONCLUSIVE   below threshold but provenance unknown/mismatched, or
+                       score inside the abstention band, or too few (or an
+                       unknown number of) scored tokens
+        UNSUPPORTED    document provenance declares a scheme we cannot run
+        ERROR          detector returned no score/threshold
+  A negative with unknown provenance must never be read as "watermark-free".
+  Provenance comes from a sidecar (<input>.wm.json) written by the `watermark`
+  subcommand, or from an operator assertion via --key-id.
+
 Subcommands:
   detect    run detection on a text file with a known scheme/config
   watermark generate watermarked (and optionally unwatermarked) sample text
@@ -24,9 +41,11 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -37,6 +56,7 @@ from common import (
     emit_json,
     eprint,
     read_text_input,
+    which,
 )
 
 # Scheme name as the user types it -> MarkLLM algorithm name (config/{ALG}.json).
@@ -47,6 +67,31 @@ SCHEMES = {
 }
 
 DEFAULT_MODEL = "facebook/opt-1.3b"
+
+# Document-level verdicts produced by the decision engine. A detector may say
+# what it observed; only the decision engine may say what that observation
+# means. The engine never lets a negative with unknown provenance, a missing
+# score, an unsupported scheme, or a too-short sample collapse into "clean".
+VERDICT_DETECTED = "DETECTED"
+VERDICT_NOT_DETECTED = "NOT_DETECTED"
+VERDICT_INCONCLUSIVE = "INCONCLUSIVE"
+VERDICT_UNSUPPORTED = "UNSUPPORTED"
+VERDICT_ERROR = "ERROR"
+
+# Relative abstention band around the config threshold. Scores within
+# |score - threshold| / threshold < band are treated as insufficient evidence
+# (SynthID's published design abstains to preserve target error rates; KGW's
+# z-test is likewise unreliable in the near-threshold region).
+DEFAULT_ABSTENTION_BAND = 0.10
+
+# Below this many tokens, a negative is not a strong negative even with
+# matching provenance: KGW/SynthID detect via low-stakes word choices, which
+# are too few in short text (measured: 677 chars -> miss, 1912 chars -> hit).
+DEFAULT_MIN_TOKENS = 200
+
+# Provenance sidecar suffix: <input>.wm.json records scheme/key/config_hash
+# for text generated under a known key, making detection deterministic.
+SIDECAR_SUFFIX = ".wm.json"
 
 # Algorithm configs are ~200 B (KGW/SynthID). Cap well above that so a crafted
 # or accidental huge file is refused before either this script or upstream
@@ -87,7 +132,11 @@ def resolve_device(raw: str | None) -> str:
 def _load_algorithm(
     upstream: Path, alg: str, config: Path, model: str, device: str, offline: bool = False
 ):
-    """Import the checkout and build an ``AutoWatermark`` instance."""
+    """Import the checkout and build an ``AutoWatermark`` instance.
+
+    Returns ``(watermark, tokenizer)``; the tokenizer is needed for the
+    decision engine's token-length calibration.
+    """
     sys.path.insert(0, str(upstream))
     try:
         from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -117,11 +166,12 @@ def _load_algorithm(
         do_sample=True,
         no_repeat_ngram_size=4,
     )
-    return AutoWatermark.load(
+    wm = AutoWatermark.load(
         alg,
         algorithm_config=str(config),
         transformers_config=transformers_config,
     )
+    return wm, tokenizer
 
 
 def _threshold_from_config(config: Path) -> float | None:
@@ -134,6 +184,135 @@ def _threshold_from_config(config: Path) -> float | None:
         if isinstance(value, (int, float)):
             return float(value)
     return None
+
+
+def _sha256_file(path: Path) -> str:
+    """Stable content hash of a config file, for provenance matching."""
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _git_commit(upstream: Path) -> str | None:
+    """Best-effort pinned-commit id of the MarkLLM checkout (contract version)."""
+    git = which("git")
+    if git is None:
+        return None
+    try:
+        import subprocess
+
+        out = subprocess.run(
+            [git, "-C", str(upstream), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    commit = out.stdout.strip()
+    return commit or None
+
+
+def _sidecar_path_for(input_path: str) -> Path | None:
+    """Return <input>.wm.json if a provenance sidecar exists next to the input."""
+    if input_path == "-":
+        return None
+    sidecar = Path(input_path + SIDECAR_SUFFIX)
+    if not sidecar.is_file():
+        return None
+    try:
+        if sidecar.stat().st_size > MAX_CONFIG_BYTES:
+            return None
+    except OSError:
+        return None
+    return sidecar
+
+
+def _read_sidecar(path: Path) -> dict:
+    """Read a provenance sidecar; malformed sidecars degrade to {} (unknown)."""
+    try:
+        data = json.loads(path.read_text("utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _count_tokens(tokenizer: object, text: str) -> int | None:
+    """Count input tokens via the loaded tokenizer; None if unavailable."""
+    encode = getattr(tokenizer, "encode", None)
+    if encode is None:
+        return None
+    try:
+        ids = encode(text)
+        if isinstance(ids, int):
+            return ids
+        return len(ids)
+    except Exception:
+        return None
+
+
+def _decide(
+    *,
+    detector_verdict: str,
+    score: float | None,
+    threshold: float | None,
+    provenance_match: bool | None,
+    scored_tokens: int | None,
+    min_tokens: int,
+    abstention_band: float,
+) -> tuple[str, str]:
+    """Map detector observations + provenance to a document-level verdict.
+
+    The detector says what it observed (``detector_verdict``); this is the
+    decision engine that decides what the observation means. The invariant:
+    a negative must never become "clean" when the key/provenance is unknown,
+    the score sits in the abstention band, or the sample is too short.
+    """
+    if detector_verdict == VERDICT_DETECTED:
+        # Aggressive posture: a positive detector observation is always
+        # reported as DETECTED, even when its score sits inside the
+        # abstention band or the config exposes no threshold. The band
+        # and min-length checks only qualify negatives.
+        if score is not None and threshold is not None:
+            return (
+                VERDICT_DETECTED,
+                f"score {score:.4f} at/above threshold {threshold:.4f}",
+            )
+        return (VERDICT_DETECTED, "detector reported watermarked")
+    if score is None or threshold is None:
+        return VERDICT_ERROR, "detector returned no score or threshold"
+    if abstention_band > 0 and threshold != 0:
+        rel = abs(score - threshold) / abs(threshold)
+        if rel < abstention_band:
+            return (
+                VERDICT_INCONCLUSIVE,
+                f"score {score:.4f} within {abstention_band:.0%} abstention band "
+                f"of threshold {threshold:.4f}",
+            )
+    if provenance_match is not True:
+        return (
+            VERDICT_INCONCLUSIVE,
+            "detector below threshold but provenance/key match not confirmed",
+        )
+    if min_tokens > 0 and scored_tokens is None:
+        return (
+            VERDICT_INCONCLUSIVE,
+            f"scored token count unknown (minimum {min_tokens} tokens)",
+        )
+    if min_tokens > 0 and scored_tokens < min_tokens:
+        return (
+            VERDICT_INCONCLUSIVE,
+            f"below minimum calibrated length ({scored_tokens} < {min_tokens} tokens)",
+        )
+    return (
+        VERDICT_NOT_DETECTED,
+        f"score {score:.4f} below threshold {threshold:.4f} with confirmed provenance/key match",
+    )
 
 
 def _resolve_config(upstream: Path, alg: str, config: str | None) -> Path:
@@ -154,13 +333,65 @@ def _cmd_detect(args: argparse.Namespace, upstream: Path, alg: str) -> int:
         eprint(f"not a file: {args.path}")
         return 2
     text = read_text_input(args.path, allow_binary=args.force_text)
+    sidecar_path = _sidecar_path_for(args.path)
 
     device = resolve_device(args.device)
 
     try:
         config = _resolve_config(upstream, alg, args.config)
         threshold = _threshold_from_config(config)
-        wm = _load_algorithm(upstream, alg, config, args.model, device, offline=args.offline)
+    except _Unavailable as e:
+        eprint(str(e))
+        return 3
+
+    # --- Provenance resolution (decision engine input) ---
+    # A sidecar (<input>.wm.json) records how text generated under a known key
+    # was marked. Without it, provenance is UNKNOWN unless the operator asserts
+    # a key identity with --key-id. Resolved before the (expensive) model load
+    # so UNSUPPORTED provenance fails fast.
+    sidecar = _read_sidecar(sidecar_path) if sidecar_path is not None else {}
+    sidecar_scheme = sidecar.get("scheme")
+    sidecar_scheme_l = str(sidecar_scheme).lower() if sidecar_scheme else None
+    sidecar_config_hash = sidecar.get("config_hash")
+    try:
+        config_hash = _sha256_file(config)
+    except OSError as e:
+        eprint(f"cannot read watermarking config: {e}")
+        return 3
+
+    # UNSUPPORTED: the document's provenance declares a scheme we cannot run.
+    if sidecar_scheme is not None and sidecar_scheme_l not in SCHEMES:
+        payload = {
+            "available": True,
+            "upstream_dir": str(upstream),
+            "scheme": alg,
+            "config": str(config),
+            "model": args.model,
+            "device": device,
+            "verdict": VERDICT_UNSUPPORTED,
+            "verdict_reason": f"document provenance declares unsupported scheme '{sidecar_scheme}'",
+            "detector_verdict": None,
+            "is_watermarked": None,
+            "score": None,
+            "threshold": threshold,
+            "provenance_match": False,
+            "provenance": sidecar,
+            "config_hash": config_hash,
+            "implementation_commit": args._implementation_commit,
+            "input_chars": len(text),
+            "input_tokens": None,
+            "effective_scored_tokens": None,
+        }
+        if args.json:
+            emit_json(payload)
+        else:
+            print(f"{alg}: {VERDICT_UNSUPPORTED} (unsupported scheme '{sidecar_scheme}')")
+        return 0
+
+    try:
+        wm, tokenizer = _load_algorithm(
+            upstream, alg, config, args.model, device, offline=args.offline
+        )
         result = wm.detect_watermark(text, return_dict=True)
     except _Unavailable as e:
         eprint(str(e))
@@ -176,6 +407,48 @@ def _cmd_detect(args: argparse.Namespace, upstream: Path, alg: str) -> int:
     except (TypeError, ValueError):
         score = None
 
+    key_id = args.key_id or sidecar.get("key_id")
+    # provenance_match: True only when the sidecar's config matches the config
+    # we detected with (content hash), or the *operator* asserted a key id on
+    # the command line. A sidecar key_id alone is document-supplied and cannot
+    # confirm provenance: the `watermark` subcommand always writes config_hash,
+    # so a sidecar without one did not come from this tool.
+    if sidecar_config_hash is not None:
+        provenance_match = sidecar_config_hash == config_hash
+    elif args.key_id is not None:
+        provenance_match = True
+    else:
+        provenance_match = None
+    # A sidecar declaring a different *supported* scheme is still a mismatch
+    # for the requested detector. Compare normalized algorithm names so the
+    # synthid/synthid-text aliases match each other.
+    if (
+        sidecar_scheme is not None
+        and SCHEMES.get(sidecar_scheme_l) is not None
+        and SCHEMES.get(sidecar_scheme_l) != alg
+    ):
+        provenance_match = False
+
+    detector_verdict = VERDICT_DETECTED if is_watermarked else VERDICT_NOT_DETECTED
+    input_tokens = _count_tokens(tokenizer, text)
+    effective = result.get("num_tokens")
+    try:
+        effective = int(effective) if effective is not None else None
+    except (TypeError, ValueError):
+        effective = None
+    if effective is None:
+        effective = input_tokens
+
+    verdict, reason = _decide(
+        detector_verdict=detector_verdict,
+        score=score,
+        threshold=threshold,
+        provenance_match=provenance_match,
+        scored_tokens=effective,
+        min_tokens=args.min_tokens,
+        abstention_band=args.abstention_band,
+    )
+
     payload = {
         "available": True,
         "upstream_dir": str(upstream),
@@ -183,20 +456,70 @@ def _cmd_detect(args: argparse.Namespace, upstream: Path, alg: str) -> int:
         "config": str(config),
         "model": args.model,
         "device": device,
+        "verdict": verdict,
+        "verdict_reason": reason,
+        "detector_verdict": detector_verdict,
         "is_watermarked": is_watermarked,
         "score": score,
         "threshold": threshold,
+        "provenance_match": provenance_match,
+        "key_id": key_id,
+        "provenance": sidecar or None,
+        "config_hash": config_hash,
+        "implementation_commit": args._implementation_commit,
+        "input_chars": len(text),
+        "input_tokens": input_tokens,
+        "effective_scored_tokens": effective,
+        "min_tokens": args.min_tokens,
+        "abstention_band": args.abstention_band,
     }
 
     if args.json:
         emit_json(payload)
     else:
-        label = "watermarked" if is_watermarked else "not watermarked"
+        label = {
+            VERDICT_DETECTED: "detected",
+            VERDICT_NOT_DETECTED: "not detected",
+            VERDICT_INCONCLUSIVE: "inconclusive",
+            VERDICT_ERROR: "error",
+            VERDICT_UNSUPPORTED: "unsupported",
+        }.get(verdict, verdict)
         score_txt = f"{score:.4f}" if score is not None else "n/a"
         thresh_txt = f"{threshold:.4f}" if threshold is not None else "n/a"
-        print(f"{alg}: {label} (score {score_txt}, threshold {thresh_txt})")
+        pm = (
+            "matched"
+            if provenance_match is True
+            else "mismatched"
+            if provenance_match is False
+            else "unknown"
+        )
+        print(
+            f"{alg}: {label} (score {score_txt}, threshold {thresh_txt}, "
+            f"provenance/key match: {pm})"
+        )
+        if verdict == VERDICT_INCONCLUSIVE:
+            print(f"  reason: {reason}")
+        if verdict != VERDICT_DETECTED:
+            print("  This result does NOT establish that the document is watermark-free.")
 
     return 0
+
+
+_SECRET_KEY_PARTS = ("key", "seed", "secret", "salt", "password")
+
+
+def _redact_secrets(value: object) -> object:
+    """Strip secret-bearing fields from a config before it travels with the sample."""
+    if isinstance(value, dict):
+        return {
+            k: "[redacted]"
+            if any(part in str(k).lower() for part in _SECRET_KEY_PARTS)
+            else _redact_secrets(v)
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_secrets(v) for v in value]
+    return value
 
 
 def _cmd_watermark(args: argparse.Namespace, upstream: Path, alg: str) -> int:
@@ -206,7 +529,19 @@ def _cmd_watermark(args: argparse.Namespace, upstream: Path, alg: str) -> int:
 
     try:
         config = _resolve_config(upstream, alg, args.config)
-        wm = _load_algorithm(upstream, alg, config, args.model, device, offline=args.offline)
+    except _Unavailable as e:
+        eprint(str(e))
+        return 3
+    try:
+        config_hash = _sha256_file(config)
+    except OSError as e:
+        eprint(f"cannot read watermarking config: {e}")
+        return 3
+
+    try:
+        wm, _tokenizer = _load_algorithm(
+            upstream, alg, config, args.model, device, offline=args.offline
+        )
         if args.seed is not None:
             import torch
 
@@ -233,6 +568,31 @@ def _cmd_watermark(args: argparse.Namespace, upstream: Path, alg: str) -> int:
         (sys.stderr if args.json else sys.stdout).write(watermarked)
     else:
         atomic_write_text(Path(wm_out), watermarked)
+        # Provenance sidecar: record how this sample was marked so detection
+        # of it later is deterministic instead of guesswork. key_id is an
+        # identifier, never the raw secret. The config is embedded for human
+        # inspection with secret-bearing fields redacted; a later detection
+        # verifies provenance through config_hash alone, never these values.
+        try:
+            params = _redact_secrets(json.loads(config.read_text("utf-8")))
+        except (OSError, ValueError):
+            params = None
+        sidecar = {
+            "scheme": alg,
+            "key_id": args.key_id,
+            "tokenizer": args.model,
+            "watermark_parameters": params,
+            "config_hash": config_hash,
+            "generator": args.model,
+            "generation_settings": {
+                "max_new_tokens": args.max_new_tokens,
+                "min_length": args.min_length,
+                "seed": args.seed,
+            },
+            "implementation_commit": args._implementation_commit,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        atomic_write_text(Path(wm_out + SIDECAR_SUFFIX), json.dumps(sidecar, indent=2))
     if unwatermarked is not None:
         atomic_write_text(Path(args.unwatermarked_output), unwatermarked)
 
@@ -306,6 +666,13 @@ def _add_common(p: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Process input even when it looks like a binary container",
     )
+    p.add_argument(
+        "--key-id",
+        default=None,
+        help="Identifier of the watermark key this text was generated under "
+        "(never the raw secret). Establishes provenance_match for detection; "
+        "recorded in the sidecar by `watermark`.",
+    )
 
 
 def _apply_rlimit_as(bytes_: int | None) -> None:
@@ -345,6 +712,18 @@ def main() -> int:
     detect = sub.add_parser("detect", help="Detect a scheme watermark in text")
     detect.add_argument("path", help="Text file to detect on, or - for stdin")
     _add_common(detect)
+    detect.add_argument(
+        "--min-tokens",
+        type=int,
+        default=DEFAULT_MIN_TOKENS,
+        help=f"Minimum scored tokens for a strong negative (default: {DEFAULT_MIN_TOKENS})",
+    )
+    detect.add_argument(
+        "--abstention-band",
+        type=float,
+        default=DEFAULT_ABSTENTION_BAND,
+        help=f"Relative near-threshold abstention band (default: {DEFAULT_ABSTENTION_BAND})",
+    )
     detect.add_argument("--json", action="store_true", help="Emit JSON on stdout")
     detect.set_defaults(handler=_cmd_detect)
 
@@ -385,6 +764,9 @@ def main() -> int:
         return 3
 
     alg = SCHEMES[args.scheme]
+    # Contract version: the checkout commit this run detects against. Used in
+    # reports so results stay comparable across upgrades.
+    args._implementation_commit = _git_commit(upstream)
     return args.handler(args, upstream, alg)
 
 

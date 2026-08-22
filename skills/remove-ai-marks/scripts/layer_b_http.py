@@ -202,7 +202,6 @@ def _reject_json_constant(_value: str) -> Any:
 
 
 def _read_json_object(response: Any, limit: int) -> dict[str, Any]:
-
     content_lengths = _header_values(response.headers, "Content-Length")
     if content_lengths:
         normalized = {value.strip() for value in content_lengths}

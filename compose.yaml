@@ -27,8 +27,8 @@ services:
     environment:
       # Empty by default (no auth). Set to require `Authorization: Bearer <key>`.
       WATERMARKS_SERVER_API_KEY: ${WATERMARKS_SERVER_API_KEY:-}
-      # Optional Gemini API key enabling vendor SynthID-text watermark
-      # detection via /detect and detect_before/after (see .env.example).
+      # Optional Gemini API key. The vendor SynthID-text detector is
+      # currently disabled and this key enables nothing (see .env.example).
       WATERMARKS_GEMINI_API_KEY: ${WATERMARKS_GEMINI_API_KEY:-}
       WATERMARKS_GEMINI_MODEL: ${WATERMARKS_GEMINI_MODEL:-}
       # Optional SynthID image scorer sidecar (heavy profile).
