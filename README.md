@@ -2,13 +2,13 @@
 
 <p align="center">
   <a href="https://pypi.org/project/watermark-remover/"><img alt="PyPI" src="https://img.shields.io/pypi/v/watermark-remover?logo=pypi&logoColor=white&label=pypi&color=e8a33d&labelColor=0f1110"></a>
-  <a href="https://pepy.tech/project/watermark-remover"><img alt="Downloads" src="https://img.shields.io/pepy/dt/watermark-remover?logo=python&logoColor=white&label=downloads&color=e8a33d&labelColor=0f1110"></a>
-  <a href="https://pypi.org/project/watermark-remover/"><img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-e8a33d?logo=python&logoColor=white&labelColor=0f1110"></a>
-  <a href="https://github.com/PyModel/watermark-remover/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/PyModel/watermark-remover/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://github.com/PyModel/watermark-remover/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/PyModel/watermark-remover?sort=semver&display_name=tag&label=release&color=e8a33d&labelColor=0f1110"></a>
-  <a href="https://github.com/PyModel/watermark-remover/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/PyModel/watermark-remover?label=stars&color=e8a33d&labelColor=0f1110"></a>
-  <a href="https://github.com/PyModel/watermark-remover/blob/main/LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
-  <a href="https://hits.sh/github.com/PyModel/watermark-remover/"><img alt="Visitors" src="https://hits.sh/github.com/PyModel/watermark-remover.svg?label=visitors&color=e8a33d&labelColor=0f1110"></a>
+  <a href="https://pypi.org/project/watermark-remover/"><img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-30363d?logo=python&logoColor=white&labelColor=0f1110"></a>
+  <a href="https://pepy.tech/project/watermark-remover"><img alt="Downloads" src="https://img.shields.io/pepy/dt/watermark-remover?logo=python&logoColor=white&label=downloads&color=30363d&labelColor=0f1110"></a>
+  <a href="https://github.com/PyModel/watermark-remover/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/PyModel/watermark-remover/ci.yml?logo=github&logoColor=white&label=ci&labelColor=0f1110"></a>
+  <a href="https://github.com/PyModel/watermark-remover/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/PyModel/watermark-remover?logo=github&logoColor=white&label=stars&color=30363d&labelColor=0f1110"></a>
+  <a href="https://github.com/PyModel/watermark-remover/blob/main/LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-30363d?labelColor=0f1110"></a>
+  <a href="https://hits.sh/github.com/PyModel/watermark-remover/"><img alt="Visitors" src="https://hits.sh/github.com/PyModel/watermark-remover.svg?label=visitors&color=30363d&labelColor=0f1110"></a>
 </p>
 
 Tools for finding and removing AI provenance signals from files you own. Four channels are covered: hidden Unicode in text, statistical token watermarks, visible marks burned into images, and metadata such as C2PA, EXIF, and XMP.
