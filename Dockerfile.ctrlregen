@@ -22,7 +22,7 @@ ARG NOAI_WATERMARK_REF=b642ae45d20eded52c96d570985eb4e3e427aac8
 # research-era pins (diffusers 0.27.2 / transformers 4.37.2 -> tokenizers<0.19)
 # that ship no Python 3.14 wheels; 3.11 is the newest base with prebuilt wheels
 # for all of them.
-FROM python:3.11-slim@sha256:a630a63cdb314e2d138a2fca3e375e319e8568346ffafac5b980f888630ac4f1
+FROM python:3.14-slim@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4
 
 ARG NOAI_WATERMARK_REF
 
