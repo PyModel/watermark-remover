@@ -192,6 +192,12 @@ class WatermarkTuiApp(App):
 
     CSS = """
     Screen { layout: vertical; }
+    /* Header and Footer are docked, so the flow area is two rows shorter than
+       the screen.  Left at ``height: auto`` the tab container claimed all of
+       it and pushed the status bar out, which cost the screen a permanent
+       vertical scrollbar -- two columns stolen from every pane, on a screen
+       that had nothing to scroll. */
+    #tabs { height: 1fr; }
     #files-list { height: 1fr; border: round $primary; }
     #inspect-report { height: 1fr; border: round $primary; padding: 1; }
     #command-preview { height: auto; min-height: 3; border: round $accent; padding: 0 1; }
@@ -207,11 +213,22 @@ class WatermarkTuiApp(App):
     #diff-view { width: 1fr; border: round $panel; }
     #stream-view { width: 1fr; border: round $accent; }
     .row { height: auto; }
-    .row > Static { width: 1fr; height: 3; content-align: left middle; padding: 0 1; }
+    /* ``.muted``, not a bare ``Static``: ``Checkbox`` subclasses ``Static``,
+       so the type selector also caught every checkbox and stretched it to
+       fill the row -- "recursive" rendered 46 columns wide next to a
+       16-column button. These are the inline status labels only. */
+    .row > .muted { width: 1fr; height: 3; content-align: left middle; padding: 0 1; }
+    /* Checkboxes are ``width: auto`` by default, which left-packs them and
+       leaves the rest of the row empty. Give them the same bounded share as
+       the input fields so a row of controls reads as one grid. */
+    .row > Checkbox { width: 1fr; }
     /* Share the row rather than claiming a fixed 32 columns each: four
        fields at a fixed width overflow an 80- or 120-column terminal and
-       the last one is simply unreachable. */
-    .field { width: 1fr; max-width: 32; }
+       the last one is simply unreachable.  ``1fr`` cannot overflow, so no
+       ``max-width`` is needed to stay safe -- and capping it left a ragged
+       gap at the end of every row on a wide terminal while the uncapped
+       neighbours stretched past it. */
+    .field { width: 1fr; }
     .wide { width: 1fr; }
     #modal-body {
         width: 84; height: auto; max-height: 90%;
