@@ -1314,11 +1314,16 @@ def test_a_table_spans_its_pane_instead_of_stopping_a_third_of_the_way(tmp_path:
                     ("#history-table", "tab-history"),
                 ):
                     app.query_one(TabbedContent).active = tab
-                    await pilot.pause()
-                    await pilot.pause()
+                    # The relayout arrives via ``call_after_refresh``, one hop
+                    # further than a direct call: poll rather than assume two
+                    # pauses are enough on a loaded runner.
                     table = app.query_one(selector, DataTable)
-                    columns = list(table.columns.values())
-                    padded = sum(column.width + 2 * table.cell_padding for column in columns)
+                    for _ in range(80):
+                        await pilot.pause()
+                        columns = list(table.columns.values())
+                        padded = sum(column.width + 2 * table.cell_padding for column in columns)
+                        if padded == table.size.width:
+                            break
                     assert padded == table.size.width, (selector, width, padded)
 
         _run(scenario())
@@ -1394,3 +1399,131 @@ def test_clean_now_runs_the_plan_and_shows_the_run_pane(tmp_path: Path):
             assert "​" not in cleaned.read_text(encoding="utf-8")
 
     _run(scenario())
+
+
+def test_image_degradation_over_a_mixed_selection_is_refused_up_front(tmp_path: Path):
+    """One text file in the folder aborts the whole degrade run, writing nothing.
+
+    ``build_clean_plan`` raises "--degrade/--morpho are only valid for image
+    assets" and the TUI's preflight turns that into a dead batch. Opening a
+    folder selects every file in it, so a stray ``.md`` next to the images was
+    enough — and the readiness line said "ready".
+    """
+    from textual.widgets import Select, Static
+    from tui_app import WatermarkTuiApp
+
+    (tmp_path / "pic.png").write_bytes(_tiny_png())
+    (tmp_path / "draft.txt").write_text(ZWSP, encoding="utf-8")
+    app = WatermarkTuiApp(CleanRequest(paths=(tmp_path,)))
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.query_one("#sel-preset", Select).value = "image"
+            for _ in range(80):
+                await pilot.pause()
+                if "not images" in str(app.query_one("#start-ready", Static).render()):
+                    break
+            ready = str(app.query_one("#start-ready", Static).render())
+            assert "1 selected file(s) are not images" in ready
+            assert "writing nothing" in ready
+
+    _run(scenario())
+
+
+def test_an_all_image_selection_carries_no_degrade_warning(tmp_path: Path):
+    from textual.widgets import Select, Static
+    from tui_app import WatermarkTuiApp
+
+    (tmp_path / "pic.png").write_bytes(_tiny_png())
+    app = WatermarkTuiApp(CleanRequest(paths=(tmp_path,)))
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.query_one("#sel-preset", Select).value = "image"
+            for _ in range(80):
+                await pilot.pause()
+                if "ready" in str(app.query_one("#start-ready", Static).render()):
+                    break
+            assert "not images" not in str(app.query_one("#start-ready", Static).render())
+
+    _run(scenario())
+
+
+# --- the badge follows the work, not the flag it happened to be spelled with ---
+
+
+def test_pixel_domain_image_work_is_never_badged_verifiable():
+    """``--degrade`` and ``--morpho`` are not covered by ``visible_requested``.
+
+    They perturb pixels exactly as inpainting does, but because they sit
+    outside that predicate the results table routed them to the metadata layer
+    and called a frequency-domain perturbation Verifiable.
+    """
+    from tui import layer_for_result
+
+    assert result_class_for(layer_for_result(CleanRequest(degrade="freq-dct"), "image")) == (
+        BEST_EFFORT
+    )
+    assert result_class_for(layer_for_result(CleanRequest(morpho="grid"), "image")) == BEST_EFFORT
+    assert result_class_for(layer_for_result(CleanRequest(remove_synthid=True), "image")) == (
+        BEST_EFFORT
+    )
+    assert result_class_for(layer_for_result(CleanRequest(visible_box=(0, 0, 1, 1)), "image")) == (
+        BEST_EFFORT
+    )
+    # A metadata-only image clean really is verifiable, and stays so.
+    assert result_class_for(layer_for_result(CleanRequest(), "image")) == VERIFIABLE
+
+
+def test_character_perturbation_is_not_a_verified_clean():
+    """It adds noise to defeat a detector; there is no after-count to check."""
+    from tui import layer_for_result
+
+    assert result_class_for(layer_for_result(CleanRequest(char_perturb=True), "text")) == (
+        BEST_EFFORT
+    )
+    assert result_class_for(layer_for_result(CleanRequest(nfkc=True), "text")) == VERIFIABLE
+    assert result_class_for(layer_for_result(CleanRequest(rewrite="paraphrase"), "text")) == (
+        BEST_EFFORT
+    )
+
+
+def test_a_container_is_still_the_metadata_layer():
+    from tui import layer_for_result
+
+    assert layer_for_result(CleanRequest(rewrite="paraphrase"), "container") == "M"
+
+
+def test_a_handler_that_fires_outside_the_mounted_tree_is_inert(tmp_path: Path):
+    """Textual delivers messages before compose finishes and during teardown.
+
+    A ``Select`` built with a value posts ``Changed`` while later widgets are
+    still being mounted, and the messages a rescan generates can still be in
+    flight when the app is shutting down. Both reached handlers that query the
+    tree, and both raised ``NoMatches`` — on a loaded Windows runner, where the
+    scheduling is slow enough to expose it, never locally.
+    """
+    app = _app_at(tmp_path)
+
+    def touch_every_sink() -> None:
+        app.action_rescan()
+        app._sync_preview()
+        app._sync_start()
+        app.refresh_backends()
+        app._files_changed()
+        app.apply_request(CleanRequest())
+        app._relayout_tables()
+
+    # Before mount.
+    touch_every_sink()
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+
+    _run(scenario())
+
+    # And after unmount.
+    touch_every_sink()

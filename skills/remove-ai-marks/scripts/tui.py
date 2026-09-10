@@ -54,6 +54,10 @@ LAYER_RESULT_CLASS: dict[str, str] = {
     "V": BEST_EFFORT,
     "soft-binding": DETECTION_ONLY,
     "synthid": BEST_EFFORT,
+    # Character perturbation adds noise to defeat a detector rather than
+    # removing a carrier that can be counted afterwards. There is nothing to
+    # verify, so it cannot be badged with the layer that strips zero-width.
+    "perturb": BEST_EFFORT,
 }
 
 RESULT_CLASS_STYLE = {
@@ -78,6 +82,27 @@ STREAM_VIEW_CHARS = 8000
 #: file with one candidate sits under this; a batch, or any TSAPA search, does
 #: not.  A gate that fires on every rewrite is a gate nobody reads.
 COST_CONFIRM_SECONDS = 300.0
+
+
+def layer_for_result(request: CleanRequest, kind: str) -> str:
+    """The layer that did the work on one asset. Follows the work, not the outcome.
+
+    ``CleanRequest.visible_requested`` covers mask, box, dilation and the
+    external inpainter, but ``--degrade``, ``--morpho`` and
+    ``--remove-synthid`` are pixel-domain operations too: routing them to the
+    metadata layer badged a frequency-domain perturbation *Verifiable*, which
+    is exactly the claim this project does not make.
+    """
+    if kind == "text":
+        if request.rewrite_strength:
+            return "B"
+        return "perturb" if request.char_perturb else "A"
+    if kind == "image":
+        if request.visible_requested() or request.degrade or request.morpho:
+            return "V"
+        if request.remove_synthid:
+            return "synthid"
+    return "M"
 
 
 def result_class_for(layer: str) -> str:

@@ -87,6 +87,7 @@ from tui import (
     estimate_rewrite_seconds,
     format_badge,
     format_duration,
+    layer_for_result,
     preset_for,
     result_class_for,
     save_settings,
@@ -382,6 +383,15 @@ class WatermarkTuiApp(App):
         # reads the file, so it happens once per rescan rather than on every
         # keystroke that redraws the readiness line.
         self._kinds: dict[Path, str] = {}
+        # Guards every handler that reaches into the widget tree.  Textual
+        # mounts children as ``compose`` yields them and processes messages in
+        # between, so a ``Select`` constructed with a value posts ``Changed``
+        # before the widgets its handler would go on to query exist — and the
+        # same messages can still be in flight while the app is tearing down,
+        # where the query raises instead of finding a widget.  Both only ever
+        # showed up on a loaded runner, which is exactly why the flag is
+        # explicit rather than a timing assumption.
+        self._widgets_live = False
         self._tables: dict[str, _TableModel] = {
             "#run-table": _TableModel(RUN_COLUMNS),
             "#backend-table": _TableModel(CAPABILITY_COLUMNS),
@@ -725,6 +735,7 @@ class WatermarkTuiApp(App):
     # -- lifecycle ---------------------------------------------------------
 
     def on_mount(self) -> None:
+        self._widgets_live = True
         for selector in self._tables:
             self._relayout_table(selector)
         self._refresh_api_key_state()
@@ -734,6 +745,9 @@ class WatermarkTuiApp(App):
         self.action_rescan()
         self.refresh_backends()
         self._sync_preview()
+
+    def on_unmount(self) -> None:
+        self._widgets_live = False
 
     def on_resize(self) -> None:
         """Re-lay the tables when the terminal changes size."""
@@ -746,7 +760,7 @@ class WatermarkTuiApp(App):
         on the tab you open second would keep the fallback columns it was given
         at mount — the very dark strip this is here to remove.
         """
-        if not self.is_mounted:
+        if not self._widgets_live:
             return
         for selector in self._tables:
             if self.query(selector):
@@ -801,6 +815,8 @@ class WatermarkTuiApp(App):
     # -- files -------------------------------------------------------------
 
     def action_rescan(self) -> None:
+        if not self._widgets_live:
+            return
         self.request = replace(
             self.request,
             glob=self.query_one("#in-glob", Input).value or "*",
@@ -850,6 +866,8 @@ class WatermarkTuiApp(App):
 
     def _sync_start(self) -> None:
         """Keep the onboarding pane's three answers current."""
+        if not self._widgets_live:
+            return
         roots = len(self.request.paths)
         self.query_one("#start-files", Static).update(
             f"{len(self.files)} file(s) under {roots} path(s) · {len(self.selected)} selected"
@@ -880,31 +898,43 @@ class WatermarkTuiApp(App):
         extra = self.preset.requires_extra
         if extra and not check_optional(extra).available:
             blockers.append(f"needs watermark-remover[{extra}]")
-        blockers.extend(self._dropped_transform_warnings())
+        blockers.extend(self._selection_warnings())
         if blockers:
             return "[yellow]" + escape(" · ".join(blockers)) + "[/]"
         return f"[green]ready[/] — {len(self.selected)} file(s), {self.preset.badge()}"
 
-    def _dropped_transform_warnings(self) -> list[str]:
-        """Name text transforms this selection would silently drop.
+    def _selection_warnings(self) -> list[str]:
+        """What this plan would do to this selection that the operator has not seen.
 
-        ``.md`` and ``.html`` route to the container pipeline, so a rewrite
-        chosen in step 2 is skipped for them — the run says so afterwards, in
-        one row of a results table. A preset that promises a rewrite has to say
-        it will not happen *before* the run, not report it after.
+        Two shapes, and the difference matters.  A text transform on a
+        container is a *silent no-op*: ``.md`` and ``.html`` route to the
+        container pipeline, the rewrite chosen in step 2 never runs, and the
+        old UI said so only in one row of a results table afterwards.  Image
+        degradation on a non-image is a *refusal*, and it aborts in preflight —
+        so one ``.md`` in the folder means the whole batch writes nothing.
+        Both belong in front of the operator before the run, not after it.
         """
         try:
             request = self.collect_request()
         except ValueError:
             return []
+        warnings = []
         counted: dict[str, int] = {}
         for path in self.selected:
             for name in dropped_text_transforms(request, self._kinds.get(path, "unknown")):
                 counted[name] = counted.get(name, 0) + 1
-        return [
+        warnings.extend(
             f"{count} file(s) would skip {name} — tick “force text” on Plan"
             for name, count in sorted(counted.items())
-        ]
+        )
+        if request.degrade or request.morpho:
+            others = sum(1 for path in self.selected if self._kinds.get(path, "unknown") != "image")
+            if others:
+                warnings.append(
+                    f"{others} selected file(s) are not images — image degradation "
+                    "refuses the whole run in preflight, writing nothing"
+                )
+        return warnings
 
     @on(Button.Pressed, "#btn-add-path")
     @on(Input.Submitted, "#in-add-path")
@@ -934,6 +964,8 @@ class WatermarkTuiApp(App):
     @on(Select.Changed, "#sel-preset")
     def _preset_changed(self, event: Select.Changed) -> None:
         """Apply a preset through the same widgets everything else reads."""
+        if not self._widgets_live:
+            return
         chosen = preset_for(None if isinstance(event.value, NoSelection) else str(event.value))
         if chosen is None:
             return
@@ -993,6 +1025,8 @@ class WatermarkTuiApp(App):
         detail column — but that preamble was the actionable half.  It belongs
         here, in something selectable.
         """
+        if not self._widgets_live:
+            return
         row = event.cursor_row
         command = self._install_commands[row] if 0 <= row < len(self._install_commands) else ""
         self.query_one("#install-command", TextArea).text = (
@@ -1001,6 +1035,8 @@ class WatermarkTuiApp(App):
 
     @on(SelectionList.SelectedChanged, "#files-list")
     def _files_changed(self) -> None:
+        if not self._widgets_live:
+            return
         listing = self.query_one("#files-list", SelectionList)
         self.selected = [Path(value) for value in listing.selected]
         self._update_files_summary()
@@ -1159,6 +1195,8 @@ class WatermarkTuiApp(App):
         self._sync_preview()
 
     def _sync_preview(self) -> None:
+        if not self._widgets_live:
+            return
         try:
             request = self.collect_request()
         except ValueError as error:
@@ -1204,6 +1242,8 @@ class WatermarkTuiApp(App):
     @on(Select.Changed, "#sel-model")
     def _discovered_model_chosen(self, event: Select.Changed) -> None:
         """A discovered model fills the free-text field, which stays the source."""
+        if not self._widgets_live:
+            return
         if not isinstance(event.value, NoSelection):
             self.query_one("#in-model", Input).value = str(event.value)
 
@@ -1328,6 +1368,8 @@ class WatermarkTuiApp(App):
         as it was at mount reports "no base URL set" over a plan that has one —
         stale state presented as fact.
         """
+        if not self._widgets_live:
+            return
         if event.pane.id == "tab-start":
             self.refresh_backends()
         # A pane that was hidden until now has only just been given a width.
@@ -1335,6 +1377,8 @@ class WatermarkTuiApp(App):
 
     def refresh_backends(self, *, recheck: bool = True) -> None:
         """Rebuild the capability table. ``recheck`` re-imports the extras."""
+        if not self._widgets_live:
+            return
         if recheck or self._extra_rows is None:
             self._extra_rows = [
                 (
@@ -1357,7 +1401,7 @@ class WatermarkTuiApp(App):
         # A half-typed number must not blank the capability pane: fall back to
         # the last valid request so the endpoint row still says something true.
         try:
-            request = self.collect_request() if self.is_mounted else self.request
+            request = self.collect_request()
         except ValueError:
             request = self.request
         policy = classify_endpoint(
@@ -1630,15 +1674,7 @@ class WatermarkTuiApp(App):
         kind = payload.get("kind", "unknown")
         failed = payload.get("exit_code", 0) != 0
         # The badge follows the layer that did the work, never the outcome.
-        layer = (
-            "B"
-            if request.rewrite_strength and kind == "text"
-            else (
-                "V"
-                if request.visible_requested() and kind == "image"
-                else ("A" if kind == "text" else "M")
-            )
-        )
+        layer = layer_for_result(request, str(kind))
         note = payload.get("error") or ""
         skipped = payload.get("skipped_text_transforms")
         if skipped:
@@ -1704,6 +1740,8 @@ class WatermarkTuiApp(App):
 
     @on(DataTable.RowHighlighted, "#history-table")
     def _history_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if not self._widgets_live:
+            return
         if 0 <= event.cursor_row < len(self.history):
             self.query_one("#history-copyable", TextArea).text = self.history[
                 event.cursor_row
@@ -1731,6 +1769,8 @@ class WatermarkTuiApp(App):
         Driven by the same table ``collect_request`` reads, so "Reuse" cannot
         quietly drop an option that only one of the two knows about.
         """
+        if not self._widgets_live:
+            return
         for binding in PLAN_BINDINGS:
             binding.write(self, getattr(request, binding.field))
         self.query_one("#cb-disable-thinking", Checkbox).value = bool(
