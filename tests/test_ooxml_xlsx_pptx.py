@@ -271,6 +271,31 @@ def test_docx_embedded_media_cleaning():
     assert has_c2pa_after is False
 
 
+def test_docx_embedded_heic_media_inspected_and_cleaned():
+    # Regression: detect_format reports HEIF-family bytes as "heif", but the
+    # embedded-media branches matched "heic" — embedded HEIF was silently
+    # skipped by both inspect and clean.
+    from test_heif_meta import _minimal_heic_with_xmp
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(
+            "word/document.xml",
+            "<w:document><w:body><w:p><w:r><w:t>Doc</w:t></w:r></w:p></w:body></w:document>",
+        )
+        zf.writestr("word/media/image1.heic", _minimal_heic_with_xmp())
+    docx_data = buf.getvalue()
+
+    _has_c2pa, has_ai, findings, _ = inspect_docx(docx_data)
+    assert has_ai is True
+    assert any("word/media/image1.heic" in f for f in findings)
+
+    cleaned_data, actions = clean_docx(docx_data)
+    assert any("clean embedded media in word/media/image1.heic" in a for a in actions)
+    _, has_ai_after, _, _ = inspect_docx(cleaned_data)
+    assert has_ai_after is False
+
+
 def test_clean_container_and_inspect_container_xlsx_pptx(tmp_path):
     xlsx_path = tmp_path / "budget.xlsx"
     xlsx_path.write_bytes(_create_synthetic_xlsx())

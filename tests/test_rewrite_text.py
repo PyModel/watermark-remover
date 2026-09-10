@@ -24,7 +24,6 @@ from layer_b_http import LayerBHTTPError
 from rewrite_text import (
     RewritePlan,
     _check_remote,
-    _flag_env,
     _lexical_divergence,
     _select_candidate,
     build_prompt,
@@ -76,7 +75,7 @@ def test_live_tsapa_plan_requires_backend_and_model(monkeypatch):
         rewrite_text.RewritePlan.live_tsapa_from_environment(generations=1, population=2)
 
     monkeypatch.setenv("WATERMARKS_REWRITE_BACKEND", "ollama")
-    with pytest.raises(ValueError, match="requires WATERMARKS_REWRITE_MODEL"):
+    with pytest.raises(ValueError, match="requires a model"):
         rewrite_text.RewritePlan.live_tsapa_from_environment(generations=1, population=2)
 
 
@@ -458,13 +457,50 @@ def test_check_remote_denies_non_http_scheme():
 
 
 def test_flag_env(monkeypatch):
-    assert not _flag_env("WATERMARKS_REWRITE_ALLOW_REMOTE")
+    from common import read_flag_env
+
+    assert not read_flag_env("WATERMARKS_REWRITE_ALLOW_REMOTE")
     monkeypatch.setenv("WATERMARKS_REWRITE_ALLOW_REMOTE", "1")
-    assert _flag_env("WATERMARKS_REWRITE_ALLOW_REMOTE")
+    assert read_flag_env("WATERMARKS_REWRITE_ALLOW_REMOTE")
     monkeypatch.setenv("WATERMARKS_REWRITE_ALLOW_REMOTE", "true")
-    assert _flag_env("WATERMARKS_REWRITE_ALLOW_REMOTE")
+    assert read_flag_env("WATERMARKS_REWRITE_ALLOW_REMOTE")
     monkeypatch.setenv("WATERMARKS_REWRITE_ALLOW_REMOTE", "0")
-    assert not _flag_env("WATERMARKS_REWRITE_ALLOW_REMOTE")
+    assert not read_flag_env("WATERMARKS_REWRITE_ALLOW_REMOTE")
+
+
+def test_an_unparseable_opt_in_is_not_an_opt_in(monkeypatch):
+    """A security opt-in nobody can parse must read as "off", not raise.
+
+    ``read_bool_env`` raises, which is right for a run-stopping typo. It is
+    wrong for the flag that relaxes the loopback-only default, because the
+    path that reports the policy has to reach the same answer as the path that
+    enforces it.
+    """
+    from common import read_flag_env
+
+    monkeypatch.setenv("WATERMARKS_REWRITE_ALLOW_REMOTE", "maybe")
+    assert read_flag_env("WATERMARKS_REWRITE_ALLOW_REMOTE") is False
+
+
+def test_live_from_environment_honours_the_reasoning_effort_variable(monkeypatch):
+    """The documented order is explicit argument, then environment, then default.
+
+    ``reasoning_effort`` was passed straight through, so ``wm --rewrite`` and
+    ``--tsapa`` dropped the configured value while ``rewrite_text``'s own CLI
+    applied it through argparse.
+    """
+    monkeypatch.setenv("WATERMARKS_REWRITE_BACKEND", "openai-compatible")
+    monkeypatch.setenv("WATERMARKS_REWRITE_MODEL", "m")
+    monkeypatch.setenv("WATERMARKS_REWRITE_REASONING_EFFORT", "high")
+
+    plan = RewritePlan.live_from_environment("humanize")
+    assert plan.reasoning_effort == "high"
+
+    explicit = RewritePlan.live_from_environment("humanize", reasoning_effort="low")
+    assert explicit.reasoning_effort == "low"
+
+    monkeypatch.delenv("WATERMARKS_REWRITE_REASONING_EFFORT")
+    assert RewritePlan.live_from_environment("humanize").reasoning_effort is None
 
 
 def _http_plan(base_url: str, **overrides) -> RewritePlan:
@@ -523,6 +559,32 @@ def test_openai_compatible_sends_reasoning_effort_when_set():
         assert "reasoning_effort" not in captured["body"]
     finally:
         server.shutdown()
+
+
+def test_openai_compatible_omits_reasoning_effort_when_off(monkeypatch):
+    """'off' disables the parameter entirely; enabled values are still sent."""
+    captured: dict = {}
+
+    def fake_request_json(base_url, route, payload, **kwargs):
+        captured["payload"] = payload
+        return {"choices": [{"message": {"content": "rewritten"}}]}
+
+    monkeypatch.setattr(rewrite_text.layer_b_http, "request_json", fake_request_json)
+
+    rewrite_text._call_openai_compatible(
+        "http://127.0.0.1:9", "m", "hello", "key", 5.0, reasoning_effort="off"
+    )
+    assert "reasoning_effort" not in captured["payload"]
+
+    rewrite_text._call_openai_compatible(
+        "http://127.0.0.1:9", "m", "hello", "key", 5.0, reasoning_effort="low"
+    )
+    assert captured["payload"]["reasoning_effort"] == "low"
+
+    rewrite_text._call_openai_compatible(
+        "http://127.0.0.1:9", "m", "hello", "key", 5.0, reasoning_effort=None
+    )
+    assert "reasoning_effort" not in captured["payload"]
 
 
 def test_rewrite_denies_remote_host_without_opt_in():

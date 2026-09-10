@@ -10,7 +10,10 @@ research detectors. Every detector implements the same small protocol:
 
 Reports follow the fail-soft contract: a detector that is unconfigured,
 times out, or errors returns {"available": False, "error": ...} and can
-never block cleaning.
+never block cleaning. Every report also carries "configured": whether the
+detector was set up to run at all, so an aggregator can tell a detector that
+never ran from one that ran and failed. A configured detector that failed is
+unresolved evidence, never a clean result.
 
 Detectors:
 
@@ -233,7 +236,11 @@ class GeminiSynthIDTextDetector:
     vendor = "google"
 
     def available(self) -> bool:
-        return bool(os.environ.get("WATERMARKS_GEMINI_API_KEY", "").strip())
+        # The DETECT_TEXT_WATERMARK task type is not supported by the Gemini
+        # generateContent API yet, so this detector cannot run regardless of
+        # configuration. Never advertise a detector detect() cannot execute;
+        # flip this once a supported watermark-detection endpoint exists.
+        return False
 
     def detect(self, text: str) -> dict[str, Any]:
         api_key = os.environ.get("WATERMARKS_GEMINI_API_KEY", "").strip()
@@ -242,6 +249,7 @@ class GeminiSynthIDTextDetector:
                 "detector": self.name,
                 "vendor": self.vendor,
                 "available": False,
+                "configured": False,
                 "error": "WATERMARKS_GEMINI_API_KEY not set",
             }
 
@@ -251,6 +259,7 @@ class GeminiSynthIDTextDetector:
                 "detector": self.name,
                 "vendor": self.vendor,
                 "available": True,
+                "configured": True,
                 "skipped": True,
                 "reason": f"text longer than {max_chars} chars",
                 "is_watermarked": None,
@@ -260,6 +269,7 @@ class GeminiSynthIDTextDetector:
             "detector": self.name,
             "vendor": self.vendor,
             "available": False,
+            "configured": False,
             "error": (
                 "DETECT_TEXT_WATERMARK task type is not supported by the "
                 "Gemini generateContent API; this detector is disabled until "
@@ -338,6 +348,7 @@ class MarkLLMTextDetector:
             "scheme": scheme,
             "vendor": "open-llm",
             "available": False,
+            "configured": bool(upstream),
         }
         if not upstream:
             report["error"] = "MARKLLM_DIR not set"
@@ -366,6 +377,9 @@ class MarkLLMTextDetector:
                 cmd += ["--model", self._model]
             if self._upstream_dir:
                 cmd += ["--upstream-dir", str(Path(upstream).expanduser().resolve())]
+            rlimit_as = _markllm_rlimit_as()
+            if rlimit_as is not None:
+                cmd += ["--rlimit-as", str(rlimit_as)]
 
             try:
                 result = run_command(
@@ -376,16 +390,18 @@ class MarkLLMTextDetector:
             except ExternalCommandTimeout:
                 report["error"] = "MarkLLM detection timed out"
                 return report
+            # Use the decoded text views: CommandResult.stderr/stdout are raw
+            # bytes, and a bytes error field would make the report un-serializable.
             if result.returncode == 3:
-                report["error"] = (result.stderr or "").strip()[:400] or "MarkLLM unavailable"
+                report["error"] = result.stderr_text.strip()[:400] or "MarkLLM unavailable"
                 return report
             if result.returncode != 0:
-                report["error"] = (result.stderr or "").strip()[
-                    :400
-                ] or f"MarkLLM exit {result.returncode}"
+                report["error"] = (
+                    result.stderr_text.strip()[:400] or f"MarkLLM exit {result.returncode}"
+                )
                 return report
             try:
-                payload = json.loads(result.stdout or "{}")
+                payload = json.loads(result.stdout_text or "{}")
             except json.JSONDecodeError as e:
                 report["error"] = f"bad MarkLLM JSON: {e}"
                 return report
@@ -432,6 +448,7 @@ class ClaudeTextDetector:
             "detector": self.name,
             "vendor": self.vendor,
             "available": False,
+            "configured": False,
             "error": (
                 "Anthropic has announced a text-watermark detection API for "
                 "Claude; no public endpoint is available yet. When it ships, "

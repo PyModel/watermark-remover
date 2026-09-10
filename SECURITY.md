@@ -11,7 +11,7 @@ GitHub Release (when releases exist). Older tags are not maintained.
 
 Please report vulnerabilities privately using one of:
 
-1. **[GitHub Security Advisories](https://github.com/Pythoughts-labs/watermark-remover/security/advisories/new)**
+1. **[GitHub Security Advisories](https://github.com/PyModel/watermark-remover/security/advisories/new)**
    (preferred) — "Report a vulnerability" on the repository Security tab
 2. Email the maintainer at <melkholy@techmatrix.com>
 

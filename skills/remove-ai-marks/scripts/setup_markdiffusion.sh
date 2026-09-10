@@ -81,15 +81,23 @@ if [[ "$CHECKOUT" -eq 1 ]]; then
     echo "Cloning THU-BPM/MarkDiffusion into $DIR (pinned ref: $REF)"
     git clone --depth 1 --filter=blob:none --sparse \
       https://github.com/THU-BPM/MarkDiffusion.git "$DIR"
-    git -C "$DIR" fetch --depth 1 origin "$REF"
-    git -C "$DIR" checkout --detach "$REF"
-    HEAD_SHA="$(git -C "$DIR" rev-parse HEAD)"
-    if [[ "$HEAD_SHA" != "$REF" ]]; then
-      echo "error: expected pinned ref $REF, got $HEAD_SHA" >&2
-      exit 1
-    fi
   else
     echo "Using existing checkout: $DIR"
+  fi
+  if ! git -C "$DIR" fetch --depth 1 origin "$REF"; then
+    if ! git -C "$DIR" rev-parse --verify "${REF}^{commit}" >/dev/null 2>&1; then
+      echo "error: could not fetch pinned ref $REF and it is not available locally" >&2
+      exit 1
+    fi
+    echo "warning: fetch failed; using locally available pinned ref $REF" >&2
+  fi
+  git -C "$DIR" checkout --detach "$REF"
+  git -C "$DIR" sparse-checkout reapply
+  EXPECTED_SHA="$(git -C "$DIR" rev-parse --verify "${REF}^{commit}")"
+  HEAD_SHA="$(git -C "$DIR" rev-parse HEAD)"
+  if [[ "$HEAD_SHA" != "$EXPECTED_SHA" ]]; then
+    echo "error: expected pinned ref $REF ($EXPECTED_SHA), got $HEAD_SHA" >&2
+    exit 1
   fi
 fi
 

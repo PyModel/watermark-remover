@@ -64,3 +64,22 @@ def test_classify_bytes_unknown_fallback():
     assert classify_bytes(b"random bytes \x00\xff", None) == "unknown"
     assert classify_bytes(b"\x89PNG\r\n\x1a\nrest", None) == "image"
     assert classify_bytes(b"PK\x03\x04rest", None) == "unknown"  # not a full zip
+
+
+def _ftyp(brand: bytes) -> bytes:
+    payload = brand + b"\x00\x00\x00\x00" + brand
+    return (len(payload) + 8).to_bytes(4, "big") + b"ftyp" + payload
+
+
+def test_classify_bytes_heif_magic_is_image():
+    # detect_format reports the whole HEIF/HEIC family as "heif" (never
+    # "heic"); routing must accept that token or HEIF bytes land in "unknown".
+    assert classify_bytes(_ftyp(b"heic"), None) == "image"
+    assert classify_bytes(_ftyp(b"heic"), "") == "image"
+    assert classify_bytes(_ftyp(b"heic"), ".bin") == "image"
+
+
+def test_classify_heif_file_without_known_extension(tmp_path):
+    f = tmp_path / "photo.blob"
+    f.write_bytes(_ftyp(b"heic") + b"\x00" * 64)
+    assert classify(f) == "image"

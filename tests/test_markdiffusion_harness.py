@@ -106,3 +106,67 @@ def test_cli_resolve_config_missing(tmp_path: Path):
 
     with __import__("pytest").raises(_Unavailable):
         _resolve_config(None, str(tmp_path / "missing.json"))
+
+
+_VALID_SHA = "f71d7867a2745c420aa93441638b119c85995963"
+
+
+def test_split_model_revision_accepts_full_commit_sha():
+    """A full 40-char lowercase hex commit ID passes through verbatim."""
+    from markdiffusion_harness import _split_model_revision
+
+    assert _split_model_revision(f"org/repo@{_VALID_SHA}") == ("org/repo", _VALID_SHA)
+
+
+def test_split_model_revision_unrevisioned_returns_none():
+    """No '@' -> repo id unchanged and revision None."""
+    from markdiffusion_harness import _split_model_revision
+
+    assert _split_model_revision("org/repo") == ("org/repo", None)
+
+
+def test_split_model_revision_rejects_mutable_refs_and_malformed():
+    """Branches, tags, short/long/non-hex SHAs and malformed specs raise."""
+    import pytest
+    from markdiffusion_harness import _split_model_revision
+
+    for bad in (
+        "org/repo@main",
+        "org/repo@v1.0.0",
+        "org/repo@" + "a" * 39,
+        "org/repo@" + "a" * 41,
+        "org/repo@" + "g" * 40,
+        "@" + "a" * 40,
+        "org/repo@",
+    ):
+        with pytest.raises(ValueError):
+            _split_model_revision(bad)
+
+
+def test_default_model_is_pinned_to_full_sha():
+    """The built-in default carries an immutable full-commit-SHA revision."""
+    from markdiffusion_harness import (
+        DEFAULT_MODEL,
+        DEFAULT_MODEL_REVISION,
+        _split_model_revision,
+    )
+
+    repo, revision = _split_model_revision(f"{DEFAULT_MODEL}@{DEFAULT_MODEL_REVISION}")
+    assert repo == DEFAULT_MODEL
+    assert revision == DEFAULT_MODEL_REVISION
+
+
+def test_cli_unpinned_online_model_rejected(tmp_path: Path):
+    """Online + unrevisioned --model -> exit 2 before any upstream access."""
+    img = tmp_path / "img.png"
+    img.write_bytes(b"x")
+    r = _run_adapter(
+        "detect",
+        str(img),
+        "--scheme",
+        "tr",
+        "--model",
+        "huanzi05/stable-diffusion-2-1-base",
+    )
+    assert r.returncode == 2
+    assert "unpinned" in (r.stderr or "")

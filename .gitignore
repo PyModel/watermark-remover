@@ -21,6 +21,7 @@ CLAUDE.md
 
 # Python build artifacts
 build/
+dist/
 *.egg-info/
 
 # Secrets / local env
@@ -29,3 +30,8 @@ build/
 # Hugging Face caches (MarkLLM / MarkDiffusion / CtrlRegen backends)
 .hf_cache/
 .cache/huggingface/
+
+# Local-only agent scaffolding and architecture notes
+.agents/
+docs/architecture-review.md
+docs/architecture-review-validation-2026-08.md

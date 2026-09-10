@@ -50,6 +50,11 @@ SUPPORTED_EXTENSIONS = _IMAGE_EXTENSIONS | _CONTAINER_EXTENSIONS | _TEXT_EXTENSI
 _ASSET_KINDS: tuple[AssetKind, ...] = ("text", "image", "container", "unknown")
 _SNIFF_BYTES = 4096  # HEIF brand detection scans at most the first 4 KiB.
 
+#: image_meta.detect_format values that route to the image pipeline. The
+#: HEIF/HEIC family is reported as "heif" (see heif_meta.detect_heif), never
+#: "heic" — keep one copy so the three sniffers below cannot drift apart.
+_IMAGE_FORMAT_NAMES = frozenset({"png", "jpeg", "webp", "avif", "heif", "bmp", "gif", "tiff"})
+
 #: Bytes read for header-only sniffing. Every supported image/container
 #: magic lives in the prefix; zip-based containers (docx/odt/...) need the
 #: full central directory, which sits at the end of the archive, so only a
@@ -66,7 +71,7 @@ def classify_bytes(data: bytes, suffix: str | None = None) -> AssetKind:
         return "container"
     if ext in _TEXT_EXTENSIONS:
         return "text"
-    if detect_image_format(data) in ("png", "jpeg", "webp", "avif", "heic", "bmp", "gif", "tiff"):
+    if detect_image_format(data) in _IMAGE_FORMAT_NAMES:
         return "image"
     if data:
         sniff_path = Path("input") if not ext else Path(f"input{ext}")
@@ -86,7 +91,7 @@ def classify(path: Path) -> AssetKind:
         return "text"
     with path.open("rb") as fh:
         head = fh.read(CLASSIFY_HEADER_BYTES)
-    if detect_image_format(head) in ("png", "jpeg", "webp", "avif", "heic", "bmp", "gif", "tiff"):
+    if detect_image_format(head) in _IMAGE_FORMAT_NAMES:
         return "image"
     if head:
         data = path.read_bytes() if head[:4] == b"PK" else head
@@ -118,17 +123,7 @@ def classify_asset(path: Path, *, forced_kind: str = "auto") -> AssetKind:
 
     with path.open("rb") as source:
         prefix = source.read(_SNIFF_BYTES)
-    if detect_image_format(prefix) in (
-        "png",
-        "jpeg",
-        "webp",
-        "avif",
-        "heic",
-        "heif",
-        "bmp",
-        "gif",
-        "tiff",
-    ):
+    if detect_image_format(prefix) in _IMAGE_FORMAT_NAMES:
         return "image"
     if detect_container_format(path, prefix) != "unknown":
         return "container"

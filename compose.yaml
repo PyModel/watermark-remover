@@ -21,14 +21,14 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ghcr.io/pythoughts-labs/watermark-remover:latest
+    image: ghcr.io/pymodel/watermark-remover:latest
     ports:
       - "127.0.0.1:8765:8765"
     environment:
       # Empty by default (no auth). Set to require `Authorization: Bearer <key>`.
       WATERMARKS_SERVER_API_KEY: ${WATERMARKS_SERVER_API_KEY:-}
-      # Optional Gemini API key enabling vendor SynthID-text watermark
-      # detection via /detect and detect_before/after (see .env.example).
+      # Optional Gemini API key. The vendor SynthID-text detector is
+      # currently disabled and this key enables nothing (see .env.example).
       WATERMARKS_GEMINI_API_KEY: ${WATERMARKS_GEMINI_API_KEY:-}
       WATERMARKS_GEMINI_MODEL: ${WATERMARKS_GEMINI_MODEL:-}
       # Optional SynthID image scorer sidecar (heavy profile).
@@ -46,7 +46,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.markllm
-    image: ghcr.io/pythoughts-labs/watermark-remover:markllm-latest
+    image: ghcr.io/pymodel/watermark-remover:markllm-latest
     # One-shot CLI: `up` just confirms the image; run real jobs with
     # `docker compose run --rm wr-markllm detect /data/wm.txt --scheme kgw`.
     command: ["--help"]
@@ -66,7 +66,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.markdiffusion
-    image: ghcr.io/pythoughts-labs/watermark-remover:markdiffusion-latest
+    image: ghcr.io/pymodel/watermark-remover:markdiffusion-latest
     command: ["--help"]
     read_only: true
     tmpfs:

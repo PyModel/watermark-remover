@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import subprocess
 import sys
@@ -169,6 +170,43 @@ def test_clean_file_in_place_as_text_on_docx_leaves_no_backup(tmp_path):
     assert not (tmp_path / "doc.docx.bak").exists()
 
 
+def test_clean_file_json_emits_structured_error_for_binary_text(tmp_path):
+    """guard_binary preflight refusals must surface as structured JSON in --json mode."""
+    blob = tmp_path / "binary.txt"
+    blob.write_bytes(make_docx(tmp_path / "x.docx").read_bytes())
+    out = tmp_path / "out.txt"
+    r = run("clean_file.py", str(blob), "-o", str(out), "--json")
+    assert r.returncode == 2
+    payload = json.loads(r.stdout)
+    assert "error" in payload
+    assert "refusing to treat" in payload["error"]
+    assert payload["exit_code"] == 2
+    assert not out.exists()
+
+
+def test_clean_file_binary_text_refusal_keeps_exit_2_human_mode(tmp_path):
+    blob = tmp_path / "binary.txt"
+    blob.write_bytes(make_docx(tmp_path / "x.docx").read_bytes())
+    out = tmp_path / "out.txt"
+    r = run("clean_file.py", str(blob), "-o", str(out))
+    assert r.returncode == 2
+    assert "refusing to treat" in r.stderr
+    assert not out.exists()
+
+
+def test_clean_file_json_batch_binary_text_error_is_structured(tmp_path):
+    clean = tmp_path / "ok.txt"
+    clean.write_text("plain text", encoding="utf-8")
+    blob = tmp_path / "binary.txt"
+    blob.write_bytes(make_docx(tmp_path / "x.docx").read_bytes())
+    r = run("clean_file.py", str(clean), str(blob), "--json")
+    assert r.returncode == 2
+    payload = json.loads(r.stdout)
+    assert payload["total"] == 1
+    assert payload["results"][0]["exit_code"] == 2
+    assert "refusing to treat" in payload["results"][0]["error"]
+
+
 def test_clean_file_auto_refuses_unknown_text_like_bytes(tmp_path):
     blob = tmp_path / "no_extension"
     blob.write_text("just plain text, no extension, no magic\n", encoding="utf-8")
@@ -201,11 +239,12 @@ def test_inspect_file_json_reports_unknown_kind(tmp_path):
     blob = tmp_path / "no_extension"
     blob.write_text("no magic, no extension\n", encoding="utf-8")
     r = run("inspect_file.py", str(blob), "--json")
-    assert r.returncode == 0
+    assert r.returncode == 3  # EXIT_PARTIAL: unrecognized input was not scanned
     import json
 
     payload = json.loads(r.stdout)
     assert payload["kind"] == "unknown"
+    assert payload["unscanned"] is True
     assert "note" in payload
 
 
@@ -218,7 +257,7 @@ def test_router_advice_is_not_circular(tmp_path):
     assert "Use inspect_file.py / clean_file.py" not in r.stderr
     assert "--force-text" in r.stderr
     r = run("inspect_file.py", str(blob))
-    assert r.returncode == 0
+    assert r.returncode == 3  # EXIT_PARTIAL: unrecognized input was not scanned
     assert "Kind: unknown" in r.stdout
     assert "--as text|image|container" in r.stdout
 

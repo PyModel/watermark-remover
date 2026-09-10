@@ -24,6 +24,7 @@ import json
 import os
 import sys
 import tempfile
+import traceback
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -133,8 +134,19 @@ class Handler(BaseHTTPRequestHandler):
             except OSError as e:
                 self._respond(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": str(e)})
                 return
-            code, payload = score_file(path, model=MODEL)
-
+            try:
+                code, payload = score_file(path, model=MODEL)
+            except Exception:
+                # score_file should return (1|2|3, None) instead of raising,
+                # but an unexpected exception must not kill the request with a
+                # raw traceback. Log it server-side and answer the fail-soft
+                # contract image_meta.run_synthid_score expects.
+                traceback.print_exc(file=sys.stderr)
+                self._respond(
+                    HTTPStatus.OK,
+                    {"available": False, "error": "scorer error (see sidecar stderr)"},
+                )
+                return
         if code == 0 and payload is not None:
             self._respond(HTTPStatus.OK, payload)
         elif code == 2:

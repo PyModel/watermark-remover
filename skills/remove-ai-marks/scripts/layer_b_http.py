@@ -10,6 +10,7 @@ import string
 import sys
 import urllib.error
 import urllib.request
+from collections.abc import Iterator
 from typing import Any
 from urllib.parse import SplitResult, quote, urljoin, urlsplit, urlunsplit
 
@@ -202,7 +203,6 @@ def _reject_json_constant(_value: str) -> Any:
 
 
 def _read_json_object(response: Any, limit: int) -> dict[str, Any]:
-
     content_lengths = _header_values(response.headers, "Content-Length")
     if content_lengths:
         normalized = {value.strip() for value in content_lengths}
@@ -288,6 +288,152 @@ def request_json(
     try:
         with client.open(request, timeout=timeout) as response:
             return _read_json_object(response, response_limit)
+    except LayerBHTTPError:
+        raise
+    except urllib.error.HTTPError as error:
+        error.close()
+        raise LayerBHTTPError(f"Layer B HTTP request failed with HTTP {error.code}") from None
+    except TimeoutError:
+        raise LayerBHTTPError("Layer B HTTP request timed out") from None
+    except urllib.error.URLError as error:
+        if isinstance(error.reason, TimeoutError):
+            raise LayerBHTTPError("Layer B HTTP request timed out") from None
+        raise LayerBHTTPError("Layer B HTTP connection failed") from None
+    except (http.client.HTTPException, OSError):
+        raise LayerBHTTPError("Layer B HTTP connection failed") from None
+
+
+def get_json(
+    endpoint: str,
+    route: str,
+    *,
+    headers: dict[str, str] | None = None,
+    timeout: float,
+    response_limit: int = DEFAULT_HTTP_JSON_LIMIT,
+    opener: Any = None,
+) -> dict[str, Any]:
+    """GET one bounded JSON object, under the same guards as ``request_json``.
+
+    Model discovery (Ollama ``/api/tags``, OpenAI-compatible ``/v1/models``) is
+    a read, not a generation, but it targets the same operator-supplied
+    endpoint and must inherit the same protections: the same-origin redirect
+    opener so an ``Authorization`` header can never be replayed to another
+    host, the same header validation, and the same bounded JSON reader.
+    """
+    url = _join_route(endpoint, route)
+    timeout = _validate_timeout(timeout)
+    response_limit = _validate_response_limit(response_limit)
+    request_headers = _validate_headers(headers)
+    request_headers.pop("Content-Type", None)
+    try:
+        request = urllib.request.Request(  # noqa: S310
+            url,
+            headers=request_headers,
+            method="GET",
+        )
+    except (TypeError, ValueError) as error:
+        raise LayerBHTTPError("invalid Layer B HTTP request") from error
+
+    client = _OPENER if opener is None else opener
+    try:
+        with client.open(request, timeout=timeout) as response:
+            return _read_json_object(response, response_limit)
+    except LayerBHTTPError:
+        raise
+    except urllib.error.HTTPError as error:
+        error.close()
+        raise LayerBHTTPError(f"Layer B HTTP request failed with HTTP {error.code}") from None
+    except TimeoutError:
+        raise LayerBHTTPError("Layer B HTTP request timed out") from None
+    except urllib.error.URLError as error:
+        if isinstance(error.reason, TimeoutError):
+            raise LayerBHTTPError("Layer B HTTP request timed out") from None
+        raise LayerBHTTPError("Layer B HTTP connection failed") from None
+    except (http.client.HTTPException, OSError):
+        raise LayerBHTTPError("Layer B HTTP connection failed") from None
+
+
+#: Cap on a single streamed line. A provider sends one JSON object per line;
+#: an unbounded line is how a stream becomes a memory exhaustion primitive.
+MAX_STREAM_LINE_BYTES = 1 << 20
+
+
+def stream_json_lines(
+    endpoint: str,
+    route: str,
+    payload: dict[str, Any],
+    *,
+    headers: dict[str, str] | None = None,
+    timeout: float,
+    response_limit: int = DEFAULT_HTTP_JSON_LIMIT,
+    opener: Any = None,
+) -> Iterator[dict[str, Any]]:
+    """POST JSON and yield one parsed object per streamed line.
+
+    Handles both shapes a live backend emits: Ollama's newline-delimited JSON
+    and OpenAI-compatible ``text/event-stream`` (``data: {...}`` lines, ending
+    at ``data: [DONE]``).
+
+    The bounded-read guarantee that ``_read_json_object`` gives a single
+    response has to be re-established here, because a stream has no
+    Content-Length to check: every line is capped at
+    ``MAX_STREAM_LINE_BYTES`` and the running total is capped at
+    ``response_limit``.  Malformed lines are skipped rather than raising, since
+    providers interleave keep-alives and comments; a transport failure still
+    raises.
+    """
+    url = _join_route(endpoint, route)
+    timeout = _validate_timeout(timeout)
+    response_limit = _validate_response_limit(response_limit)
+    request_headers = _validate_headers(headers)
+    body = json.dumps(payload).encode("utf-8")
+    try:
+        request = urllib.request.Request(  # noqa: S310
+            url,
+            data=body,
+            headers=request_headers,
+            method="POST",
+        )
+    except (TypeError, ValueError) as error:
+        raise LayerBHTTPError("invalid Layer B HTTP request") from error
+
+    client = _OPENER if opener is None else opener
+    total = 0
+    try:
+        with client.open(request, timeout=timeout) as response:
+            while True:
+                # Bound the *read*: iterating the response calls readline()
+                # with no size limit, so a stream that never sends a newline
+                # is fully buffered before any length check can reject it.
+                # Asking for one byte past the cap is what makes an oversized
+                # line detectable without holding it.
+                raw_line = response.readline(MAX_STREAM_LINE_BYTES + 1)
+                if not isinstance(raw_line, bytes):
+                    raise LayerBHTTPError("Layer B HTTP stream must yield bytes")
+                if not raw_line:
+                    break
+                if len(raw_line) > MAX_STREAM_LINE_BYTES:
+                    raise LayerBHTTPError("Layer B HTTP stream line exceeds safety limit")
+                total += len(raw_line)
+                if total > response_limit:
+                    raise LayerBHTTPError(
+                        f"Layer B HTTP stream exceeds safety limit of {response_limit:,} bytes"
+                    )
+                line = raw_line.strip()
+                if not line:
+                    continue
+                if line.startswith(b"data:"):
+                    line = line[len(b"data:") :].strip()
+                    if line == b"[DONE]":
+                        return
+                if line.startswith(b":"):  # SSE comment / keep-alive
+                    continue
+                try:
+                    parsed = json.loads(line.decode("utf-8"), parse_constant=_reject_json_constant)
+                except (UnicodeDecodeError, ValueError, RecursionError):
+                    continue
+                if isinstance(parsed, dict):
+                    yield parsed
     except LayerBHTTPError:
         raise
     except urllib.error.HTTPError as error:

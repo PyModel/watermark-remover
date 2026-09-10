@@ -41,10 +41,13 @@ from common import (
     MAX_INPUT_BYTES,
     eprint,
     looks_binary,
+    read_flag_env,
     which,
 )
 from container_meta import clean_container, inspect_container
 from image_meta import clean_image, inspect_image, run_synthid_score
+from layer_b_discovery import layer_b_status
+from optional_deps import extras_status
 from score_stylometry import score_text_stylometry
 from text_detectors import detector_status, run_all_text_detectors, run_text_detectors
 from text_unicode import clean_text, inspect_text
@@ -58,6 +61,9 @@ API_KEY = os.environ.get("WATERMARKS_SERVER_API_KEY", "").strip()
 # Body cap for the JSON envelope. Base64 inflates by 4/3, so the decoded file
 # stays well under MAX_INPUT_BYTES for the same cap.
 MAX_BODY_BYTES = MAX_INPUT_BYTES + (MAX_INPUT_BYTES >> 1)
+
+TEXT_DETECTION_STATUSES = ("DETECTED", "INCONCLUSIVE", "NOT_DETECTED", "NOT_RUN")
+_UNRESOLVED_TEXT_VERDICTS = frozenset({"INCONCLUSIVE", "UNSUPPORTED", "ERROR"})
 
 ALLOWED_CLEAN_OPTIONS = {
     "nfkc": bool,
@@ -76,6 +82,38 @@ ALLOWED_CLEAN_OPTIONS = {
 
 def _json_ok(payload: dict[str, Any]) -> bytes:
     return json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+
+
+def _text_detection_status(reports: list[dict[str, Any]]) -> str:
+    """Aggregate available text-detector reports without treating unknown as clean."""
+    unresolved = False
+    not_detected = False
+    for report in reports:
+        if not isinstance(report, dict):
+            continue
+        if report.get("available") is not True:
+            # A detector that was configured to run but reported unavailable
+            # ran and failed (timeout, crash, bad output). That is unresolved
+            # evidence, not "detection was never requested".
+            if report.get("configured") is True:
+                unresolved = True
+            continue
+        verdict = report.get("verdict")
+        if report.get("is_watermarked") is True or verdict == "DETECTED":
+            return "DETECTED"
+        if verdict in _UNRESOLVED_TEXT_VERDICTS:
+            unresolved = True
+        elif verdict == "NOT_DETECTED" or report.get("is_watermarked") is False:
+            not_detected = True
+        else:
+            # An available detector that produced no recognized decision did
+            # run, but cannot support a clean result.
+            unresolved = True
+    if unresolved:
+        return "INCONCLUSIVE"
+    if not_detected:
+        return "NOT_DETECTED"
+    return "NOT_RUN"
 
 
 def capabilities() -> dict[str, Any]:
@@ -99,6 +137,20 @@ def capabilities() -> dict[str, Any]:
         "harnesses": {
             "markllm": bool(os.environ.get("MARKLLM_DIR")),
         },
+        # Optional extras and Layer B configuration, so a front end can grey out
+        # what is unavailable instead of failing a run to find out.  Layer B is
+        # reported from configuration only: /capabilities is polled and must not
+        # become an outbound request per call.
+        "extras": extras_status(),
+        "layer_b": layer_b_status(
+            os.environ.get("WATERMARKS_REWRITE_BACKEND"),
+            os.environ.get("WATERMARKS_REWRITE_BASE_URL"),
+            # ``read_flag_env``, not ``read_bool_env``: /capabilities is a
+            # report, and it must say what the rewrite path would enforce.
+            # An unparseable opt-in denies there, so it reads as False here
+            # rather than failing the whole capability report.
+            allow_remote=read_flag_env("WATERMARKS_REWRITE_ALLOW_REMOTE"),
+        ),
     }
 
 
@@ -241,8 +293,20 @@ _OPENAPI_PATHS: dict[str, dict[str, Any]] = {
                     type="object",
                     properties={
                         "ok": _schema(type="boolean"),
-                        "kind": _schema(type="string", enum=["text", "image", "container"]),
+                        "kind": _schema(
+                            type="string", enum=["text", "image", "container", "unknown"]
+                        ),
                         "suspicious": _schema(type="boolean"),
+                        "detection_status": _schema(
+                            type="string",
+                            enum=list(TEXT_DETECTION_STATUSES),
+                            description=(
+                                "Aggregate text-watermark detector state. INCONCLUSIVE means "
+                                "the service cannot rule out a watermark; it is not a confirmed "
+                                "detection. A configured detector that ran and failed reports "
+                                "INCONCLUSIVE, not NOT_RUN."
+                            ),
+                        ),
                         "report": _schema(type="object"),
                     },
                 )
@@ -283,8 +347,11 @@ _OPENAPI_PATHS: dict[str, dict[str, Any]] = {
                     type="object",
                     properties={
                         "ok": _schema(type="boolean"),
-                        "kind": _schema(type="string", enum=["text", "image", "container"]),
+                        "kind": _schema(
+                            type="string", enum=["text", "image", "container", "unknown"]
+                        ),
                         "detections": _schema(type="array", items=_schema(type="object")),
+                        "report": _schema(type="object"),
                     },
                 )
             },
@@ -493,6 +560,7 @@ class Handler(BaseHTTPRequestHandler):
                         "note": "unrecognized format; use a filename with a known extension",
                     },
                     "suspicious": False,
+                    "detection_status": "NOT_RUN",
                 },
             )
             return
@@ -515,22 +583,39 @@ class Handler(BaseHTTPRequestHandler):
                 report = inspect_image(path).to_dict()
             else:
                 report = inspect_container(path).to_dict()
-        detected_wm = any(
-            entry.get("available") and entry.get("is_watermarked")
-            for entry in report.get("text_detectors") or []
-        )
+        detection_status = _text_detection_status(report.get("text_detectors") or [])
         suspicious = (
             bool(report.get("suspicious_total"))
             or bool(report.get("has_c2pa") or report.get("has_ai_metadata"))
             or bool(report.get("stylometry", {}).get("score", 0.0) >= 0.65)
-            or detected_wm
+            or detection_status in {"DETECTED", "INCONCLUSIVE"}
         )
         self._respond(
-            HTTPStatus.OK, {"ok": True, "kind": kind, "report": report, "suspicious": suspicious}
+            HTTPStatus.OK,
+            {
+                "ok": True,
+                "kind": kind,
+                "report": report,
+                "suspicious": suspicious,
+                "detection_status": detection_status,
+            },
         )
 
     def _handle_detect(self, data: bytes, name: str) -> None:
         kind = classify_bytes(data, Path(name).suffix)
+        if kind == "unknown":
+            self._respond(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "kind": "unknown",
+                    "detections": [],
+                    "report": {
+                        "note": "unrecognized format; use a filename with a known extension",
+                    },
+                },
+            )
+            return
         with tempfile.TemporaryDirectory(prefix="wm-detect-") as tmp:
             path = _tmp_path(Path(tmp), name or "input")
             path.write_bytes(data)

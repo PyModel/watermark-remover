@@ -10,8 +10,24 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from common import backup_path, cleaned_path, eprint, read_text_input, write_text_output  # noqa: E402
-from text_unicode import clean_text  # noqa: E402
+from common import (
+    backup_path,
+    cleaned_path,
+    eprint,
+    read_text_input,
+    write_text_output,
+)
+from text_unicode import clean_text
+
+
+def _paths_alias(left: Path, right: Path) -> bool:
+    """Return whether two paths name the same file (path, hard link, symlink)."""
+    if left == right:
+        return True
+    try:
+        return left.samefile(right)
+    except OSError:
+        return False
 
 
 def main() -> int:
@@ -63,10 +79,22 @@ def main() -> int:
             eprint("--in-place requires a file path")
             return 2
         src = Path(args.path)
-        bak = backup_path(src)
+        backup_path(src)
         out = str(src)
     elif out is None and args.path not in (None, "-"):
         out = str(cleaned_path(Path(args.path)))
+
+    # --output must never overwrite the input itself (same path, hard link,
+    # or symlink). --in-place is the sanctioned overwrite path and keeps a
+    # .bak backup, so it is exempt. safe_write_bytes hardens the actual write.
+    if (
+        not args.in_place
+        and out not in (None, "-")
+        and args.path not in (None, "-")
+        and _paths_alias(Path(args.path), Path(out))
+    ):
+        eprint(f"refusing to overwrite input: --output {out} aliases {args.path}")
+        return 2
 
     write_text_output(cleaned, out)
 

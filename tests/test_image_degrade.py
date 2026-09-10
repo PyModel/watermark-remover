@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -80,7 +81,8 @@ def test_degrade_preserves_output_file_mode(tmp_path: Path) -> None:
         dest,
         CleanPlan(degrade=ImageDegradePlan(strategy="median")),
     )
-    assert dest.stat().st_mode & 0o777 == 0o640
+    if os.name == "posix":
+        assert dest.stat().st_mode & 0o777 == 0o640
 
 
 def test_degrade_rejects_non_png_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

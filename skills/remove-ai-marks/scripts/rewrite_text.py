@@ -25,12 +25,14 @@ Security notes:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import itertools
 import json
 import math
 import os
 import re
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
@@ -42,6 +44,7 @@ from common import (
     cleaned_path,
     eprint,
     read_bool_env,
+    read_flag_env,
     read_text_input,
     validate_output_path,
     write_text_output,
@@ -91,7 +94,10 @@ REWRITE_BACKENDS = ("print-prompt", "ollama", "openai-compatible")
 LIVE_REWRITE_BACKENDS = ("ollama", "openai-compatible")
 REWRITE_STRENGTHS = ("paraphrase", "backtranslate", "structural", "humanize", "code", "tsapa")
 REASONING_EFFORTS = ("none", "low", "medium", "high", "off")
-_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+#: Hosts that may receive document content without an explicit opt-in.
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+#: Private alias kept for in-module call sites predating the export.
+_LOOPBACK_HOSTS = LOOPBACK_HOSTS
 
 
 class RewriteConfigurationError(ValueError):
@@ -191,33 +197,87 @@ class RewritePlan:
         )
 
     @classmethod
+    def live_from_environment(
+        cls,
+        strength: str,
+        *,
+        label: str | None = None,
+        backend: str | None = None,
+        model: str | None = None,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        generations: int = 5,
+        population: int = 12,
+        lang: str | None = None,
+        original_lang: str | None = None,
+        timeout: float | None = None,
+        temperature: float | None = None,
+        candidates: int | None = None,
+        reasoning_effort: str | None = None,
+        disable_thinking: bool | None = None,
+        allow_remote: bool | None = None,
+    ) -> RewritePlan:
+        """Resolve a live Layer B plan from explicit values, then the environment.
+
+        Precedence is explicit argument > ``WATERMARKS_REWRITE_*`` > dataclass
+        default, so a caller that collects settings interactively (the TUI) and
+        a caller that only reads the environment (``wm --tsapa``) build the same
+        object through the same checks.  *label* names the surface in the error
+        message so the CLI can still say ``--tsapa`` where that is what failed.
+        """
+        origin = label or f"--rewrite {strength}"
+        resolved_backend = backend or os.environ.get("WATERMARKS_REWRITE_BACKEND", "print-prompt")
+        if resolved_backend not in LIVE_REWRITE_BACKENDS:
+            raise RewriteConfigurationError(
+                f"{origin} requires a live backend; set "
+                "WATERMARKS_REWRITE_BACKEND=ollama|openai-compatible"
+            )
+        resolved_model = model or os.environ.get("WATERMARKS_REWRITE_MODEL")
+        if not resolved_model:
+            raise RewriteConfigurationError(
+                f"{origin} requires a model: pass --rewrite-model, set the TUI's model "
+                "field, or export WATERMARKS_REWRITE_MODEL"
+            )
+        defaults = cls()
+        if disable_thinking is None:
+            disable_thinking = read_bool_env("WATERMARKS_REWRITE_DISABLE_THINKING")
+        if allow_remote is None:
+            allow_remote = read_flag_env("WATERMARKS_REWRITE_ALLOW_REMOTE")
+        return cls(
+            backend=resolved_backend,
+            model=resolved_model,
+            base_url=base_url
+            or os.environ.get("WATERMARKS_REWRITE_BASE_URL", "http://127.0.0.1:11434"),
+            api_key=api_key or os.environ.get("WATERMARKS_REWRITE_API_KEY"),
+            strength=strength,
+            lang=lang if lang is not None else defaults.lang,
+            original_lang=(original_lang if original_lang is not None else defaults.original_lang),
+            timeout=timeout if timeout is not None else defaults.timeout,
+            temperature=temperature if temperature is not None else defaults.temperature,
+            candidates=candidates if candidates is not None else defaults.candidates,
+            reasoning_effort=(
+                reasoning_effort
+                if reasoning_effort is not None
+                else os.environ.get("WATERMARKS_REWRITE_REASONING_EFFORT") or None
+            ),
+            generations=generations,
+            population=population,
+            disable_thinking=disable_thinking,
+            allow_remote=allow_remote,
+        )
+
+    @classmethod
     def live_tsapa_from_environment(
         cls,
         *,
         generations: int,
         population: int,
     ) -> RewritePlan:
-        backend = os.environ.get("WATERMARKS_REWRITE_BACKEND", "print-prompt")
-        if backend not in ("ollama", "openai-compatible"):
-            raise RewriteConfigurationError(
-                "--tsapa requires a live backend; set "
-                "WATERMARKS_REWRITE_BACKEND=ollama|openai-compatible"
-            )
-        model = os.environ.get("WATERMARKS_REWRITE_MODEL")
-        if not model:
-            raise RewriteConfigurationError("--tsapa requires WATERMARKS_REWRITE_MODEL")
-        return cls(
-            backend=backend,
-            model=model,
-            base_url=os.environ.get(
-                "WATERMARKS_REWRITE_BASE_URL",
-                "http://127.0.0.1:11434",
-            ),
-            api_key=os.environ.get("WATERMARKS_REWRITE_API_KEY"),
-            strength="tsapa",
+        return cls.live_from_environment(
+            "tsapa",
+            label="--tsapa",
             generations=generations,
             population=population,
-            disable_thinking=read_bool_env("WATERMARKS_REWRITE_DISABLE_THINKING"),
         )
 
 
@@ -226,10 +286,6 @@ def _env(name: str, default: str | None = None) -> str | None:
     if v is None or v == "":
         return default
     return v
-
-
-def _flag_env(name: str) -> bool:
-    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _tokens(text: str) -> list[str]:
@@ -320,7 +376,7 @@ def remote_warning(base_url: str | None) -> str | None:
         host = urlparse(base_url).hostname
     except ValueError:
         return None
-    if host and host not in ("localhost", "127.0.0.1", "::1"):
+    if host and host not in LOOPBACK_HOSTS:
         return (
             f"warning: rewrite base URL host is '{host}' (not localhost); "
             "content will leave this machine"
@@ -352,7 +408,115 @@ def build_prompt(strength: str, text: str, *, lang: str, original_lang: str) -> 
     raise ValueError(f"unknown strength: {strength}")
 
 
-def _call_ollama(base_url: str, model: str, prompt: str, timeout: float, temperature: float) -> str:
+#: Called with each new text fragment as it arrives. Used by front ends that
+#: want to show generation progress; the accumulated result is unchanged.
+TokenSink = Callable[[str], None]
+
+
+def _emit(on_token: TokenSink, fragment: str, parts: list[str]) -> None:
+    """Record a fragment and hand it to the sink, which must never break the read.
+
+    A front end's callback runs on whatever thread is draining the socket; if it
+    raises, the generation would be lost along with it.
+    """
+    parts.append(fragment)
+    with contextlib.suppress(Exception):
+        on_token(fragment)
+
+
+def _no_stream_content(backend: str) -> str:
+    """Message for a stream that produced nothing.
+
+    Worth naming streaming explicitly: the same endpoint may answer a plain
+    request perfectly well, so "empty content" alone sends the operator looking
+    at the wrong thing.
+    """
+    return (
+        f"{backend} returned no content over a streamed request; the endpoint may not "
+        "support streaming responses"
+    )
+
+
+def _stream_ollama(
+    base_url: str,
+    model: str,
+    prompt: str,
+    timeout: float,
+    temperature: float,
+    on_token: TokenSink,
+) -> str:
+    parts: list[str] = []
+    for event in layer_b_http.stream_json_lines(
+        base_url,
+        "/api/chat",
+        {
+            "model": model,
+            "stream": True,
+            "messages": [{"role": "user", "content": prompt}],
+            "options": {"temperature": temperature},
+        },
+        timeout=timeout,
+    ):
+        message = event.get("message")
+        if isinstance(message, dict):
+            fragment = message.get("content")
+            if isinstance(fragment, str) and fragment:
+                _emit(on_token, fragment, parts)
+        if event.get("done") is True:
+            break
+    out = "".join(parts).strip()
+    if not out:
+        raise RuntimeError(_no_stream_content("ollama"))
+    return out
+
+
+def _stream_openai_compatible(
+    base_url: str,
+    route: str,
+    payload: dict,
+    headers: dict[str, str],
+    timeout: float,
+    on_token: TokenSink,
+) -> str:
+    parts: list[str] = []
+    for event in layer_b_http.stream_json_lines(
+        base_url,
+        route,
+        {**payload, "stream": True},
+        headers=headers,
+        timeout=timeout,
+    ):
+        choices = event.get("choices")
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            continue
+        # ``delta`` is a streamed chunk; ``message`` is what a server that
+        # ignored ``stream: true`` sends back instead.  Accepting both means a
+        # backend without SSE support degrades to one big fragment rather than
+        # failing only when a front end asks to watch.
+        chunk = choices[0].get("delta")
+        if not isinstance(chunk, dict):
+            chunk = choices[0].get("message")
+        if isinstance(chunk, dict):
+            fragment = chunk.get("content")
+            if isinstance(fragment, str) and fragment:
+                _emit(on_token, fragment, parts)
+    out = "".join(parts).strip()
+    if not out:
+        raise RuntimeError(_no_stream_content("openai-compatible"))
+    return out
+
+
+def _call_ollama(
+    base_url: str,
+    model: str,
+    prompt: str,
+    timeout: float,
+    temperature: float,
+    *,
+    on_token: TokenSink | None = None,
+) -> str:
+    if on_token is not None:
+        return _stream_ollama(base_url, model, prompt, timeout, temperature, on_token)
     data = layer_b_http.request_json(
         base_url,
         "/api/chat",
@@ -383,6 +547,7 @@ def _call_openai_compatible(
     temperature: float = 0.9,
     reasoning_effort: str | None = None,
     disable_thinking: bool = False,
+    on_token: TokenSink | None = None,
 ) -> str:
     route = "/v1/chat/completions"
     headers: dict[str, str] = {}
@@ -393,12 +558,17 @@ def _call_openai_compatible(
         "messages": [{"role": "user", "content": prompt}],
         "temperature": temperature,
     }
-    if reasoning_effort:
+    # "off" is a documented sentinel that omits the parameter entirely
+    # (generic OpenAI-compatible servers may reject it); every other value,
+    # including "none", is a real reasoning-effort request and is sent.
+    if reasoning_effort and reasoning_effort != "off":
         payload["reasoning_effort"] = reasoning_effort
     if disable_thinking:
         # Supported by Qwen/Transformers-compatible servers; opt-in so generic
         # OpenAI-compatible endpoints never receive an unknown extension.
         payload["chat_template_kwargs"] = {"enable_thinking": False}
+    if on_token is not None:
+        return _stream_openai_compatible(base_url, route, payload, headers, timeout, on_token)
     data = layer_b_http.request_json(base_url, route, payload, headers=headers, timeout=timeout)
     choices = data.get("choices")
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
@@ -412,7 +582,14 @@ def _call_openai_compatible(
     return content.strip()
 
 
-def rewrite(text: str, plan: RewritePlan) -> tuple[str, dict]:
+def rewrite(text: str, plan: RewritePlan, *, on_token: TokenSink | None = None) -> tuple[str, dict]:
+    """Run the planned Layer B rewrite and return ``(text, info)``.
+
+    *on_token*, when given, receives generated fragments as they arrive so a
+    front end can show progress.  It is a presentation callback only: it never
+    influences the result, and it is not honoured for ``tsapa``, whose calls are
+    an internal evolutionary population rather than one visible generation.
+    """
     if not isinstance(text, str):
         raise TypeError("text must be a string")
     if not isinstance(plan, RewritePlan):
@@ -481,7 +658,9 @@ def rewrite(text: str, plan: RewritePlan) -> tuple[str, dict]:
     outs: list[str] = []
     for _ in range(n):
         if backend == "ollama":
-            outs.append(_call_ollama(base_url, model, prompt, timeout, temperature))
+            outs.append(
+                _call_ollama(base_url, model, prompt, timeout, temperature, on_token=on_token)
+            )
         elif backend == "openai-compatible":
             outs.append(
                 _call_openai_compatible(
@@ -493,6 +672,7 @@ def rewrite(text: str, plan: RewritePlan) -> tuple[str, dict]:
                     temperature=temperature,
                     reasoning_effort=reasoning_effort,
                     disable_thinking=disable_thinking,
+                    on_token=on_token,
                 )
             )
         else:
@@ -525,6 +705,97 @@ def rewrite(text: str, plan: RewritePlan) -> tuple[str, dict]:
         "cannot certify removal against a vendor detector."
     )
     return out, info
+
+
+@dataclass(frozen=True, slots=True)
+class RewriteCandidate:
+    """One generated rewrite, with the score the auto-selector would give it."""
+
+    index: int
+    text: str
+    lexical_divergence: float
+    selection_score: float
+    selected: bool
+
+
+def generate_candidates(
+    text: str,
+    plan: RewritePlan,
+    *,
+    on_token: TokenSink | None = None,
+) -> list[RewriteCandidate]:
+    """Generate every candidate and score them, without discarding the losers.
+
+    ``rewrite`` returns only the winner — correct for a pipeline, useless for a
+    human picker.  This runs the same prompt through the same backend the same
+    number of times and hands back all of them, scored identically, so a caller
+    can present the choice.  Candidate *text* is deliberately not routed through
+    ``rewrite``'s ``info`` dict: that dict lands in the JSON payload and the
+    audit file, and document bodies do not belong there.
+
+    Not supported for ``tsapa``, whose candidates are an internal evolutionary
+    population rather than N independent generations.
+
+    When *on_token* is given, each backend call streams and the sink receives
+    fragments as they arrive, so a front end can show generation in progress
+    instead of a spinner.
+    """
+    if not isinstance(plan, RewritePlan):
+        raise TypeError("plan must be a RewritePlan")
+    if plan.strength == "tsapa":
+        raise RewriteConfigurationError(
+            "candidate selection is not available for tsapa; its population is "
+            "internal to the evolutionary search"
+        )
+    if plan.backend not in LIVE_REWRITE_BACKENDS:
+        raise RewriteConfigurationError(
+            f"candidate generation requires a live backend, got {plan.backend}"
+        )
+
+    prompt = build_prompt(plan.strength, text, lang=plan.lang, original_lang=plan.original_lang)
+    _enforce_endpoint(plan.base_url, plan.allow_remote)
+
+    outs: list[str] = []
+    for _ in range(max(1, plan.candidates)):
+        if plan.backend == "ollama":
+            outs.append(
+                _call_ollama(
+                    plan.base_url,
+                    plan.model,
+                    prompt,
+                    plan.timeout,
+                    plan.temperature,
+                    on_token=on_token,
+                )
+            )
+        else:
+            outs.append(
+                _call_openai_compatible(
+                    plan.base_url,
+                    plan.model,
+                    prompt,
+                    plan.api_key,
+                    plan.timeout,
+                    temperature=plan.temperature,
+                    reasoning_effort=plan.reasoning_effort,
+                    disable_thinking=plan.disable_thinking,
+                    on_token=on_token,
+                )
+            )
+
+    _, scores = _select_candidate(text, outs)
+    best = max(range(len(outs)), key=lambda i: scores[i])
+    finished = [clean_text(candidate)[0] if plan.layer_a_after else candidate for candidate in outs]
+    return [
+        RewriteCandidate(
+            index=i,
+            text=finished[i],
+            lexical_divergence=_lexical_divergence(text, outs[i]),
+            selection_score=scores[i],
+            selected=i == best,
+        )
+        for i in range(len(outs))
+    ]
 
 
 def _rewrite_tsapa(
@@ -715,7 +986,7 @@ def main() -> int:
             else args.disable_thinking
         )
         allow_remote = (
-            _flag_env("WATERMARKS_REWRITE_ALLOW_REMOTE")
+            read_flag_env("WATERMARKS_REWRITE_ALLOW_REMOTE")
             if args.allow_remote is None
             else args.allow_remote
         )

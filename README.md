@@ -1,11 +1,13 @@
-![watermark-remover](assets/banner.svg)
+![watermark-remover](https://raw.githubusercontent.com/PyModel/watermark-remover/main/assets/banner.svg)
 
 <p align="center">
-  <a href="https://github.com/Pythoughts-labs/watermark-remover/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Pythoughts-labs/watermark-remover/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/Pythoughts-labs/watermark-remover/releases"><img alt="Release" src="https://img.shields.io/github/v/release/Pythoughts-labs/watermark-remover"></a>
-  <a href="https://github.com/Pythoughts-labs/watermark-remover/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/Pythoughts-labs/watermark-remover?label=stars&color=e8a33d&labelColor=0f1110"></a>
-  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
-  <a href="https://hits.sh/github.com/Pythoughts-labs/watermark-remover/"><img alt="Visitors" src="https://hits.sh/github.com/Pythoughts-labs/watermark-remover.svg?label=visitors&color=e8a33d&labelColor=0f1110"></a>
+  <a href="https://pypi.org/project/watermark-remover/"><img alt="PyPI" src="https://img.shields.io/pypi/v/watermark-remover?logo=pypi&logoColor=white&label=pypi&color=e8a33d&labelColor=0f1110"></a>
+  <a href="https://pypi.org/project/watermark-remover/"><img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-30363d?logo=python&logoColor=white&labelColor=0f1110"></a>
+  <a href="https://pepy.tech/project/watermark-remover"><img alt="Downloads" src="https://img.shields.io/pepy/dt/watermark-remover?logo=python&logoColor=white&label=downloads&color=30363d&labelColor=0f1110"></a>
+  <a href="https://github.com/PyModel/watermark-remover/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/PyModel/watermark-remover/ci.yml?logo=github&logoColor=white&label=ci&labelColor=0f1110"></a>
+  <a href="https://github.com/PyModel/watermark-remover/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/PyModel/watermark-remover?logo=github&logoColor=white&label=stars&color=30363d&labelColor=0f1110"></a>
+  <a href="https://github.com/PyModel/watermark-remover/blob/main/LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-30363d?labelColor=0f1110"></a>
+  <a href="https://hits.sh/github.com/PyModel/watermark-remover/"><img alt="Visitors" src="https://hits.sh/github.com/PyModel/watermark-remover.svg?label=visitors&color=30363d&labelColor=0f1110"></a>
 </p>
 
 Tools for finding and removing AI provenance signals from files you own. Four channels are covered: hidden Unicode in text, statistical token watermarks, visible marks burned into images, and metadata such as C2PA, EXIF, and XMP.
@@ -38,7 +40,37 @@ Optional edges, none required by the core:
 ## Quick start
 
 ```bash
-git clone https://github.com/Pythoughts-labs/watermark-remover.git
+pip install watermark-remover
+
+# Unified clean. The source is never modified without --in-place.
+wm draft.md -o draft.cleaned.md
+wm image.png -o image.cleaned.png
+
+# Machine-readable result, plus a JSON record of what was removed
+wm draft.md -o draft.cleaned.md --json --audit
+```
+
+The install pulls no dependencies — the core is standard library only. Extras
+are opt-in: `watermark-remover[visible]` for image inpainting,
+`[quality]` for scoring, `[ai]` for the torch-backed adapters, `[provenance]`
+for C2PA, `[tui]` for the terminal UI, or `[all]`. Five commands are installed:
+`wm`, `wm-tui`, `wm-serve`, `wm-audit-dir`, `wm-audit-site`.
+
+```bash
+# Live Layer B rewrite through a local endpoint, in the same command
+wm draft.md -o draft.cleaned.md \
+  --rewrite humanize --rewrite-backend openai-compatible \
+  --rewrite-base-url http://127.0.0.1:8000 --rewrite-model my-local-model
+
+# Or drive the whole loop interactively
+pip install "watermark-remover[tui]"
+wm-tui ./drafts --recursive
+```
+
+### From a clone
+
+```bash
+git clone https://github.com/PyModel/watermark-remover.git
 cd watermark-remover
 SCRIPTS=skills/remove-ai-marks/scripts
 
@@ -80,6 +112,66 @@ python3 "$SCRIPTS/clean_file.py" ./inputs -o ./cleaned \
 # Inspect a tree
 python3 "$SCRIPTS/inspect_file.py" ./inputs --recursive --glob "*.md" --json
 ```
+
+### Terminal UI
+
+```bash
+pip install "watermark-remover[tui]"     # adds textual; the core stays dependency-free
+wm-tui                                    # opens the current directory
+wm-tui ./drafts --recursive --glob "*.md"
+```
+
+`wm-tui` is a front end over the same seam the CLI uses: it fills a
+`CleanRequest`, runs it through `clean_request.plan_work` and
+`clean_file.run_clean_item`, and inherits every refusal the CLI makes. It never
+speaks HTTP itself and never displays or persists an API key.
+
+It opens on **Start**, which is the whole job in three steps: add a file or a
+folder, choose a preset, press Clean. Nothing has to be configured first, and
+nothing about a preset is hidden — every option it sets is a visible control on
+the Plan tab and appears in the equivalent `wm …` command.
+
+| Preset | What it turns on | Result class |
+| --- | --- | --- |
+| Hidden marks | zero-width carriers, bidi controls, AI metadata — identical to a bare `wm FILE` | Verifiable |
+| Hidden marks, aggressive | adds NFKC normalisation and homoglyph folding | Verifiable |
+| Deep clean (LLM rewrite) | adds a local-model paraphrase; needs a Layer B endpoint | Best-effort |
+| Images: metadata + degrade | strips C2PA/AI metadata, then perturbs the frequency domain | Best-effort |
+
+No preset can set `--in-place`, `--strip-semantic-format` or `--dry-run`: those
+overwrite the input, change what the text means, or replace the run with a
+description, and each is a deliberate choice with its own confirmation.
+
+The rest of Start is setup. The **Layer B endpoint** block sets the backend,
+base URL and model and probes them; **Save setup** writes them to
+`~/.config/watermark-remover/tui.json` (`$XDG_CONFIG_HOME` or `%APPDATA%` when
+set, or `WATERMARKS_TUI_SETTINGS` to point somewhere else) so the next run
+starts configured. The API key is never in that file — it is read from
+`WATERMARKS_REWRITE_API_KEY` at run time and has no field to be written to.
+**Installed capabilities** lists every optional extra and hands you the exact
+`pip install` line for the missing ones.
+
+The other panes: **Files** (select, rescan, glob and extension filters),
+**Inspect** (Layer A carriers, metadata, stylometry, soft binding), **Plan**
+(every option, plus the equivalent `wm …` command), **Run** (sequential batch,
+per-file result table, live Layer B token stream, before/after diff),
+**History** (every command this session generated, copyable and re-loadable).
+
+The command-line arguments are `path`, `--recursive`, `--glob`, and
+`--extensions` — the initial file selection; more paths can be added from
+Start once it is running. Everything else is configured in the UI, and the
+exact `wm` command it corresponds to is shown and copyable so a run can be
+reproduced outside it.
+
+Results are labeled by *layer*, never by outcome: Layer A and Layer M are
+Verifiable, Layer B and Layer V are Best-effort, soft binding is
+Detection-only. A run that stops to confirm — remote egress, `--in-place`,
+`--strip-semantic-format`, or an expensive batch — does so before the first
+write, not after.
+
+Clipboard copy uses OSC 52, which some terminals (including macOS Terminal.app)
+ignore without acknowledging. Every copy button is therefore paired with a
+read-only, selectable text box holding the same string.
 
 ---
 
@@ -130,6 +222,29 @@ The TSAPA-style engine is a real multi-objective evolutionary loop:
 
 A logprobs-capable `/v1/completions` endpoint supplies PLL, and `/v1/embeddings` supplies semantic similarity. Either can fail independently and degrade to an explicitly labeled standard-library proxy. `--disable-thinking` (or `WATERMARKS_REWRITE_DISABLE_THINKING=true`) opts into the Qwen/Transformers `chat_template_kwargs.enable_thinking=false` extension; it is never sent by default to generic OpenAI-compatible servers.
 
+Layer B is also reachable from `wm` directly, so a rewrite and the Layer A
+re-scrub happen in one pass over one file or a whole tree:
+
+```bash
+wm draft.md -o draft.cleaned.md \
+  --rewrite humanize \
+  --rewrite-backend openai-compatible \
+  --rewrite-base-url http://127.0.0.1:8000 \
+  --rewrite-model my-local-model \
+  --rewrite-candidates 3 --rewrite-timeout 120
+
+wm draft.md -o draft.cleaned.md --tsapa    # alias for --rewrite tsapa
+```
+
+Strengths: `paraphrase`, `backtranslate`, `structural`, `humanize`, `code`,
+`tsapa`. Settings resolve explicit flag > environment
+(`WATERMARKS_REWRITE_*`) > default, so an existing environment still works with
+a bare `--rewrite`. Non-loopback endpoints are refused unless
+`--rewrite-allow-remote` is passed, and the warning names what leaves the
+machine. Text-body options are deliberate no-ops on non-text assets so mixed
+batches work; when that happens the run reports exactly which transforms it
+skipped rather than letting you assume the body was rewritten.
+
 **Cost:** Layer B replaces the original wording and can flatten voice or precision. Prefer a non-origin model so the rewrite does not re-stamp the same scheme.
 
 ### Character-level perturbations
@@ -145,7 +260,7 @@ This is an opt-in anti-watermark transform inspired by 2026 character-perturbati
 
 ## Visible image marks
 
-[`morphomod.py`](skills/remove-ai-marks/scripts/morphomod.py) never guesses a watermark region. Supply one of:
+[`morphomod.py`](https://github.com/PyModel/watermark-remover/blob/main/skills/remove-ai-marks/scripts/morphomod.py) never guesses a watermark region. Supply one of:
 
 - `--mask mask.pgm|mask.png` (white means remove)
 - `--box X,Y,W,H`
@@ -274,7 +389,8 @@ Best-effort pixel-domain removal is opt-in on image cleans: `--remove-synthid` (
 Optional, stdlib-first, fail-soft:
 
 - `score_stylometry.py` — zero-LLM stylometry (burstiness, MATTR, AI-phrase density) with confidence bands and `--explain`.
-- `text_detectors.py` / `detect_text_watermark.py` — Gemini's official SynthID-text detector (needs `WATERMARKS_GEMINI_API_KEY`; env only) and a MarkLLM research harness (same-scheme-config only, not a vendor oracle). Claude detection is reserved but unavailable until a public API ships.
+- `text_detectors.py` / `detect_text_watermark.py` — a MarkLLM research harness (same-scheme-config only, not a vendor oracle). Both vendor detectors are reserved but unavailable, and `/capabilities` always reports them `false`: Gemini's official SynthID-text detector is wired for `WATERMARKS_GEMINI_API_KEY` (env only) but the Gemini API exposes no `DETECT_TEXT_WATERMARK` task type, and Claude detection waits on a public API.
+- MarkLLM detection reports a document-level `verdict` (`DETECTED`, `NOT_DETECTED`, `INCONCLUSIVE`, `UNSUPPORTED`, `ERROR`) alongside the raw `detector_verdict`. Only a below-threshold score with a confirmed key/provenance match and enough scored tokens reads as `NOT_DETECTED`; unknown provenance, a near-threshold score, or a short sample produces `INCONCLUSIVE`. An unsupported scheme produces `UNSUPPORTED`, and a detector result that cannot be scored produces `ERROR`. Provenance comes from the `<output>.wm.json` sidecar the `watermark` subcommand writes, or from an operator `--key-id` assertion.
 - `inspect_text.py --stylometry` and `rewrite_text.py` MarkLLM before/after hooks.
 
 ```bash
@@ -318,7 +434,7 @@ docker compose --profile harness --profile heavy up --build -d
 ./compose-check.sh
 ```
 
-See [`skills/remove-ai-marks/references/service-mode.md`](skills/remove-ai-marks/references/service-mode.md) for the thin-client curl flow and [`docs/windows-autostart.md`](docs/windows-autostart.md) for a Windows login task.
+See [`skills/remove-ai-marks/references/service-mode.md`](https://github.com/PyModel/watermark-remover/blob/main/skills/remove-ai-marks/references/service-mode.md) for the thin-client curl flow and [`docs/windows-autostart.md`](https://github.com/PyModel/watermark-remover/blob/main/docs/windows-autostart.md) for a Windows login task.
 
 ### Heavy backends (external checkouts, never bundled)
 
@@ -370,25 +486,25 @@ Bootstrap any of them with `setup_ctrlregen.sh`, `setup_synthid.sh`, `setup_mark
 
 ## Interesting techniques
 
-**Context-aware Unicode scrubbing.** [`text_unicode.py`](skills/remove-ai-marks/scripts/text_unicode.py) classifies every hidden carrier rather than deleting a blocklist. Zero-width joiners hold emoji sequences together and variation selectors change glyph form, so those survive. Tag characters and bidi overrides do not. Bidi handling follows the same directional model browsers expose through [`unicode-bidi`](https://developer.mozilla.org/en-US/docs/Web/CSS/unicode-bidi), and cleaned text is normalized to NFC, the form described under [`String.prototype.normalize()`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/normalize).
+**Context-aware Unicode scrubbing.** [`text_unicode.py`](https://github.com/PyModel/watermark-remover/blob/main/skills/remove-ai-marks/scripts/text_unicode.py) classifies every hidden carrier rather than deleting a blocklist. Zero-width joiners hold emoji sequences together and variation selectors change glyph form, so those survive. Tag characters and bidi overrides do not. Bidi handling follows the same directional model browsers expose through [`unicode-bidi`](https://developer.mozilla.org/en-US/docs/Web/CSS/unicode-bidi), and cleaned text is normalized to NFC, the form described under [`String.prototype.normalize()`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/normalize).
 
-**NSGA-II inside a text rewriter.** [`tsapa.py`](skills/remove-ai-marks/scripts/tsapa.py) is a genuine multi-objective loop, not a prompt template: population generation, non-dominated sorting, crowding distance, crossover at sentence boundaries, mutation targeted at the weakest sentence, and Pareto knee selection. Attack strength and semantic fidelity are optimized as two separate objectives so neither silently wins.
+**NSGA-II inside a text rewriter.** [`tsapa.py`](https://github.com/PyModel/watermark-remover/blob/main/skills/remove-ai-marks/scripts/tsapa.py) is a genuine multi-objective loop, not a prompt template: population generation, non-dominated sorting, crowding distance, crossover at sentence boundaries, mutation targeted at the weakest sentence, and Pareto knee selection. Attack strength and semantic fidelity are optimized as two separate objectives so neither silently wins.
 
 **Scoring that names its own fallback.** Pseudo-log-likelihood comes from an OpenAI-compatible endpoint with logprobs, and cosine similarity from an embeddings endpoint. Either can fail on its own and drop to a standard-library proxy, which is reported as a proxy rather than passed off as the real measurement.
 
-**Non-cascading dilation in pure Python.** [`morphomod.py`](skills/remove-ai-marks/scripts/morphomod.py) dilates a mask in a single pass against the original buffer, so growth does not compound across iterations. It runs in O(width × height) with no array library.
+**Non-cascading dilation in pure Python.** [`morphomod.py`](https://github.com/PyModel/watermark-remover/blob/main/skills/remove-ai-marks/scripts/morphomod.py) dilates a mask in a single pass against the original buffer, so growth does not compound across iterations. It runs in O(width × height) with no array library.
 
 **Patch-based inpainting with no model.** The default visible backend searches nearby patches by boundary error, picks the best match, and fully replaces the refined mask so watermark pixels cannot bleed through. It is not LaMa quality and is not sold as such, but it needs nothing installed.
 
-**In-place ISO-BMFF neutralization.** [`heif_meta.py`](skills/remove-ai-marks/scripts/heif_meta.py) overwrites JUMBF and C2PA UUID boxes and direct-file Exif and XMP extents without moving anything, so every byte offset in the file stays valid. Layouts it cannot prove safe fail closed instead of being rewritten.
+**In-place ISO-BMFF neutralization.** [`heif_meta.py`](https://github.com/PyModel/watermark-remover/blob/main/skills/remove-ai-marks/scripts/heif_meta.py) overwrites JUMBF and C2PA UUID boxes and direct-file Exif and XMP extents without moving anything, so every byte offset in the file stays valid. Layouts it cannot prove safe fail closed instead of being rewritten.
 
-**PNG chunk surgery.** [`image_meta.py`](skills/remove-ai-marks/scripts/image_meta.py) walks the chunk stream, removes the private ancillary `caBX` chunk that C2PA actually uses in PNG, and recomputes CRCs with `zlib.crc32`.
+**PNG chunk surgery.** [`image_meta.py`](https://github.com/PyModel/watermark-remover/blob/main/skills/remove-ai-marks/scripts/image_meta.py) walks the chunk stream, removes the private ancillary `caBX` chunk that C2PA actually uses in PNG, and recomputes CRCs with `zlib.crc32`.
 
-**Markup-aware container cleaning.** [`container_meta.py`](skills/remove-ai-marks/scripts/container_meta.py) targets SVG [`<metadata>`](https://developer.mozilla.org/en-US/docs/Web/SVG/Element/metadata) elements, HTML [`<meta>`](https://developer.mozilla.org/en-US/docs/Web/HTML/Element/meta) tags, JSON-LD provenance blocks, and [`data-*` attributes](https://developer.mozilla.org/en-US/docs/Web/HTML/Global_attributes/data-*) matching `data-ai*`. DOCX `customXml` parts are dropped and the dangling relationships and Content-Type overrides are pruned, because customXml can re-carry provenance data; this is a provenance tool, so pruning keeps the package valid instead of leaving orphaned parts behind.
+**Markup-aware container cleaning.** [`container_meta.py`](https://github.com/PyModel/watermark-remover/blob/main/skills/remove-ai-marks/scripts/container_meta.py) targets SVG [`<metadata>`](https://developer.mozilla.org/en-US/docs/Web/SVG/Element/metadata) elements, HTML [`<meta>`](https://developer.mozilla.org/en-US/docs/Web/HTML/Element/meta) tags, JSON-LD provenance blocks, and [`data-*` attributes](https://developer.mozilla.org/en-US/docs/Web/HTML/Global_attributes/data-*) matching `data-ai*`. DOCX `customXml` parts are dropped and the dangling relationships and Content-Type overrides are pruned, because customXml can re-carry provenance data; this is a provenance tool, so pruning keeps the package valid instead of leaving orphaned parts behind.
 
 **Fallback chains that degrade loudly.** PDF cleaning tries `exiftool`, then a full-document `pypdf` clone, then a byte-exact copy with an explicit residual warning. The third case still returns a file, and still tells you nothing was removed.
 
-**The banner is drawn, not exported.** [`assets/banner.svg`](assets/banner.svg) uses two overlapping [`<clipPath>`](https://developer.mozilla.org/en-US/docs/Web/SVG/Element/clipPath) regions over one duplicated block of text, so the same codepoints render dim on the left and lit on the right. That puts the scrub line in the middle with no gradient mask and no raster asset.
+**The banner is drawn, not exported.** [`assets/banner.svg`](https://github.com/PyModel/watermark-remover/blob/main/assets/banner.svg) uses two overlapping [`<clipPath>`](https://developer.mozilla.org/en-US/docs/Web/SVG/Element/clipPath) regions over one duplicated block of text, so the same codepoints render dim on the left and lit on the right. That puts the scrub line in the middle with no gradient mask and no raster asset.
 
 ## Technologies and libraries
 
@@ -396,7 +512,7 @@ Nothing below is required to run the core.
 
 - [pypdf](https://github.com/py-pdf/pypdf) for a structural PDF clone that keeps outlines, forms, and attachments while dropping docinfo and XMP.
 - [ExifTool](https://exiftool.org/), [qpdf](https://qpdf.sourceforge.io/), and [c2patool](https://github.com/contentauth/c2patool) as system binaries, used when present.
-- [Gradio](https://www.gradio.app/) for [`demo.py`](demo.py), which calls the same modules as the CLI rather than reimplementing them.
+- [Gradio](https://www.gradio.app/) for [`demo.py`](https://github.com/PyModel/watermark-remover/blob/main/demo.py), which calls the same modules as the CLI rather than reimplementing them.
 - [Ollama](https://ollama.com/) or any OpenAI-compatible endpoint for Layer B execution. Tests inject a fake callable instead.
 - [LaMa](https://github.com/advimman/lama) and [MI-GAN](https://github.com/Picsart-AI-Research/MI-GAN) as external inpainting commands behind the `external` backend.
 - [reverse-SynthID](https://github.com/aloshdenny/reverse-SynthID) for optional pixel scoring. Not bundled, and non-commercial upstream.
@@ -448,9 +564,9 @@ watermark-remover/
 └── requirements-test.txt
 ```
 
-[`skills/remove-ai-marks/`](skills/remove-ai-marks) is the whole product. It is laid out as an agent skill so it can be symlinked into `.grok/skills` or `~/.grok/skills` and invoked directly, but [`scripts/`](skills/remove-ai-marks/scripts) is a set of ordinary CLIs that work on their own. [`references/`](skills/remove-ai-marks/references) holds the source notes the parsers were built from, including [`ethics.md`](skills/remove-ai-marks/references/ethics.md) and the vendor behavior notes.
+[`skills/remove-ai-marks/`](https://github.com/PyModel/watermark-remover/tree/main/skills/remove-ai-marks) is the whole product. It is laid out as an agent skill so it can be symlinked into `.grok/skills` or `~/.grok/skills` and invoked directly, but [`scripts/`](https://github.com/PyModel/watermark-remover/tree/main/skills/remove-ai-marks/scripts) is a set of ordinary CLIs that work on their own. [`references/`](https://github.com/PyModel/watermark-remover/tree/main/skills/remove-ai-marks/references) holds the source notes the parsers were built from, including [`ethics.md`](https://github.com/PyModel/watermark-remover/blob/main/skills/remove-ai-marks/references/ethics.md) and the vendor behavior notes.
 
-`research/` is intentionally gitignored local evidence and dogfood material; the durable claims discipline is captured in [`DESIGN.md`](DESIGN.md). [`assets/`](assets) holds repository images. [`tests/fixtures/`](tests/fixtures) holds the small binary files the format parsers are tested against.
+`research/` is intentionally gitignored local evidence and dogfood material; the durable claims discipline is captured in [`DESIGN.md`](https://github.com/PyModel/watermark-remover/blob/main/DESIGN.md). [`assets/`](https://github.com/PyModel/watermark-remover/tree/main/assets) holds repository images. [`tests/fixtures/`](https://github.com/PyModel/watermark-remover/tree/main/tests/fixtures) holds the small binary files the format parsers are tested against.
 
 ## Coverage and limits
 
@@ -467,7 +583,7 @@ No public universal text detector exists, and a detector miss does not prove eve
 
 ## Ethics
 
-Built for privacy, hygiene, accessibility, and research on content you own. Not for academic fraud, evading disclosure requirements, or claiming output is proven human-written. See [`ethics.md`](skills/remove-ai-marks/references/ethics.md).
+Built for privacy, hygiene, accessibility, and research on content you own. Not for academic fraud, evading disclosure requirements, or claiming output is proven human-written. See [`ethics.md`](https://github.com/PyModel/watermark-remover/blob/main/skills/remove-ai-marks/references/ethics.md).
 
 ---
 
@@ -490,10 +606,10 @@ make check
 
 ## Documentation
 
-- [`DESIGN.md`](DESIGN.md), architecture, seams, guarantee classes, roadmap
-- [`SKILL.md`](skills/remove-ai-marks/SKILL.md), agent workflow
-- [`mark-classes.md`](skills/remove-ai-marks/references/mark-classes.md), [`removal-matrix.md`](skills/remove-ai-marks/references/removal-matrix.md), [`vendor-notes.md`](skills/remove-ai-marks/references/vendor-notes.md)
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`SECURITY.md`](SECURITY.md)
+- [`DESIGN.md`](https://github.com/PyModel/watermark-remover/blob/main/DESIGN.md), architecture, seams, guarantee classes, roadmap
+- [`SKILL.md`](https://github.com/PyModel/watermark-remover/blob/main/skills/remove-ai-marks/SKILL.md), agent workflow
+- [`mark-classes.md`](https://github.com/PyModel/watermark-remover/blob/main/skills/remove-ai-marks/references/mark-classes.md), [`removal-matrix.md`](https://github.com/PyModel/watermark-remover/blob/main/skills/remove-ai-marks/references/removal-matrix.md), [`vendor-notes.md`](https://github.com/PyModel/watermark-remover/blob/main/skills/remove-ai-marks/references/vendor-notes.md)
+- [`CONTRIBUTING.md`](https://github.com/PyModel/watermark-remover/blob/main/CONTRIBUTING.md) and [`SECURITY.md`](https://github.com/PyModel/watermark-remover/blob/main/SECURITY.md)
 
 # Legal Disclaimer and Responsible Use
 
@@ -545,11 +661,11 @@ If you use watermark-remover in research papers or published work, consider disc
 
 ## Report Problems
 
-Security concerns or misuse reports: see [SECURITY.md](SECURITY.md).
+Security concerns or misuse reports: see [SECURITY.md](https://github.com/PyModel/watermark-remover/blob/main/SECURITY.md).
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+MIT, see [LICENSE](https://github.com/PyModel/watermark-remover/blob/main/LICENSE).
 
 ## Primary references
 

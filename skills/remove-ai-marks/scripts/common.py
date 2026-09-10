@@ -49,6 +49,20 @@ def read_bool_env(name: str, default: bool = False) -> bool:
     raise ValueError(f"{name} must be true or false")
 
 
+def read_flag_env(name: str) -> bool:
+    """Read a security opt-in flag, treating anything unrecognised as "off".
+
+    ``read_bool_env`` raises on a value it cannot parse, which is right where a
+    typo should stop a run outright.  An opt-in that relaxes a default-deny
+    policy is different: the safe reading of a value nobody can parse is "not
+    opted in", and — more importantly — the path that *reports* the policy has
+    to reach the same answer as the path that *enforces* it.  A reporting
+    endpoint that raises where enforcement would simply deny is a worse bug
+    than a silently ignored typo.
+    """
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _reconfigure_stream(stream: Any, errors: str) -> None:
     """Switch a std stream to UTF-8 when it supports reconfiguration.
 
@@ -298,7 +312,11 @@ def create_backup(source: Path) -> Path:
                 dest_file.write(chunk)
             dest_file.flush()
             os.fsync(dest_fd)
-        os.fchmod(dest_fd, stat.S_IMODE(source_stat.st_mode))
+        mode = stat.S_IMODE(source_stat.st_mode)
+        if hasattr(os, "fchmod"):
+            os.fchmod(dest_fd, mode)
+        else:
+            os.chmod(dest, mode)
     except Exception:
         if dest_fd is not None:
             os.close(dest_fd)

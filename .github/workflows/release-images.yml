@@ -1,10 +1,11 @@
 name: release-images
 
+# Pushing a v* tag is the only trigger. Both jobs derive their image tags from
+# the ref, so a branch dispatch could only ever fail the ref check.
 on:
   push:
     tags:
       - "v*"
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -25,9 +26,15 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Compute image tags
         id: tags
+        env:
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          TAG="${{ github.ref_name }}"
-          echo "tags=ghcr.io/pythoughts-labs/watermark-remover:${TAG},ghcr.io/pythoughts-labs/watermark-remover:latest" >> "$GITHUB_OUTPUT"
+          if [[ ! "$REF_NAME" =~ ^v[0-9][0-9A-Za-z.+-]*$ ]]; then
+            echo "invalid release ref: $REF_NAME" >&2
+            exit 1
+          fi
+          TAG="$REF_NAME"
+          echo "tags=ghcr.io/pymodel/watermark-remover:${TAG},ghcr.io/pymodel/watermark-remover:latest" >> "$GITHUB_OUTPUT"
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -64,9 +71,15 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Compute image tags
         id: tags
+        env:
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          TAG="${{ github.ref_name }}"
-          echo "tags=ghcr.io/pythoughts-labs/watermark-remover:${{ matrix.tag }}-${TAG},ghcr.io/pythoughts-labs/watermark-remover:${{ matrix.tag }}-latest" >> "$GITHUB_OUTPUT"
+          if [[ ! "$REF_NAME" =~ ^v[0-9][0-9A-Za-z.+-]*$ ]]; then
+            echo "invalid release ref: $REF_NAME" >&2
+            exit 1
+          fi
+          TAG="$REF_NAME"
+          echo "tags=ghcr.io/pymodel/watermark-remover:${{ matrix.tag }}-${TAG},ghcr.io/pymodel/watermark-remover:${{ matrix.tag }}-latest" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
