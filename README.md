@@ -53,8 +53,19 @@ wm draft.md -o draft.cleaned.md --json --audit
 The install pulls no dependencies — the core is standard library only. Extras
 are opt-in: `watermark-remover[visible]` for image inpainting,
 `[quality]` for scoring, `[ai]` for the torch-backed adapters, `[provenance]`
-for C2PA, or `[all]`. Four commands are installed: `wm`, `wm-serve`,
-`wm-audit-dir`, `wm-audit-site`.
+for C2PA, `[tui]` for the terminal UI, or `[all]`. Five commands are installed:
+`wm`, `wm-tui`, `wm-serve`, `wm-audit-dir`, `wm-audit-site`.
+
+```bash
+# Live Layer B rewrite through a local endpoint, in the same command
+wm draft.md -o draft.cleaned.md \
+  --rewrite humanize --rewrite-backend openai-compatible \
+  --rewrite-base-url http://127.0.0.1:8000 --rewrite-model my-local-model
+
+# Or drive the whole loop interactively
+pip install "watermark-remover[tui]"
+wm-tui ./drafts --recursive
+```
 
 ### From a clone
 
@@ -101,6 +112,42 @@ python3 "$SCRIPTS/clean_file.py" ./inputs -o ./cleaned \
 # Inspect a tree
 python3 "$SCRIPTS/inspect_file.py" ./inputs --recursive --glob "*.md" --json
 ```
+
+### Terminal UI
+
+```bash
+pip install "watermark-remover[tui]"     # adds textual; the core stays dependency-free
+wm-tui                                    # opens the current directory
+wm-tui ./drafts --recursive --glob "*.md"
+```
+
+`wm-tui` is a front end over the same seam the CLI uses: it fills a
+`CleanRequest`, runs it through `clean_request.plan_work` and
+`clean_file.run_clean_item`, and inherits every refusal the CLI makes. It never
+speaks HTTP itself and never displays or persists an API key.
+
+Six panes: **Files** (select, rescan), **Inspect** (Layer A carriers, metadata,
+stylometry, soft binding), **Plan** (every option, plus the equivalent `wm …`
+command), **Run** (sequential batch, per-file result table, live Layer B token
+stream, before/after diff), **Backends** (extras availability, Layer B endpoint
+probe and model discovery), **History** (every command this session generated,
+copyable and re-loadable).
+
+The only command-line arguments are `path`, `--recursive`, `--glob`, and
+`--extensions` — the file selection. Everything else, including the Layer B
+backend, endpoint, and model, is configured in the Plan pane, and the exact
+`wm` command it corresponds to is shown and copyable so a run can be reproduced
+outside the UI.
+
+Results are labeled by *layer*, never by outcome: Layer A and Layer M are
+Verifiable, Layer B and Layer V are Best-effort, soft binding is
+Detection-only. A run that stops to confirm — remote egress, `--in-place`,
+`--strip-semantic-format`, or an expensive batch — does so before the first
+write, not after.
+
+Clipboard copy uses OSC 52, which some terminals (including macOS Terminal.app)
+ignore without acknowledging. Every copy button is therefore paired with a
+read-only, selectable text box holding the same string.
 
 ---
 
@@ -150,6 +197,29 @@ The TSAPA-style engine is a real multi-objective evolutionary loop:
 6. Select the Pareto knee point.
 
 A logprobs-capable `/v1/completions` endpoint supplies PLL, and `/v1/embeddings` supplies semantic similarity. Either can fail independently and degrade to an explicitly labeled standard-library proxy. `--disable-thinking` (or `WATERMARKS_REWRITE_DISABLE_THINKING=true`) opts into the Qwen/Transformers `chat_template_kwargs.enable_thinking=false` extension; it is never sent by default to generic OpenAI-compatible servers.
+
+Layer B is also reachable from `wm` directly, so a rewrite and the Layer A
+re-scrub happen in one pass over one file or a whole tree:
+
+```bash
+wm draft.md -o draft.cleaned.md \
+  --rewrite humanize \
+  --rewrite-backend openai-compatible \
+  --rewrite-base-url http://127.0.0.1:8000 \
+  --rewrite-model my-local-model \
+  --rewrite-candidates 3 --rewrite-timeout 120
+
+wm draft.md -o draft.cleaned.md --tsapa    # alias for --rewrite tsapa
+```
+
+Strengths: `paraphrase`, `backtranslate`, `structural`, `humanize`, `code`,
+`tsapa`. Settings resolve explicit flag > environment
+(`WATERMARKS_REWRITE_*`) > default, so an existing environment still works with
+a bare `--rewrite`. Non-loopback endpoints are refused unless
+`--rewrite-allow-remote` is passed, and the warning names what leaves the
+machine. Text-body options are deliberate no-ops on non-text assets so mixed
+batches work; when that happens the run reports exactly which transforms it
+skipped rather than letting you assume the body was rewritten.
 
 **Cost:** Layer B replaces the original wording and can flatten voice or precision. Prefer a non-origin model so the rewrite does not re-stamp the same scheme.
 

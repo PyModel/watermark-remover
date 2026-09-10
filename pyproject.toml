@@ -57,15 +57,24 @@ ai = [
 provenance = [
     "c2pa-python",
 ]
+# Interactive terminal UI (wm-tui). Textual brings rich; both are pure Python.
+# Deliberately not in the core: `pip install watermark-remover` still pulls
+# nothing. stdlib curses was rejected — it is absent on Windows, which this
+# project supports, so "no dependency" would have cost windows-curses anyway.
+tui = [
+    "textual>=0.80",
+]
 all = [
     "watermark-remover[visible]",
     "watermark-remover[quality]",
     "watermark-remover[ai]",
     "watermark-remover[provenance]",
+    "watermark-remover[tui]",
 ]
 
 [project.scripts]
 wm = "watermark_remover.scripts.clean_file:main"
+wm-tui = "watermark_remover.scripts.tui:main"
 wm-serve = "watermark_remover.scripts.server:main"
 wm-audit-dir = "watermark_remover.scripts.audit_dir:main"
 wm-audit-site = "watermark_remover.scripts.audit_website:main"

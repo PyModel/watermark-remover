@@ -36,7 +36,7 @@ from morphomod import (
 )
 from perturb_text import MODES as PERTURB_MODES
 from perturb_text import perturb_text
-from rewrite_text import RewritePlan, rewrite
+from rewrite_text import RewritePlan, TokenSink, rewrite
 from text_unicode import clean_text
 
 _IMAGE_DEGRADE_STRATEGIES = frozenset((*DEGRADE_STRATEGIES, *MORPHO_STRATEGIES))
@@ -354,7 +354,9 @@ def _validate_operation(path: Path, dest: Path, plan: CleanPlan) -> None:
             raise ValueError(f"mask output aliases image output: {plan.visible.mask_output}")
 
 
-def _clean_text_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
+def _clean_text_asset(
+    path: Path, dest: Path, plan: CleanPlan, on_token: TokenSink | None = None
+) -> CleanResult:
     text = path.read_text(encoding="utf-8", errors="surrogateescape")
     cleaned, stats = clean_text(
         text,
@@ -363,7 +365,7 @@ def _clean_text_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
         preserve_semantic=plan.text.preserve_semantic,
     )
     if plan.text.rewrite_plan is not None:
-        cleaned, rewrite_info = rewrite(cleaned, plan.text.rewrite_plan)
+        cleaned, rewrite_info = rewrite(cleaned, plan.text.rewrite_plan, on_token=on_token)
         stats["tsapa"] = rewrite_info.get("tsapa", rewrite_info)
     if plan.text.perturb_mode is not None:
         cleaned, perturb_stats = perturb_text(
@@ -596,8 +598,16 @@ def _clean_container_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResu
     return CleanResult("container", path, dest, residual, report)
 
 
-def clean_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
-    """Clean one asset; raise failures and leave presentation to the caller."""
+def clean_asset(
+    path: Path, dest: Path, plan: CleanPlan, *, on_token: TokenSink | None = None
+) -> CleanResult:
+    """Clean one asset; raise failures and leave presentation to the caller.
+
+    *on_token* is a display-only sink for Layer B generation fragments.  It is
+    deliberately a call argument rather than a ``CleanPlan`` field: the plan is a
+    frozen, serialisable description of *what* to do, and a live callback is
+    neither frozen nor serialisable.
+    """
     if plan.visible is not None and plan.visible.mask_output is None:
         plan = replace(
             plan,
@@ -615,7 +625,7 @@ def clean_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
     if plan.degrade is not None and kind != "image":
         raise ValueError("degradation is only valid for image assets")
     if kind == "text":
-        return _clean_text_asset(path, dest, plan)
+        return _clean_text_asset(path, dest, plan, on_token)
     if kind == "image":
         return _clean_image_asset(path, dest, plan)
     return _clean_container_asset(path, dest, plan)

@@ -4,3 +4,5 @@ pypdf>=6.16.2,<7
 ruff>=0.16.5,<1
 # OpenAPI contract validation for wm-serve (CI validates /openapi.json).
 openapi-spec-validator==0.9.0
+# Interactive TUI (wm-tui) — installed so CI actually exercises the tui tests.
+textual>=0.80

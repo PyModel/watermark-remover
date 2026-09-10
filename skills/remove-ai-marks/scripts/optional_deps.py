@@ -65,6 +65,7 @@ def check_optional(extra: str) -> BackendAvailability:
         "quality": "skimage",
         "ai": "torch",
         "provenance": "c2pa",
+        "tui": "textual",
     }
     pkg = _checkers.get(extra)
     if pkg is None:
@@ -103,6 +104,26 @@ def has_ai() -> bool:
 
 def has_provenance() -> bool:
     return check_optional("provenance").available
+
+
+def has_tui() -> bool:
+    return check_optional("tui").available
+
+
+#: Every extra `check_optional` knows about, for capability reporting.
+KNOWN_EXTRAS = ("visible", "quality", "ai", "provenance", "tui")
+
+
+def extras_status() -> dict[str, dict[str, object]]:
+    """Availability of every optional extra, with its install hint."""
+    status: dict[str, dict[str, object]] = {}
+    for extra in KNOWN_EXTRAS:
+        availability = check_optional(extra)
+        status[extra] = {
+            "available": availability.available,
+            "hint": availability.hint,
+        }
+    return status
 
 
 # ---------------------------------------------------------------------------

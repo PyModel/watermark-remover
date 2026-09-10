@@ -351,3 +351,18 @@ def test_404(conn):
     assert status == 404
     status, _body = _post(conn, "/nope", {"file": _b64(b"x")})
     assert status == 404
+
+
+def test_capabilities_survives_an_unparseable_remote_opt_in(monkeypatch):
+    """/capabilities is a report; a bad env value must not take it down.
+
+    ``read_bool_env`` raises on a value like "maybe", and ``do_GET`` does not
+    catch it, so the whole capability report failed over one misspelt flag —
+    while the rewrite path it describes would simply have denied.
+    """
+    monkeypatch.setenv("WATERMARKS_REWRITE_ALLOW_REMOTE", "maybe")
+    monkeypatch.setenv("WATERMARKS_REWRITE_BASE_URL", "http://example.com:11434")
+
+    report = server.capabilities()
+    assert report["layer_b"]["endpoint_allowed"] is False
+    assert report["layer_b"]["loopback"] is False

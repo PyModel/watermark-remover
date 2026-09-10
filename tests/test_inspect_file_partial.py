@@ -97,3 +97,46 @@ def test_mixed_batch_partial_takes_precedence(tmp_path: Path) -> None:
     assert "unscanned" not in by_path["clean.txt"]
     assert by_path["suspicious.txt"]["suspicious"] is True
     assert by_path["no_extension"]["unscanned"] is True
+
+
+def test_binary_in_a_text_slot_is_refused_in_the_payload(tmp_path: Path) -> None:
+    """A .txt full of binary must produce a report, not a SystemExit.
+
+    ``read_text_input`` refuses this with ``SystemExit(2)``. That is a
+    ``BaseException``, so the HTTP service and the TUI worker — which both
+    catch ``Exception`` — never saw the refusal at all; the worker simply
+    died. The refusal belongs in the payload, where every consumer reads it.
+    """
+    blob = tmp_path / "binary.txt"
+    blob.write_bytes(b"PK\x03\x04" + bytes(range(256)) * 4)
+
+    r = _run(str(blob), "--json")
+    assert r.returncode == EXIT_PARTIAL
+    payload = json.loads(r.stdout)
+    assert payload["kind"] == "refused"
+    assert payload["unscanned"] is True
+    assert payload["suspicious"] is False
+    assert "not text" in payload["note"]
+
+
+def test_binary_refusal_says_so_in_human_mode(tmp_path: Path) -> None:
+    """A refusal that prints nothing reads as a clean file."""
+    blob = tmp_path / "binary.txt"
+    blob.write_bytes(b"PK\x03\x04" + bytes(range(256)) * 4)
+
+    r = _run(str(blob))
+    assert r.returncode == EXIT_PARTIAL
+    assert "Refused" in r.stderr
+
+
+def test_inspect_asset_never_raises_systemexit_on_binary(tmp_path: Path) -> None:
+    """The data seam's contract: report or Exception, never BaseException."""
+    sys.path.insert(0, str(SCRIPTS))
+    from inspect_file import inspect_asset
+
+    blob = tmp_path / "binary.txt"
+    blob.write_bytes(b"PK\x03\x04" + bytes(range(256)) * 4)
+
+    report = inspect_asset(blob)
+    assert report["kind"] == "refused"
+    assert report["unscanned"] is True
