@@ -796,6 +796,8 @@ class WatermarkTuiApp(App):
 
     def _add_table_row(self, selector: str, *cells: str) -> None:
         self._tables[selector].rows.append(cells)
+        if not self._widgets_live:
+            return
         # A relayout re-adds every row itself; appending twice would double it.
         if not self._relayout_table(selector):
             self.query_one(selector, DataTable).add_row(*cells)
@@ -804,12 +806,18 @@ class WatermarkTuiApp(App):
         model = self._tables[selector]
         model.rows = rows
         model.width = -1  # no real width is negative, so this forces the redraw
+        if not self._widgets_live:
+            return
         self._relayout_table(selector)
 
     def _status(self, message: str) -> None:
+        if not self._widgets_live:
+            return
         self.query_one("#status-bar", Static).update(message)
 
     def _log(self, message: str) -> None:
+        if not self._widgets_live:
+            return
         self.query_one("#run-log", RichLog).write(message)
 
     # -- files -------------------------------------------------------------
@@ -947,7 +955,8 @@ class WatermarkTuiApp(App):
         if not path.exists():
             self._status(f"no such path: {path}")
             return
-        if path in self.request.paths:
+        # ``..`` segments and symlinks hide re-adds from plain Path equality.
+        if path.resolve() in {root.resolve() for root in self.request.paths}:
             self._status(f"already added: {path}")
             return
         self.request = replace(self.request, paths=(*self.request.paths, path))
@@ -1338,6 +1347,8 @@ class WatermarkTuiApp(App):
         self.call_from_thread(self._write_stream, fragment)
 
     def _write_stream(self, fragment: str) -> None:
+        if not self._widgets_live:
+            return
         view = self.query_one("#stream-view", TextArea)
         # Bounded on purpose: a long document would otherwise grow the widget's
         # document without limit while the run is still going.
@@ -1350,6 +1361,8 @@ class WatermarkTuiApp(App):
         An always-visible box that only ever fills on one code path reads as
         broken; naming the reason is cheaper than hiding it.
         """
+        if not self._widgets_live:
+            return
         view = self.query_one("#stream-view", TextArea)
         view.text = ""
         view.border_title = IDLE_STREAM_TITLE if filename is None else f"generating {filename}"
@@ -1462,11 +1475,13 @@ class WatermarkTuiApp(App):
         self.call_from_thread(self._apply_probe, probe)
 
     def _apply_probe(self, probe) -> None:
+        self._last_probe = probe
+        if not self._widgets_live:
+            return
         self._status(f"{probe.backend}: {probe.summary}")
         if probe.models:
             model_select = self.query_one("#sel-model", Select)
             model_select.set_options([(name, name) for name in probe.models])
-        self._last_probe = probe
         self.refresh_backends()
 
     # -- run ---------------------------------------------------------------
@@ -1654,6 +1669,8 @@ class WatermarkTuiApp(App):
 
     def _set_running(self, running: bool) -> None:
         self._clean_running = running
+        if not self._widgets_live:
+            return
         self.query_one("#btn-run", Button).disabled = running
         self.query_one("#btn-cancel", Button).disabled = not running
 
@@ -1671,6 +1688,8 @@ class WatermarkTuiApp(App):
         payload: dict,
         before: str | None,
     ) -> None:
+        if not self._widgets_live:
+            return
         kind = payload.get("kind", "unknown")
         failed = payload.get("exit_code", 0) != 0
         # The badge follows the layer that did the work, never the outcome.
@@ -1733,6 +1752,8 @@ class WatermarkTuiApp(App):
             request=request,
         )
         self.history.insert(0, entry)
+        if not self._widgets_live:
+            return
         self._set_table_rows("#history-table", [(item.when, item.summary) for item in self.history])
         self.query_one("#history-copyable", TextArea).text = entry.command
 

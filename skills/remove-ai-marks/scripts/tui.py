@@ -28,8 +28,9 @@ import argparse
 import json
 import os
 import sys
-from dataclasses import asdict, dataclass, field, fields, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
+from typing import get_args, get_type_hints
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -395,8 +396,21 @@ def load_settings(path: Path | None = None) -> TuiSettings:
         return TuiSettings()
     if not isinstance(raw, dict):
         return TuiSettings()
-    known = {f.name for f in fields(TuiSettings)}
-    return TuiSettings(**{key: value for key, value in raw.items() if key in known})
+    hints = get_type_hints(TuiSettings)
+    allowed = {
+        name: tuple(kind for kind in get_args(hint) if kind is not type(None))
+        for name, hint in hints.items()
+    }
+    # A value of the wrong type is as unusable as an absent key: drop it, or
+    # it reaches CleanRequest and fails late in classify_endpoint instead of
+    # failing soft here.
+    return TuiSettings(
+        **{
+            key: value
+            for key, value in raw.items()
+            if key in allowed and isinstance(value, allowed[key])
+        }
+    )
 
 
 def save_settings(settings: TuiSettings, path: Path | None = None) -> Path:

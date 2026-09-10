@@ -1155,6 +1155,30 @@ def test_a_path_that_does_not_exist_is_refused(tmp_path: Path):
     _run(scenario())
 
 
+def test_an_equivalent_path_is_refused_as_a_duplicate(tmp_path: Path):
+    """``..`` segments must not hide a root that was already added."""
+    from textual.widgets import Input, Static
+    from tui_app import WatermarkTuiApp
+
+    (tmp_path / "sub").mkdir()
+    app = WatermarkTuiApp(CleanRequest(paths=(tmp_path,)))
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            roots = app.request.paths
+            app.query_one("#in-add-path", Input).value = str(tmp_path / "sub" / "..")
+            app.query_one("#btn-add-path").press()
+            for _ in range(80):
+                await pilot.pause()
+                if "already added" in str(app.query_one("#status-bar", Static).render()):
+                    break
+            assert "already added" in str(app.query_one("#status-bar", Static).render())
+            assert app.request.paths == roots
+
+    _run(scenario())
+
+
 def test_clearing_the_paths_empties_the_list_and_says_what_to_do(tmp_path: Path):
     from textual.widgets import Static
 
@@ -1217,6 +1241,20 @@ def test_an_unreadable_setup_file_is_not_fatal(tmp_path: Path):
 
     broken.write_text('{"rewrite_model": "m", "unknown_field": 1}', encoding="utf-8")
     assert load_settings(broken).rewrite_model == "m"
+
+    broken.write_text(
+        '{"rewrite_model": {"host": "x"}, "rewrite_allow_remote": "yes"}',
+        encoding="utf-8",
+    )
+    # A wrong-typed value is as unusable as an absent one: it is dropped
+    # here instead of failing late, inside classify_endpoint.
+    assert load_settings(broken) == TuiSettings()
+
+    mixed = tmp_path / "partly-broken.json"
+    mixed.write_text('{"rewrite_model": "m", "rewrite_base_url": []}', encoding="utf-8")
+    settings = load_settings(mixed)
+    assert settings.rewrite_model == "m"
+    assert settings.rewrite_base_url is None
 
 
 def test_a_saved_endpoint_seeds_the_next_request():
@@ -1373,7 +1411,9 @@ def test_a_text_selection_carries_no_dropped_transform_warning(tmp_path: Path):
                 await pilot.pause()
                 if "ready" in str(app.query_one("#start-ready", Static).render()):
                     break
-            assert "skip" not in str(app.query_one("#start-ready", Static).render())
+            ready = str(app.query_one("#start-ready", Static).render())
+            assert "ready" in ready
+            assert "skip" not in ready
 
     _run(scenario())
 
@@ -1399,6 +1439,44 @@ def test_clean_now_runs_the_plan_and_shows_the_run_pane(tmp_path: Path):
             assert "​" not in cleaned.read_text(encoding="utf-8")
 
     _run(scenario())
+
+
+def test_worker_callbacks_after_unmount_cannot_reach_widgets(tmp_path: Path):
+    """Quitting mid-run leaves clean_worker hops queued; they must no-op.
+
+    The caches and flags still update so a remount re-renders correctly;
+    ``query_one`` is what raises ``NoMatches`` once the tree is gone.
+    """
+    from tui_app import WatermarkTuiApp
+
+    app = WatermarkTuiApp(CleanRequest(paths=(tmp_path,)))
+    assert app._widgets_live is False
+
+    app._set_table_rows("#run-table", [("queued",)])
+    app._add_table_row("#run-table", "queued", "text", "written", "V", "", "note")
+    assert app._tables["#run-table"].rows == [
+        ("queued",),
+        ("queued", "text", "written", "V", "", "note"),
+    ]
+    app._status("status")
+    app._log("log")
+    app._begin_stream("draft.txt")
+    app._write_stream("fragment")
+    app._set_running(True)
+    assert app._clean_running is True
+
+    class _Probe:
+        backend = "ollama"
+        summary = "reachable, 2 model(s)"
+        models = ("qwen3",)
+
+    app._apply_probe(_Probe())
+    assert app._last_probe.summary == "reachable, 2 model(s)"
+    app._record_history(CleanRequest(paths=(tmp_path,)))
+    assert len(app.history) == 1
+    app._render_result(
+        CleanRequest(paths=(tmp_path,)), tmp_path / "draft.txt", {"kind": "text"}, None
+    )
 
 
 def test_image_degradation_over_a_mixed_selection_is_refused_up_front(tmp_path: Path):
@@ -1446,7 +1524,9 @@ def test_an_all_image_selection_carries_no_degrade_warning(tmp_path: Path):
                 await pilot.pause()
                 if "ready" in str(app.query_one("#start-ready", Static).render()):
                     break
-            assert "not images" not in str(app.query_one("#start-ready", Static).render())
+            ready = str(app.query_one("#start-ready", Static).render())
+            assert "ready" in ready
+            assert "not images" not in ready
 
     _run(scenario())
 
