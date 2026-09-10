@@ -25,8 +25,10 @@ explicit list, so a subpackage would silently not ship in the wheel.
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import sys
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -34,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from asset_kind import SUPPORTED_EXTENSIONS
 from batch_inputs import select_inputs
 from clean_request import CleanRequest
+from common import atomic_write_text
 from optional_deps import check_optional
 
 TUI_EXTRA = "tui"
@@ -150,6 +153,235 @@ def discover_files(request: CleanRequest) -> tuple[list[Path], str | None]:
     return [item.path for item in selection.items], None
 
 
+# --- presets -----------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Preset:
+    """One named starting point for a clean.
+
+    A preset is a claim, not just a shortcut.  Choosing "Deep clean" is
+    choosing a best-effort result, so the result class is part of the label
+    the operator reads *before* running — not something they only learn from
+    the results table afterwards.
+    """
+
+    key: str
+    label: str
+    description: str
+    #: The weakest layer this preset turns on.  A preset is only as verifiable
+    #: as its least verifiable step, so this is the honest badge for the whole
+    #: thing: adding a Layer B rewrite to a Layer A clean makes it best-effort.
+    layer: str
+    overrides: dict[str, object]
+    #: True when the preset cannot run without a reachable Layer B endpoint.
+    requires_endpoint: bool = False
+    #: The extra this preset needs installed, if any.
+    requires_extra: str | None = None
+
+    def badge(self) -> str:
+        return format_badge(self.layer)
+
+    def headline(self) -> str:
+        """Label and result class together, for the point of choice."""
+        return f"{self.label} — {result_class_for(self.layer)}"
+
+
+#: Every field a preset is allowed to set.  Each preset assigns all of them, so
+#: switching presets replaces the previous choice instead of layering on top of
+#: it — a half-applied preset runs something nobody selected.
+PRESET_FIELDS: tuple[str, ...] = (
+    "nfkc",
+    "aggressive_homoglyphs",
+    "keep_non_ai_metadata",
+    "rewrite",
+    "char_perturb",
+    "remove_synthid",
+    "degrade",
+    "morpho",
+)
+
+#: Fields a preset must never set.  Each one either overwrites the operator's
+#: input, changes what the text means, or turns the run into a description
+#: instead of a clean.  They are deliberate, per-run decisions with their own
+#: confirmation gates; a one-click convenience control must not reach for them.
+PRESET_FORBIDDEN_FIELDS: tuple[str, ...] = (
+    "in_place",
+    "strip_semantic_format",
+    "dry_run",
+)
+
+PRESETS: tuple[Preset, ...] = (
+    Preset(
+        key="hidden",
+        label="Hidden marks",
+        description=(
+            "Zero-width carriers, bidi controls and AI metadata. "
+            "Counted before and after — nothing is rephrased. "
+            "Identical to a bare `wm FILE`."
+        ),
+        layer="A",
+        overrides={
+            "nfkc": False,
+            "aggressive_homoglyphs": False,
+            "keep_non_ai_metadata": False,
+            "rewrite": None,
+            "char_perturb": False,
+            "remove_synthid": False,
+            "degrade": None,
+            "morpho": None,
+        },
+    ),
+    Preset(
+        key="hidden-aggressive",
+        label="Hidden marks, aggressive",
+        description=(
+            "Adds NFKC normalisation and homoglyph folding: Cyrillic and Greek "
+            "look-alikes become ASCII. Can change genuinely mixed-script text."
+        ),
+        layer="A",
+        overrides={
+            "nfkc": True,
+            "aggressive_homoglyphs": True,
+            "keep_non_ai_metadata": False,
+            "rewrite": None,
+            "char_perturb": False,
+            "remove_synthid": False,
+            "degrade": None,
+            "morpho": None,
+        },
+    ),
+    Preset(
+        key="rewrite",
+        label="Deep clean (LLM rewrite)",
+        description=(
+            "Hidden marks, then a local model rephrases the text to break "
+            "token-level watermarks. No detector guarantee. Needs an endpoint."
+        ),
+        layer="B",
+        overrides={
+            "nfkc": False,
+            "aggressive_homoglyphs": False,
+            "keep_non_ai_metadata": False,
+            "rewrite": "paraphrase",
+            "char_perturb": False,
+            "remove_synthid": False,
+            "degrade": None,
+            "morpho": None,
+        },
+        requires_endpoint=True,
+    ),
+    Preset(
+        key="image",
+        label="Images: metadata + degrade",
+        description=(
+            "Strips C2PA and AI metadata, then perturbs the frequency domain "
+            "where invisible image marks live. Best-effort; the pixels change."
+        ),
+        layer="V",
+        overrides={
+            "nfkc": False,
+            "aggressive_homoglyphs": False,
+            "keep_non_ai_metadata": False,
+            "rewrite": None,
+            "char_perturb": False,
+            "remove_synthid": False,
+            "degrade": "freq-dct",
+            "morpho": None,
+        },
+    ),
+)
+
+
+def preset_for(key: str | None) -> Preset | None:
+    """The preset with this key, or None. An unknown key is never guessed at."""
+    for preset in PRESETS:
+        if preset.key == key:
+            return preset
+    return None
+
+
+def apply_preset(request: CleanRequest, preset: Preset) -> CleanRequest:
+    """Return ``request`` with the preset's fields — and only those — applied."""
+    return replace(request, **preset.overrides)
+
+
+# --- persisted setup ---------------------------------------------------------
+
+#: Environment override for the settings file, so a test never touches the
+#: real one and an operator can keep per-project setups side by side.
+SETTINGS_ENV = "WATERMARKS_TUI_SETTINGS"
+
+
+@dataclass(frozen=True)
+class TuiSettings:
+    """The setup wm-tui remembers between runs.
+
+    Deliberately not routed through ``configuration``: that module is the
+    shared CLI/server config seam with its own precedence rules, and this is
+    one UI's memory of which endpoint you last pointed it at.  The generated
+    command still carries every value explicitly, so a command copied out of
+    the TUI runs the same way on a machine that has no settings file.
+
+    There is no API key field, and there never will be one.  The key is read
+    from the environment at run time and is never rendered, copied or written
+    to disk — ``rewrite_api_key`` exists on ``CleanRequest`` and is absent
+    here on purpose.
+    """
+
+    preset: str | None = None
+    rewrite_backend: str | None = None
+    rewrite_base_url: str | None = None
+    rewrite_model: str | None = None
+    rewrite_reasoning_effort: str | None = None
+    rewrite_allow_remote: bool | None = None
+
+    def seed(self, request: CleanRequest) -> CleanRequest:
+        """Apply the remembered endpoint to a fresh request."""
+        remembered = {
+            field_name: value
+            for field_name, value in asdict(self).items()
+            if field_name != "preset" and value is not None
+        }
+        return replace(request, **remembered)
+
+
+def settings_path() -> Path:
+    """Where the setup file lives, honouring the usual per-platform roots."""
+    override = os.environ.get(SETTINGS_ENV)
+    if override:
+        return Path(override)
+    base = os.environ.get("XDG_CONFIG_HOME") or os.environ.get("APPDATA")
+    root = Path(base) if base else Path.home() / ".config"
+    return root / "watermark-remover" / "tui.json"
+
+
+def load_settings(path: Path | None = None) -> TuiSettings:
+    """Read the setup file. Anything unreadable means "no saved setup".
+
+    Fail-soft on purpose: a corrupt or hand-edited settings file must not stop
+    the operator from starting the TUI, and every value in it is a convenience
+    with a visible control behind it.
+    """
+    target = path or settings_path()
+    try:
+        raw = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return TuiSettings()
+    if not isinstance(raw, dict):
+        return TuiSettings()
+    known = {f.name for f in fields(TuiSettings)}
+    return TuiSettings(**{key: value for key, value in raw.items() if key in known})
+
+
+def save_settings(settings: TuiSettings, path: Path | None = None) -> Path:
+    """Write the setup file atomically and return where it went."""
+    target = path or settings_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(target, json.dumps(asdict(settings), indent=2, sort_keys=True) + "\n")
+    return target
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="wm-tui",
@@ -179,17 +411,22 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     paths = tuple(args.path) if args.path else (Path.cwd(),)
-    request = CleanRequest(
-        paths=paths,
-        recursive=args.recursive,
-        glob=args.glob,
-        extensions=args.extensions,
+    settings = load_settings()
+    # The saved setup only seeds the endpoint fields. Anything the operator
+    # typed on the command line stays exactly as typed.
+    request = settings.seed(
+        CleanRequest(
+            paths=paths,
+            recursive=args.recursive,
+            glob=args.glob,
+            extensions=args.extensions,
+        )
     )
     # Imported here, not at module scope: the guard above must be able to print
     # an install hint on a default install where textual is absent.
     from tui_app import WatermarkTuiApp
 
-    WatermarkTuiApp(request).run()
+    WatermarkTuiApp(request, preset=preset_for(settings.preset)).run()
     return 0
 
 

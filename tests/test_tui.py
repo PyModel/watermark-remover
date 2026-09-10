@@ -572,7 +572,7 @@ def test_the_backends_pane_is_current_when_you_look_at_it(tmp_path: Path):
             assert endpoint_row(table)[1] == "blocked"
 
             app.query_one("#in-base-url", Input).value = "http://127.0.0.1:11434"
-            app.query_one(TabbedContent).active = "tab-backends"
+            app.query_one(TabbedContent).active = "tab-start"
             for _ in range(6):
                 await pilot.pause()
             assert endpoint_row(table)[1] == "allowed"
@@ -601,7 +601,7 @@ def test_a_probe_result_survives_leaving_and_returning_to_the_pane(tmp_path: Pat
             table = app.query_one("#backend-table", DataTable)
             app.query_one(TabbedContent).active = "tab-plan"
             await pilot.pause()
-            app.query_one(TabbedContent).active = "tab-backends"
+            app.query_one(TabbedContent).active = "tab-start"
             for _ in range(6):
                 await pilot.pause()
             labels = [table.get_row(row)[0] for row in table.rows]
@@ -808,7 +808,7 @@ def test_a_bad_number_does_not_break_the_backends_pane(tmp_path: Path):
             await pilot.pause()
             app.query_one("#in-timeout", Input).value = "soon"
             await pilot.pause()
-            app.query_one(TabbedContent).active = "tab-backends"
+            app.query_one(TabbedContent).active = "tab-start"
             await pilot.pause()
             rows = app.query_one("#backend-table").row_count
             assert rows > 0
@@ -931,7 +931,14 @@ def test_no_control_overflows_or_starves_its_row(tmp_path: Path):
         async def scenario(app=app, width=width, height=height):
             async with app.run_test(size=(width, height)) as pilot:
                 await pilot.pause()
-                for tab in ("tab-files", "tab-inspect", "tab-plan", "tab-run", "tab-backends"):
+                for tab in (
+                    "tab-start",
+                    "tab-files",
+                    "tab-inspect",
+                    "tab-plan",
+                    "tab-run",
+                    "tab-history",
+                ):
                     app.query_one(TabbedContent).active = tab
                     await pilot.pause()
                     await pilot.pause()
@@ -974,5 +981,416 @@ def test_a_checkbox_shares_the_row_instead_of_swallowing_it(tmp_path: Path):
             # Equal to within the one column ``1fr`` rounding hands to a single
             # cell. Before the fix the checkbox was 46 against a capped 32.
             assert max(widths) - min(widths) <= 1, widths
+
+    _run(scenario())
+
+
+# --- presets: a claim made at the point of choice -----------------------------
+
+
+def test_every_preset_names_its_result_class():
+    """A preset is chosen before the run, so its honesty label belongs there too.
+
+    ``result_class_for`` is tested above, but nothing forced the *preset* to
+    use it: a badge-free "Deep clean" would have passed the whole suite while
+    quietly implying a rewrite is as verifiable as a zero-width strip.
+    """
+    from tui import PRESETS
+
+    for preset in PRESETS:
+        assert result_class_for(preset.layer) in preset.headline()
+        assert result_class_for(preset.layer) in preset.badge()
+
+
+def test_a_preset_assigns_every_field_it_owns():
+    """Switching presets must replace the last one, not layer on top of it."""
+    from tui import PRESET_FIELDS, PRESETS
+
+    for preset in PRESETS:
+        assert set(preset.overrides) == set(PRESET_FIELDS), preset.key
+
+
+def test_no_preset_arms_a_confirmation_gate():
+    """In-place, semantic stripping and dry run are never a one-click default.
+
+    Each overwrites the input, changes what the text means, or turns the run
+    into a description. They have confirmation modals for a reason, and a
+    convenience control must not reach for them on the operator's behalf.
+    """
+    from tui import PRESET_FIELDS, PRESET_FORBIDDEN_FIELDS, PRESETS
+
+    for forbidden in PRESET_FORBIDDEN_FIELDS:
+        assert forbidden not in PRESET_FIELDS
+        for preset in PRESETS:
+            assert forbidden not in preset.overrides, (preset.key, forbidden)
+
+
+def test_preset_keys_and_labels_are_distinct():
+    from tui import PRESETS
+
+    assert len({preset.key for preset in PRESETS}) == len(PRESETS)
+    assert len({preset.label for preset in PRESETS}) == len(PRESETS)
+
+
+def test_an_unknown_preset_key_is_never_guessed_at():
+    from tui import preset_for
+
+    assert preset_for("no-such-preset") is None
+    assert preset_for(None) is None
+
+
+def test_applying_a_preset_touches_only_its_own_fields():
+    from tui import PRESET_FIELDS, apply_preset, preset_for
+
+    request = CleanRequest(in_place=True, strip_semantic_format=True, output=Path("out"))
+    applied = apply_preset(request, preset_for("rewrite"))
+    assert applied.rewrite == "paraphrase"
+    # Everything outside the preset's own list survives untouched.
+    assert applied.in_place is True
+    assert applied.strip_semantic_format is True
+    assert applied.output == Path("out")
+    assert set(PRESET_FIELDS) >= {"rewrite"}
+
+
+def test_choosing_a_preset_reaches_the_generated_command(tmp_path: Path):
+    """The preset is applied to the form, not merely described next to it."""
+    from textual.widgets import Select, TextArea
+
+    app = _app_at(tmp_path)
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.query_one("#sel-preset", Select).value = "hidden-aggressive"
+            for _ in range(80):
+                await pilot.pause()
+                if "--nfkc" in app.query_one("#command-copyable", TextArea).text:
+                    break
+            command = app.query_one("#command-copyable", TextArea).text
+            assert "--nfkc" in command
+            assert "--aggressive-homoglyphs" in command
+
+            # Switching back must retract what the last preset turned on.
+            app.query_one("#sel-preset", Select).value = "hidden"
+            for _ in range(80):
+                await pilot.pause()
+                if "--nfkc" not in app.query_one("#command-copyable", TextArea).text:
+                    break
+            command = app.query_one("#command-copyable", TextArea).text
+            assert "--nfkc" not in command
+            assert "--aggressive-homoglyphs" not in command
+
+    _run(scenario())
+
+
+def test_a_preset_that_needs_an_endpoint_says_so_before_the_run(tmp_path: Path):
+    """The readiness line names the missing step, not a generic failure later."""
+    from textual.widgets import Select, Static
+
+    app = _app_at(tmp_path)
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.query_one("#sel-preset", Select).value = "rewrite"
+            for _ in range(80):
+                await pilot.pause()
+                if "needs a Layer B endpoint" in str(
+                    app.query_one("#start-ready", Static).render()
+                ):
+                    break
+            assert "needs a Layer B endpoint" in str(app.query_one("#start-ready", Static).render())
+
+    _run(scenario())
+
+
+# --- adding files from inside the app -----------------------------------------
+
+
+def test_a_path_can_be_added_after_launch(tmp_path: Path):
+    """The file list was argv-only: there was no way to open a second folder."""
+    from textual.widgets import Input
+
+    second = tmp_path / "more"
+    second.mkdir()
+    (second / "extra.txt").write_text(ZWSP, encoding="utf-8")
+    app = _app_at(tmp_path)
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            before = len(app.files)
+            app.query_one("#in-add-path", Input).value = str(second / "extra.txt")
+            app.query_one("#btn-add-path").press()
+            for _ in range(80):
+                await pilot.pause()
+                if len(app.files) > before:
+                    break
+            assert len(app.files) == before + 1
+            assert second / "extra.txt" in app.request.paths
+            # The field is emptied, so pressing Add twice cannot double-add.
+            assert app.query_one("#in-add-path", Input).value == ""
+
+    _run(scenario())
+
+
+def test_a_path_that_does_not_exist_is_refused(tmp_path: Path):
+    from textual.widgets import Input, Static
+
+    app = _app_at(tmp_path)
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            roots = app.request.paths
+            app.query_one("#in-add-path", Input).value = str(tmp_path / "nope.txt")
+            app.query_one("#btn-add-path").press()
+            for _ in range(80):
+                await pilot.pause()
+                if "no such path" in str(app.query_one("#status-bar", Static).render()):
+                    break
+            assert "no such path" in str(app.query_one("#status-bar", Static).render())
+            assert app.request.paths == roots
+
+    _run(scenario())
+
+
+def test_clearing_the_paths_empties_the_list_and_says_what_to_do(tmp_path: Path):
+    from textual.widgets import Static
+
+    app = _app_at(tmp_path)
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app.files
+            app.query_one("#btn-clear-paths").press()
+            for _ in range(80):
+                await pilot.pause()
+                if not app.files:
+                    break
+            assert app.files == []
+            assert app.selected == []
+            assert "step 1" in str(app.query_one("#start-ready", Static).render())
+
+    _run(scenario())
+
+
+# --- the saved setup ----------------------------------------------------------
+
+
+def test_the_saved_setup_has_nowhere_to_put_a_key():
+    """The rule is structural, not a habit: there is no field to leak into."""
+    import dataclasses
+
+    from tui import TuiSettings
+
+    names = {f.name for f in dataclasses.fields(TuiSettings)}
+    assert "rewrite_api_key" not in names
+    assert not [name for name in names if "key" in name or "secret" in name]
+
+
+def test_saving_and_loading_a_setup_round_trips(tmp_path: Path):
+    from tui import TuiSettings, load_settings, save_settings
+
+    target = tmp_path / "tui.json"
+    settings = TuiSettings(
+        preset="rewrite",
+        rewrite_backend="ollama",
+        rewrite_base_url="http://127.0.0.1:11434",
+        rewrite_model="qwen3",
+        rewrite_allow_remote=False,
+    )
+    save_settings(settings, target)
+    assert "WATERMARKS_REWRITE_API_KEY" not in target.read_text(encoding="utf-8")
+    assert load_settings(target) == settings
+
+
+def test_an_unreadable_setup_file_is_not_fatal(tmp_path: Path):
+    """A hand-edited settings file must not stop the TUI from starting."""
+    from tui import TuiSettings, load_settings
+
+    broken = tmp_path / "tui.json"
+    broken.write_text("{not json", encoding="utf-8")
+    assert load_settings(broken) == TuiSettings()
+    assert load_settings(tmp_path / "absent.json") == TuiSettings()
+
+    broken.write_text('{"rewrite_model": "m", "unknown_field": 1}', encoding="utf-8")
+    assert load_settings(broken).rewrite_model == "m"
+
+
+def test_a_saved_endpoint_seeds_the_next_request():
+    from tui import TuiSettings
+
+    seeded = TuiSettings(
+        preset="rewrite",
+        rewrite_backend="ollama",
+        rewrite_base_url="http://127.0.0.1:11434",
+    ).seed(CleanRequest(paths=(Path("a.md"),)))
+    assert seeded.rewrite_backend == "ollama"
+    assert seeded.rewrite_base_url == "http://127.0.0.1:11434"
+    # The preset is not a request field, and the selection is untouched.
+    assert seeded.paths == (Path("a.md"),)
+
+
+def test_the_save_button_writes_what_the_form_says(tmp_path: Path, monkeypatch):
+    from textual.widgets import Input, Select
+    from tui import load_settings
+
+    target = tmp_path / "config" / "tui.json"
+    monkeypatch.setenv("WATERMARKS_TUI_SETTINGS", str(target))
+    app = _app_at(tmp_path)
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.query_one("#sel-backend", Select).value = "ollama"
+            app.query_one("#in-base-url", Input).value = "http://127.0.0.1:11434"
+            app.query_one("#in-model", Input).value = "qwen3"
+            await pilot.pause()
+            app.query_one("#btn-save-settings").press()
+            for _ in range(80):
+                await pilot.pause()
+                if target.exists():
+                    break
+            saved = load_settings(target)
+            assert saved.rewrite_backend == "ollama"
+            assert saved.rewrite_base_url == "http://127.0.0.1:11434"
+            assert saved.rewrite_model == "qwen3"
+            assert "API_KEY" not in target.read_text(encoding="utf-8")
+
+    _run(scenario())
+
+
+# --- the capability table -----------------------------------------------------
+
+
+def test_a_missing_capability_offers_the_command_that_fixes_it(tmp_path: Path):
+    """ "No module named 'cv2'" is a diagnosis; the install line is the action."""
+    from textual.widgets import DataTable, TextArea
+
+    app = _app_at(tmp_path)
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            table = app.query_one("#backend-table", DataTable)
+            missing = [
+                index
+                for index, row in enumerate(app._tables["#backend-table"].rows)
+                if row[0].startswith("extra: ") and row[1] == "missing"
+            ]
+            if not missing:
+                pytest.skip("every extra is installed in this environment")
+            table.move_cursor(row=missing[0])
+            for _ in range(80):
+                await pilot.pause()
+                if "pip install" in app.query_one("#install-command", TextArea).text:
+                    break
+            command = app.query_one("#install-command", TextArea).text
+            assert command.startswith('pip install "watermark-remover[')
+
+    _run(scenario())
+
+
+def test_a_table_spans_its_pane_instead_of_stopping_a_third_of_the_way(tmp_path: Path):
+    """A short row must not leave a dark strip where the rest of the width is.
+
+    ``DataTable`` sizes columns to their content, so the capability table --
+    the pane the operator lands on -- rendered its header band across a third
+    of the screen and left the rest unpainted.
+    """
+    from textual.widgets import DataTable, TabbedContent
+
+    for width, height in LAYOUT_SIZES:
+        app = _app_at(tmp_path)
+
+        async def scenario(app=app, width=width, height=height):
+            async with app.run_test(size=(width, height)) as pilot:
+                await pilot.pause()
+                for selector, tab in (
+                    ("#backend-table", "tab-start"),
+                    ("#run-table", "tab-run"),
+                    ("#history-table", "tab-history"),
+                ):
+                    app.query_one(TabbedContent).active = tab
+                    await pilot.pause()
+                    await pilot.pause()
+                    table = app.query_one(selector, DataTable)
+                    columns = list(table.columns.values())
+                    padded = sum(column.width + 2 * table.cell_padding for column in columns)
+                    assert padded == table.size.width, (selector, width, padded)
+
+        _run(scenario())
+
+
+def test_a_selection_that_would_drop_the_rewrite_says_so_before_the_run(tmp_path: Path):
+    """``.md`` routes to the container pipeline, which never runs a rewrite.
+
+    The run already reports the drop in a results row afterwards. A preset that
+    promises "a local model rephrases the text" has to say it will not happen
+    while there is still something to change.
+    """
+    from textual.widgets import Input, Select, Static
+    from tui_app import WatermarkTuiApp
+
+    source = tmp_path / "draft.md"
+    source.write_text(ZWSP, encoding="utf-8")
+    app = WatermarkTuiApp(CleanRequest(paths=(source,)))
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.query_one("#sel-preset", Select).value = "rewrite"
+            app.query_one("#in-base-url", Input).value = "http://127.0.0.1:11434"
+            for _ in range(80):
+                await pilot.pause()
+                if "skip" in str(app.query_one("#start-ready", Static).render()):
+                    break
+            ready = str(app.query_one("#start-ready", Static).render())
+            assert "Layer B rewrite" in ready
+            assert "force text" in ready
+
+    _run(scenario())
+
+
+def test_a_text_selection_carries_no_dropped_transform_warning(tmp_path: Path):
+    from textual.widgets import Input, Select, Static
+
+    app = _app_at(tmp_path)  # writes draft.txt, which routes to the text pipeline
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.query_one("#sel-preset", Select).value = "rewrite"
+            app.query_one("#in-base-url", Input).value = "http://127.0.0.1:11434"
+            for _ in range(80):
+                await pilot.pause()
+                if "ready" in str(app.query_one("#start-ready", Static).render()):
+                    break
+            assert "skip" not in str(app.query_one("#start-ready", Static).render())
+
+    _run(scenario())
+
+
+def test_clean_now_runs_the_plan_and_shows_the_run_pane(tmp_path: Path):
+    """The onboarding's last step is one button, and it lands you on the results."""
+    from textual.widgets import TabbedContent
+
+    app = _app_at(tmp_path)
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.query_one("#btn-start-run").press()
+            for _ in range(200):
+                await pilot.pause()
+                if app._tables["#run-table"].rows:
+                    break
+            assert app.query_one(TabbedContent).active == "tab-run"
+            assert app._tables["#run-table"].rows[0][0] == "draft.txt"
+            cleaned = tmp_path / "draft.cleaned.txt"
+            assert cleaned.exists()
+            assert "​" not in cleaned.read_text(encoding="utf-8")
 
     _run(scenario())
