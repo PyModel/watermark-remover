@@ -594,3 +594,98 @@ def test_a_probe_result_survives_leaving_and_returning_to_the_pane(tmp_path: Pat
             assert "probe: ollama" in labels
 
     _run(scenario())
+
+
+def test_every_clean_request_field_is_bound_or_documented_as_absent():
+    """The CLI's flag surface must be reachable from the TUI, or say why not.
+
+    Adding a ``CleanRequest`` field without a Plan control silently makes the
+    TUI a weaker front end than the CLI over the same seam. This is the test
+    that turned up ``--as``/``--force-text``, ``--audit``, ``--dilate``,
+    ``--degrade`` and the rest having no interactive surface at all.
+    """
+    import dataclasses
+
+    from clean_request import CleanRequest
+    from tui_app import PLAN_BINDINGS, UNBOUND_REQUEST_FIELDS
+
+    fields = {f.name for f in dataclasses.fields(CleanRequest)}
+    bound = {binding.field for binding in PLAN_BINDINGS}
+    assert bound <= fields, f"bindings name fields that do not exist: {bound - fields}"
+    assert not (fields - bound - set(UNBOUND_REQUEST_FIELDS)), (
+        "unbound CleanRequest fields: "
+        + ", ".join(sorted(fields - bound - set(UNBOUND_REQUEST_FIELDS)))
+    )
+    assert not (set(UNBOUND_REQUEST_FIELDS) & bound), "a field cannot be both bound and excluded"
+    assert all(UNBOUND_REQUEST_FIELDS.values()), "every exclusion needs a stated reason"
+
+
+def test_plan_bindings_have_no_duplicate_widgets_or_fields():
+    from tui_app import PLAN_BINDINGS
+
+    selectors = [binding.selector for binding in PLAN_BINDINGS]
+    fields = [binding.field for binding in PLAN_BINDINGS]
+    assert len(set(selectors)) == len(selectors)
+    assert len(set(fields)) == len(fields)
+
+
+def test_reuse_restores_every_bound_option(tmp_path: Path):
+    """ "Reuse" must repopulate the plan it was given, not a subset of it."""
+    from tui_app import PLAN_BINDINGS, WatermarkTuiApp
+
+    source = tmp_path / "draft.txt"
+    source.write_text(ZWSP, encoding="utf-8")
+    saved = CleanRequest(
+        paths=(source,),
+        output=tmp_path / "out.txt",
+        force_type="text",
+        force_text=True,
+        audit="record.json",
+        nfkc=True,
+        aggressive_homoglyphs=True,
+        rewrite="humanize",
+        rewrite_backend="ollama",
+        rewrite_base_url="http://127.0.0.1:11434",
+        rewrite_model="qwen3",
+        rewrite_candidates=3,
+        rewrite_temperature=0.4,
+        rewrite_timeout=90.0,
+        rewrite_lang="fr",
+        rewrite_original_lang="en",
+        tsapa_generations=7,
+        tsapa_population=14,
+        char_perturb=True,
+        char_mode="confusable",
+        char_strength=0.25,
+        seed=11,
+        visible_mask=tmp_path / "m.pgm",
+        visible_backend="external",
+        dilate=4,
+        detect_command="detect {input} {mask}",
+        inpaint_command="fill {input} {mask} {output}",
+        visible_prompt="erase the logo",
+        timeout=60.0,
+        quality="high",
+        degrade="freq-dct",
+        morpho="grid",
+        remove_synthid=True,
+        synthid_strength=0.8,
+        degrade_strength=0.3,
+        degrade_seed=5,
+        keep_artifacts=True,
+        wmct_marker=True,
+    )
+    app = WatermarkTuiApp(CleanRequest(paths=(source,)))
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.apply_request(saved)
+            await pilot.pause()
+            restored = app.collect_request()
+            for binding in PLAN_BINDINGS:
+                assert getattr(restored, binding.field) == getattr(saved, binding.field), (
+                    binding.field
+                )
+
+    _run(scenario())

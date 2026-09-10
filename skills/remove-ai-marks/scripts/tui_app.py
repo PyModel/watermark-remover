@@ -16,7 +16,7 @@ import difflib
 import os
 import sys
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import ClassVar
 
@@ -47,8 +47,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from asset_kind import SUPPORTED_EXTENSIONS
 from batch_inputs import select_inputs
+from clean_asset import DEGRADE_CLI_CHOICES, MORPHO_CLI_CHOICES
 from clean_file import dry_run_payload, run_clean_item
 from clean_request import (
+    FORCED_KINDS,
     QUALITY_PROFILES,
     REWRITE_CLI_CHOICES,
     CleanPlanPreflightError,
@@ -206,7 +208,10 @@ class WatermarkTuiApp(App):
     #stream-view { width: 1fr; border: round $accent; }
     .row { height: auto; }
     .row > Static { width: 1fr; height: 3; content-align: left middle; padding: 0 1; }
-    .field { width: 32; }
+    /* Share the row rather than claiming a fixed 32 columns each: four
+       fields at a fixed width overflow an 80- or 120-column terminal and
+       the last one is simply unreachable. */
+    .field { width: 1fr; max-width: 32; }
     .wide { width: 1fr; }
     #modal-body {
         width: 84; height: auto; max-height: 90%;
@@ -291,6 +296,22 @@ class WatermarkTuiApp(App):
 
     def _compose_plan(self) -> ComposeResult:
         with VerticalScroll():
+            yield Label("Routing", classes="section")
+            yield Static("asset kind · force text · audit record", classes="caption")
+            with Horizontal(classes="row"):
+                yield Select(
+                    [(name, name) for name in FORCED_KINDS],
+                    value="auto",
+                    allow_blank=False,
+                    id="sel-force-type",
+                    classes="field",
+                )
+                # The skipped-transform note tells the operator to force text on
+                # a container; it would be a poor UI that said so and then made
+                # them leave for the CLI.
+                yield Checkbox("force text", False, id="cb-force-text")
+                yield Input(placeholder="audit JSON path", id="in-audit", classes="field")
+
             yield Label("Layer A — hidden Unicode  " + format_badge("A"), classes="section")
             with Horizontal(classes="row"):
                 yield Checkbox("NFKC", self.request.nfkc, id="cb-nfkc")
@@ -351,9 +372,13 @@ class WatermarkTuiApp(App):
                 yield Checkbox("disable thinking", False, id="cb-disable-thinking")
                 yield Checkbox("allow remote endpoint", False, id="cb-allow-remote")
                 yield Static("", id="endpoint-state", classes="muted")
-            yield Static("pivot language · tsapa generations · tsapa population", classes="caption")
+            yield Static(
+                "pivot language · original language · tsapa generations · tsapa population",
+                classes="caption",
+            )
             with Horizontal(classes="row"):
                 yield Input(placeholder="pivot lang", id="in-lang", classes="field")
+                yield Input(placeholder="original lang", id="in-original-lang", classes="field")
                 yield Input(placeholder="tsapa generations", id="in-generations", classes="field")
                 yield Input(placeholder="tsapa population", id="in-population", classes="field")
             with Horizontal(classes="row"):
@@ -375,8 +400,10 @@ class WatermarkTuiApp(App):
                     classes="field",
                 )
                 yield Input(placeholder="strength 0-1", id="in-perturb-strength", classes="field")
+                yield Input(placeholder="seed", id="in-seed", classes="field")
 
             yield Label("Layer V — visible marks  " + format_badge("V"), classes="section")
+            yield Static("mask · box · inpaint backend · dilation radius", classes="caption")
             with Horizontal(classes="row"):
                 yield Input(placeholder="mask path", id="in-mask", classes="field")
                 yield Input(placeholder="box x,y,w,h", id="in-box", classes="field")
@@ -387,6 +414,24 @@ class WatermarkTuiApp(App):
                     id="sel-visible-backend",
                     classes="field",
                 )
+                yield Input(placeholder="dilate radius", id="in-dilate", classes="field")
+            yield Static(
+                "detector command · inpainter command · prompt · external timeout (s)",
+                classes="caption",
+            )
+            with Horizontal(classes="row"):
+                yield Input(
+                    placeholder="detect cmd {input} {mask}",
+                    id="in-detect-command",
+                    classes="field",
+                )
+                yield Input(
+                    placeholder="inpaint cmd {input} {mask} {output}",
+                    id="in-inpaint-command",
+                    classes="field",
+                )
+                yield Input(placeholder="visible prompt", id="in-visible-prompt", classes="field")
+                yield Input(placeholder="external timeout", id="in-timeout", classes="field")
             with Horizontal(classes="row"):
                 yield Select(
                     [(name, name) for name in QUALITY_PROFILES],
@@ -399,11 +444,40 @@ class WatermarkTuiApp(App):
                 yield Checkbox("dry run", False, id="cb-dry-run")
                 yield Static("", id="visible-state", classes="muted")
 
+            yield Label("Image degradation  " + format_badge("V"), classes="section")
+            yield Static(
+                "frequency · morphological · strength · seed · SynthID strength",
+                classes="caption",
+            )
+            with Horizontal(classes="row"):
+                yield Select(
+                    [(name, name) for name in DEGRADE_CLI_CHOICES],
+                    prompt="degrade",
+                    allow_blank=True,
+                    id="sel-degrade",
+                    classes="field",
+                )
+                yield Select(
+                    [(name, name) for name in MORPHO_CLI_CHOICES],
+                    prompt="morpho",
+                    allow_blank=True,
+                    id="sel-morpho",
+                    classes="field",
+                )
+                yield Input(
+                    placeholder="degrade strength", id="in-degrade-strength", classes="field"
+                )
+                yield Input(placeholder="degrade seed", id="in-degrade-seed", classes="field")
+                yield Input(
+                    placeholder="synthid strength", id="in-synthid-strength", classes="field"
+                )
+
             yield Label("Output", classes="section")
             with Horizontal(classes="row"):
                 yield Input(placeholder="output path or directory", id="in-output", classes="wide")
                 yield Checkbox("in place", False, id="cb-in-place")
                 yield Checkbox("keep artifacts", False, id="cb-artifacts")
+                yield Checkbox("wmCt marker", False, id="cb-wmct")
 
             yield Label("Equivalent command", classes="section")
             yield Static("", id="command-preview")
@@ -610,59 +684,34 @@ class WatermarkTuiApp(App):
 
     def collect_request(self) -> CleanRequest:
         """Read every Plan widget into a CleanRequest. The only request builder."""
-        box_raw = self._value("#in-box")
-        box = None
-        if box_raw:
-            try:
-                parts = tuple(int(part) for part in box_raw.split(","))
-                box = parts if len(parts) == 4 else None
-            except ValueError:
-                box = None
-            if box is None:
-                self._status("box must be x,y,w,h")
-
-        mask_raw = self._value("#in-mask")
-        output_raw = self._value("#in-output")
-        perturb_mode = self._selected_value("#sel-perturb-mode")
-        visible_backend = self._selected_value("#sel-visible-backend") or "texture"
-
+        values: dict[str, object] = {}
+        for binding in PLAN_BINDINGS:
+            values[binding.field] = binding.read(self)
         return replace(
             self.request,
             paths=tuple(self.selected),
-            output=Path(output_raw) if output_raw else None,
-            in_place=self.query_one("#cb-in-place", Checkbox).value,
-            nfkc=self.query_one("#cb-nfkc", Checkbox).value,
-            aggressive_homoglyphs=self.query_one("#cb-homoglyphs", Checkbox).value,
-            strip_semantic_format=self.query_one("#cb-semantic", Checkbox).value,
-            keep_non_ai_metadata=self.query_one("#cb-keep-meta", Checkbox).value,
-            soft_binding=self.query_one("#cb-soft", Checkbox).value,
-            rewrite=self._selected_value("#sel-rewrite"),
-            rewrite_backend=self._selected_value("#sel-backend"),
-            rewrite_model=self._value("#in-model"),
-            rewrite_base_url=self._value("#in-base-url"),
-            rewrite_lang=self._value("#in-lang"),
-            rewrite_timeout=self._number("#in-rewrite-timeout", float),
-            rewrite_temperature=self._number("#in-temperature", float),
-            rewrite_candidates=self._number("#in-candidates", int),
-            rewrite_reasoning_effort=self._selected_value("#sel-effort"),
+            visible_box=self._box(),
+            # ``--tsapa`` is an alias for ``--rewrite tsapa``; the picker above
+            # already carries it, so setting both would double the flag.
+            tsapa=False,
             rewrite_disable_thinking=(
                 True if self.query_one("#cb-disable-thinking", Checkbox).value else None
             ),
-            rewrite_allow_remote=self.query_one("#cb-allow-remote", Checkbox).value,
-            tsapa=False,
-            tsapa_generations=self._number("#in-generations", int) or 5,
-            tsapa_population=self._number("#in-population", int) or 12,
-            char_perturb=self.query_one("#cb-perturb", Checkbox).value,
-            char_mode=perturb_mode or "zero-width",
-            char_strength=self._number("#in-perturb-strength", float) or 0.1,
-            visible_mask=Path(mask_raw) if mask_raw else None,
-            visible_box=box,
-            visible_backend=visible_backend,
-            quality=self._selected_value("#sel-quality") or "balanced",
-            remove_synthid=self.query_one("#cb-synthid", Checkbox).value,
-            dry_run=self.query_one("#cb-dry-run", Checkbox).value,
-            keep_artifacts=self.query_one("#cb-artifacts", Checkbox).value,
+            **values,
         )
+
+    def _box(self) -> tuple[int, int, int, int] | None:
+        raw = self._value("#in-box")
+        if not raw:
+            return None
+        try:
+            parts = tuple(int(part) for part in raw.split(","))
+        except ValueError:
+            parts = ()
+        if len(parts) != 4:
+            self._status("box must be x,y,w,h")
+            return None
+        return parts
 
     @on(Input.Changed)
     @on(Select.Changed)
@@ -1204,21 +1253,136 @@ class WatermarkTuiApp(App):
         self._status("plan repopulated from history")
 
     def apply_request(self, request: CleanRequest) -> None:
-        """Push a saved request back into the Plan widgets."""
-        self.query_one("#cb-nfkc", Checkbox).value = request.nfkc
-        self.query_one("#cb-homoglyphs", Checkbox).value = request.aggressive_homoglyphs
-        self.query_one("#cb-semantic", Checkbox).value = request.strip_semantic_format
-        self.query_one("#cb-keep-meta", Checkbox).value = request.keep_non_ai_metadata
-        self.query_one("#cb-soft", Checkbox).value = request.soft_binding
-        self.query_one("#cb-perturb", Checkbox).value = request.char_perturb
-        self.query_one("#cb-synthid", Checkbox).value = request.remove_synthid
-        self.query_one("#cb-in-place", Checkbox).value = request.in_place
-        self.query_one("#cb-artifacts", Checkbox).value = request.keep_artifacts
-        self.query_one("#cb-allow-remote", Checkbox).value = request.rewrite_allow_remote
-        self.query_one("#in-base-url", Input).value = request.rewrite_base_url or ""
-        self.query_one("#in-output", Input).value = str(request.output or "")
-        self.query_one("#in-candidates", Input).value = str(request.rewrite_candidates or "")
-        self.query_one("#in-model", Input).value = request.rewrite_model or ""
-        self.query_one("#sel-rewrite", Select).value = request.rewrite or Select.NULL
-        self.query_one("#sel-backend", Select).value = request.rewrite_backend or Select.NULL
+        """Push a saved request back into the Plan widgets.
+
+        Driven by the same table ``collect_request`` reads, so "Reuse" cannot
+        quietly drop an option that only one of the two knows about.
+        """
+        for binding in PLAN_BINDINGS:
+            binding.write(self, getattr(request, binding.field))
+        self.query_one("#cb-disable-thinking", Checkbox).value = bool(
+            request.rewrite_disable_thinking
+        )
+        self.query_one("#in-box", Input).value = (
+            ",".join(str(part) for part in request.visible_box) if request.visible_box else ""
+        )
         self._sync_preview()
+
+
+@dataclass(frozen=True)
+class PlanBinding:
+    """One Plan widget bound to one ``CleanRequest`` field.
+
+    Declaring the binding once is what keeps reading the form and repopulating
+    it symmetric.  Two hand-written lists drift, and the drift is invisible:
+    an option that only ``collect_request`` knows about is silently dropped by
+    "Reuse", and an option only ``apply_request`` knows about is never read.
+    A test asserts every field is bound here or listed as deliberately absent.
+    """
+
+    selector: str
+    field: str
+    kind: str
+    default: object = None
+
+    def read(self, app: WatermarkTuiApp) -> object:
+        if self.kind == "bool":
+            return app.query_one(self.selector, Checkbox).value
+        if self.kind == "select":
+            return app._selected_value(self.selector) or self.default
+        if self.kind == "text":
+            return app._value(self.selector) or self.default
+        if self.kind == "path":
+            raw = app._value(self.selector)
+            return Path(raw) if raw else None
+        if self.kind == "int":
+            return app._number(self.selector, int) or self.default
+        if self.kind == "float":
+            return app._number(self.selector, float) or self.default
+        raise AssertionError(f"unknown binding kind: {self.kind}")
+
+    def write(self, app: WatermarkTuiApp, value: object) -> None:
+        if self.kind == "bool":
+            app.query_one(self.selector, Checkbox).value = bool(value)
+            return
+        if self.kind == "select":
+            app.query_one(self.selector, Select).value = value if value is not None else Select.NULL
+            return
+        app.query_one(self.selector, Input).value = "" if value is None else str(value)
+
+
+#: Every ``CleanRequest`` field the Plan pane owns.  Fields absent from this
+#: table are listed in ``UNBOUND_REQUEST_FIELDS`` with the reason.
+PLAN_BINDINGS: tuple[PlanBinding, ...] = (
+    # Routing
+    PlanBinding("#sel-force-type", "force_type", "select", "auto"),
+    PlanBinding("#cb-force-text", "force_text", "bool"),
+    PlanBinding("#in-audit", "audit", "text"),
+    # Layer A
+    PlanBinding("#cb-nfkc", "nfkc", "bool"),
+    PlanBinding("#cb-homoglyphs", "aggressive_homoglyphs", "bool"),
+    PlanBinding("#cb-semantic", "strip_semantic_format", "bool"),
+    # Layer M
+    PlanBinding("#cb-keep-meta", "keep_non_ai_metadata", "bool"),
+    PlanBinding("#cb-soft", "soft_binding", "bool"),
+    # Layer B
+    PlanBinding("#sel-rewrite", "rewrite", "select"),
+    PlanBinding("#sel-backend", "rewrite_backend", "select"),
+    PlanBinding("#in-base-url", "rewrite_base_url", "text"),
+    PlanBinding("#in-model", "rewrite_model", "text"),
+    PlanBinding("#in-candidates", "rewrite_candidates", "int"),
+    PlanBinding("#in-temperature", "rewrite_temperature", "float"),
+    PlanBinding("#in-rewrite-timeout", "rewrite_timeout", "float"),
+    PlanBinding("#sel-effort", "rewrite_reasoning_effort", "select"),
+    PlanBinding("#cb-allow-remote", "rewrite_allow_remote", "bool"),
+    PlanBinding("#in-lang", "rewrite_lang", "text"),
+    PlanBinding("#in-original-lang", "rewrite_original_lang", "text"),
+    PlanBinding("#in-generations", "tsapa_generations", "int", 5),
+    PlanBinding("#in-population", "tsapa_population", "int", 12),
+    # Character perturbation
+    PlanBinding("#cb-perturb", "char_perturb", "bool"),
+    PlanBinding("#sel-perturb-mode", "char_mode", "select", "zero-width"),
+    PlanBinding("#in-perturb-strength", "char_strength", "float", 0.1),
+    PlanBinding("#in-seed", "seed", "int"),
+    # Layer V
+    PlanBinding("#in-mask", "visible_mask", "path"),
+    PlanBinding("#sel-visible-backend", "visible_backend", "select", "texture"),
+    PlanBinding("#in-dilate", "dilate", "int"),
+    PlanBinding("#in-detect-command", "detect_command", "text"),
+    PlanBinding("#in-inpaint-command", "inpaint_command", "text"),
+    PlanBinding(
+        "#in-visible-prompt",
+        "visible_prompt",
+        "text",
+        "Remove watermark, fill with background",
+    ),
+    PlanBinding("#in-timeout", "timeout", "float", 1800.0),
+    PlanBinding("#sel-quality", "quality", "select", "balanced"),
+    PlanBinding("#cb-synthid", "remove_synthid", "bool"),
+    PlanBinding("#in-synthid-strength", "synthid_strength", "float", 0.6),
+    PlanBinding("#cb-dry-run", "dry_run", "bool"),
+    # Image degradation
+    PlanBinding("#sel-degrade", "degrade", "select"),
+    PlanBinding("#sel-morpho", "morpho", "select"),
+    PlanBinding("#in-degrade-strength", "degrade_strength", "float", 0.6),
+    PlanBinding("#in-degrade-seed", "degrade_seed", "int"),
+    # Output
+    PlanBinding("#in-output", "output", "path"),
+    PlanBinding("#cb-in-place", "in_place", "bool"),
+    PlanBinding("#cb-artifacts", "keep_artifacts", "bool"),
+    PlanBinding("#cb-wmct", "wmct_marker", "bool"),
+)
+
+#: Fields the Plan pane deliberately does not own, and why.
+UNBOUND_REQUEST_FIELDS: dict[str, str] = {
+    "paths": "the Files pane's selection",
+    "recursive": "the Files pane's filters",
+    "glob": "the Files pane's filters",
+    "extensions": "the Files pane's filters",
+    "visible_box": "parsed from x,y,w,h rather than read straight through",
+    "rewrite_disable_thinking": "tri-state: unchecked means unset, not False",
+    "tsapa": "an alias for --rewrite tsapa, which the strength picker carries",
+    "rewrite_api_key": "read from the environment; never rendered or persisted",
+    "json": "CLI presentation; the TUI renders payloads itself",
+    "quiet": "CLI presentation; the TUI renders payloads itself",
+}
