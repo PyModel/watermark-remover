@@ -869,3 +869,110 @@ def test_the_allow_remote_checkbox_states_a_choice_either_way(tmp_path: Path):
             assert app.collect_request().rewrite_allow_remote is True
 
     _run(scenario())
+
+
+# --- layout ------------------------------------------------------------------
+
+#: Terminal sizes the layout has to hold at: the classic 80x24 floor, a common
+#: laptop pane, and a wide one where a capped control leaves a ragged gap.
+LAYOUT_SIZES = ((80, 30), (100, 32), (128, 34), (200, 50))
+
+
+def _app_at(tmp_path: Path):
+    from tui_app import WatermarkTuiApp
+
+    source = tmp_path / "draft.txt"
+    source.write_text(ZWSP, encoding="utf-8")
+    return WatermarkTuiApp(CleanRequest(paths=(source,)))
+
+
+def test_the_screen_never_scrolls_when_nothing_overflows(tmp_path: Path):
+    """A permanent scrollbar is two columns stolen from every pane.
+
+    Header and Footer are docked, so the flow area is two rows shorter than
+    the screen. The tab container at ``height: auto`` claimed all of it and
+    pushed the status bar past the bottom, so the screen scrolled by exactly
+    one row -- forever, with nothing to scroll to.
+    """
+    from textual.widgets import TabbedContent
+
+    for width, height in LAYOUT_SIZES:
+        app = _app_at(tmp_path)
+
+        async def scenario(app=app, width=width, height=height):
+            async with app.run_test(size=(width, height)) as pilot:
+                await pilot.pause()
+                await pilot.pause()
+                screen = app.screen
+                assert not screen.show_vertical_scrollbar, (width, height)
+                assert screen.virtual_size.height <= height, (width, height)
+                # The status bar and the docked Footer must not land on the
+                # same row; when they do, one of them is invisible.
+                status = app.query_one("#status-bar")
+                assert status.region.y < height - 1, (width, height)
+                assert app.query_one(TabbedContent).region.right <= width
+
+        _run(scenario())
+
+
+def test_no_control_overflows_or_starves_its_row(tmp_path: Path):
+    """Every control stays inside its row, and the row has no ragged tail.
+
+    ``Checkbox`` subclasses ``Static``, so a ``.row > Static`` rule aimed at
+    the inline status labels also stretched every checkbox to fill the row:
+    "recursive" rendered 46 columns wide beside a 16-column button while its
+    capped neighbours stayed at 32.
+    """
+    from textual.widgets import TabbedContent
+
+    for width, height in LAYOUT_SIZES:
+        app = _app_at(tmp_path)
+
+        async def scenario(app=app, width=width, height=height):
+            async with app.run_test(size=(width, height)) as pilot:
+                await pilot.pause()
+                for tab in ("tab-files", "tab-inspect", "tab-plan", "tab-run", "tab-backends"):
+                    app.query_one(TabbedContent).active = tab
+                    await pilot.pause()
+                    await pilot.pause()
+                    for row in app.query(".row"):
+                        visible = [child for child in row.children if child.display]
+                        if not visible:
+                            continue
+                        assert min(c.region.x for c in visible) >= row.region.x, (tab, width)
+                        right = max(c.region.right for c in visible)
+                        assert right <= row.region.right, (tab, width, right)
+                        # A row that stops well short of its own width reads as
+                        # a broken grid, which is what capping every field did.
+                        # Only rows with a flexible control owe this: a row of
+                        # two buttons is legitimately packed to the left.
+                        flexible = any(str(c.styles.width) == "1fr" for c in visible)
+                        if flexible:
+                            assert row.region.right - right <= 2, (tab, width, right)
+
+        _run(scenario())
+
+
+def test_a_checkbox_shares_the_row_instead_of_swallowing_it(tmp_path: Path):
+    """The checkbox is one cell of the grid, the same size as its neighbours."""
+    from textual.widgets import Checkbox, Input
+    from tui_app import WatermarkTuiApp
+
+    source = tmp_path / "draft.txt"
+    source.write_text(ZWSP, encoding="utf-8")
+    app = WatermarkTuiApp(CleanRequest(paths=(source,)))
+
+    async def scenario():
+        async with app.run_test(size=(128, 34)) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            widths = (
+                app.query_one("#in-glob", Input).outer_size.width,
+                app.query_one("#in-extensions", Input).outer_size.width,
+                app.query_one("#cb-recursive", Checkbox).outer_size.width,
+            )
+            # Equal to within the one column ``1fr`` rounding hands to a single
+            # cell. Before the fix the checkbox was 46 against a capped 32.
+            assert max(widths) - min(widths) <= 1, widths
+
+    _run(scenario())
