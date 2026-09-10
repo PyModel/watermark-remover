@@ -18,7 +18,7 @@
 ARG MARKLLM_REF=c45ddc40f7b761beabe55a1b8dc4690e531d1c6d
 
 # python:3.14-slim linux/amd64 digest.
-FROM python:3.14-slim@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4
+FROM python:3.14-slim@sha256:cad9a2c871761c413caa6fdd6441c783451e740a48aaeba60ae62a8b53525ef6
 
 ARG MARKLLM_REF
 
