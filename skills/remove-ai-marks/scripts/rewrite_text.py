@@ -91,7 +91,10 @@ REWRITE_BACKENDS = ("print-prompt", "ollama", "openai-compatible")
 LIVE_REWRITE_BACKENDS = ("ollama", "openai-compatible")
 REWRITE_STRENGTHS = ("paraphrase", "backtranslate", "structural", "humanize", "code", "tsapa")
 REASONING_EFFORTS = ("none", "low", "medium", "high", "off")
-_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+#: Hosts that may receive document content without an explicit opt-in.
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+#: Private alias kept for in-module call sites predating the export.
+_LOOPBACK_HOSTS = LOOPBACK_HOSTS
 
 
 class RewriteConfigurationError(ValueError):
@@ -191,33 +194,81 @@ class RewritePlan:
         )
 
     @classmethod
+    def live_from_environment(
+        cls,
+        strength: str,
+        *,
+        label: str | None = None,
+        backend: str | None = None,
+        model: str | None = None,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        generations: int = 5,
+        population: int = 12,
+        lang: str | None = None,
+        original_lang: str | None = None,
+        timeout: float | None = None,
+        temperature: float | None = None,
+        candidates: int | None = None,
+        reasoning_effort: str | None = None,
+        disable_thinking: bool | None = None,
+        allow_remote: bool = False,
+    ) -> RewritePlan:
+        """Resolve a live Layer B plan from explicit values, then the environment.
+
+        Precedence is explicit argument > ``WATERMARKS_REWRITE_*`` > dataclass
+        default, so a caller that collects settings interactively (the TUI) and
+        a caller that only reads the environment (``wm --tsapa``) build the same
+        object through the same checks.  *label* names the surface in the error
+        message so the CLI can still say ``--tsapa`` where that is what failed.
+        """
+        origin = label or f"--rewrite {strength}"
+        resolved_backend = backend or os.environ.get("WATERMARKS_REWRITE_BACKEND", "print-prompt")
+        if resolved_backend not in LIVE_REWRITE_BACKENDS:
+            raise RewriteConfigurationError(
+                f"{origin} requires a live backend; set "
+                "WATERMARKS_REWRITE_BACKEND=ollama|openai-compatible"
+            )
+        resolved_model = model or os.environ.get("WATERMARKS_REWRITE_MODEL")
+        if not resolved_model:
+            raise RewriteConfigurationError(
+                f"{origin} requires a model: pass --rewrite-model, set the TUI's model "
+                "field, or export WATERMARKS_REWRITE_MODEL"
+            )
+        defaults = cls()
+        if disable_thinking is None:
+            disable_thinking = read_bool_env("WATERMARKS_REWRITE_DISABLE_THINKING")
+        return cls(
+            backend=resolved_backend,
+            model=resolved_model,
+            base_url=base_url
+            or os.environ.get("WATERMARKS_REWRITE_BASE_URL", "http://127.0.0.1:11434"),
+            api_key=api_key or os.environ.get("WATERMARKS_REWRITE_API_KEY"),
+            strength=strength,
+            lang=lang if lang is not None else defaults.lang,
+            original_lang=(original_lang if original_lang is not None else defaults.original_lang),
+            timeout=timeout if timeout is not None else defaults.timeout,
+            temperature=temperature if temperature is not None else defaults.temperature,
+            candidates=candidates if candidates is not None else defaults.candidates,
+            reasoning_effort=reasoning_effort,
+            generations=generations,
+            population=population,
+            disable_thinking=disable_thinking,
+            allow_remote=allow_remote,
+        )
+
+    @classmethod
     def live_tsapa_from_environment(
         cls,
         *,
         generations: int,
         population: int,
     ) -> RewritePlan:
-        backend = os.environ.get("WATERMARKS_REWRITE_BACKEND", "print-prompt")
-        if backend not in ("ollama", "openai-compatible"):
-            raise RewriteConfigurationError(
-                "--tsapa requires a live backend; set "
-                "WATERMARKS_REWRITE_BACKEND=ollama|openai-compatible"
-            )
-        model = os.environ.get("WATERMARKS_REWRITE_MODEL")
-        if not model:
-            raise RewriteConfigurationError("--tsapa requires WATERMARKS_REWRITE_MODEL")
-        return cls(
-            backend=backend,
-            model=model,
-            base_url=os.environ.get(
-                "WATERMARKS_REWRITE_BASE_URL",
-                "http://127.0.0.1:11434",
-            ),
-            api_key=os.environ.get("WATERMARKS_REWRITE_API_KEY"),
-            strength="tsapa",
+        return cls.live_from_environment(
+            "tsapa",
+            label="--tsapa",
             generations=generations,
             population=population,
-            disable_thinking=read_bool_env("WATERMARKS_REWRITE_DISABLE_THINKING"),
         )
 
 
@@ -320,7 +371,7 @@ def remote_warning(base_url: str | None) -> str | None:
         host = urlparse(base_url).hostname
     except ValueError:
         return None
-    if host and host not in ("localhost", "127.0.0.1", "::1"):
+    if host and host not in LOOPBACK_HOSTS:
         return (
             f"warning: rewrite base URL host is '{host}' (not localhost); "
             "content will leave this machine"
@@ -528,6 +579,80 @@ def rewrite(text: str, plan: RewritePlan) -> tuple[str, dict]:
         "cannot certify removal against a vendor detector."
     )
     return out, info
+
+
+@dataclass(frozen=True, slots=True)
+class RewriteCandidate:
+    """One generated rewrite, with the score the auto-selector would give it."""
+
+    index: int
+    text: str
+    lexical_divergence: float
+    selection_score: float
+    selected: bool
+
+
+def generate_candidates(text: str, plan: RewritePlan) -> list[RewriteCandidate]:
+    """Generate every candidate and score them, without discarding the losers.
+
+    ``rewrite`` returns only the winner — correct for a pipeline, useless for a
+    human picker.  This runs the same prompt through the same backend the same
+    number of times and hands back all of them, scored identically, so a caller
+    can present the choice.  Candidate *text* is deliberately not routed through
+    ``rewrite``'s ``info`` dict: that dict lands in the JSON payload and the
+    audit file, and document bodies do not belong there.
+
+    Not supported for ``tsapa``, whose candidates are an internal evolutionary
+    population rather than N independent generations.
+    """
+    if not isinstance(plan, RewritePlan):
+        raise TypeError("plan must be a RewritePlan")
+    if plan.strength == "tsapa":
+        raise RewriteConfigurationError(
+            "candidate selection is not available for tsapa; its population is "
+            "internal to the evolutionary search"
+        )
+    if plan.backend not in LIVE_REWRITE_BACKENDS:
+        raise RewriteConfigurationError(
+            f"candidate generation requires a live backend, got {plan.backend}"
+        )
+
+    prompt = build_prompt(plan.strength, text, lang=plan.lang, original_lang=plan.original_lang)
+    _enforce_endpoint(plan.base_url, plan.allow_remote)
+
+    outs: list[str] = []
+    for _ in range(max(1, plan.candidates)):
+        if plan.backend == "ollama":
+            outs.append(
+                _call_ollama(plan.base_url, plan.model, prompt, plan.timeout, plan.temperature)
+            )
+        else:
+            outs.append(
+                _call_openai_compatible(
+                    plan.base_url,
+                    plan.model,
+                    prompt,
+                    plan.api_key,
+                    plan.timeout,
+                    temperature=plan.temperature,
+                    reasoning_effort=plan.reasoning_effort,
+                    disable_thinking=plan.disable_thinking,
+                )
+            )
+
+    _, scores = _select_candidate(text, outs)
+    best = max(range(len(outs)), key=lambda i: scores[i])
+    finished = [clean_text(candidate)[0] if plan.layer_a_after else candidate for candidate in outs]
+    return [
+        RewriteCandidate(
+            index=i,
+            text=finished[i],
+            lexical_divergence=_lexical_divergence(text, outs[i]),
+            selection_score=scores[i],
+            selected=i == best,
+        )
+        for i in range(len(outs))
+    ]
 
 
 def _rewrite_tsapa(

@@ -300,3 +300,53 @@ def request_json(
         raise LayerBHTTPError("Layer B HTTP connection failed") from None
     except (http.client.HTTPException, OSError):
         raise LayerBHTTPError("Layer B HTTP connection failed") from None
+
+
+def get_json(
+    endpoint: str,
+    route: str,
+    *,
+    headers: dict[str, str] | None = None,
+    timeout: float,
+    response_limit: int = DEFAULT_HTTP_JSON_LIMIT,
+    opener: Any = None,
+) -> dict[str, Any]:
+    """GET one bounded JSON object, under the same guards as ``request_json``.
+
+    Model discovery (Ollama ``/api/tags``, OpenAI-compatible ``/v1/models``) is
+    a read, not a generation, but it targets the same operator-supplied
+    endpoint and must inherit the same protections: the same-origin redirect
+    opener so an ``Authorization`` header can never be replayed to another
+    host, the same header validation, and the same bounded JSON reader.
+    """
+    url = _join_route(endpoint, route)
+    timeout = _validate_timeout(timeout)
+    response_limit = _validate_response_limit(response_limit)
+    request_headers = _validate_headers(headers)
+    request_headers.pop("Content-Type", None)
+    try:
+        request = urllib.request.Request(  # noqa: S310
+            url,
+            headers=request_headers,
+            method="GET",
+        )
+    except (TypeError, ValueError) as error:
+        raise LayerBHTTPError("invalid Layer B HTTP request") from error
+
+    client = _OPENER if opener is None else opener
+    try:
+        with client.open(request, timeout=timeout) as response:
+            return _read_json_object(response, response_limit)
+    except LayerBHTTPError:
+        raise
+    except urllib.error.HTTPError as error:
+        error.close()
+        raise LayerBHTTPError(f"Layer B HTTP request failed with HTTP {error.code}") from None
+    except TimeoutError:
+        raise LayerBHTTPError("Layer B HTTP request timed out") from None
+    except urllib.error.URLError as error:
+        if isinstance(error.reason, TimeoutError):
+            raise LayerBHTTPError("Layer B HTTP request timed out") from None
+        raise LayerBHTTPError("Layer B HTTP connection failed") from None
+    except (http.client.HTTPException, OSError):
+        raise LayerBHTTPError("Layer B HTTP connection failed") from None

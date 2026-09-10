@@ -76,7 +76,7 @@ def test_live_tsapa_plan_requires_backend_and_model(monkeypatch):
         rewrite_text.RewritePlan.live_tsapa_from_environment(generations=1, population=2)
 
     monkeypatch.setenv("WATERMARKS_REWRITE_BACKEND", "ollama")
-    with pytest.raises(ValueError, match="requires WATERMARKS_REWRITE_MODEL"):
+    with pytest.raises(ValueError, match="requires a model"):
         rewrite_text.RewritePlan.live_tsapa_from_environment(generations=1, population=2)
 
 

@@ -41,10 +41,13 @@ from common import (
     MAX_INPUT_BYTES,
     eprint,
     looks_binary,
+    read_bool_env,
     which,
 )
 from container_meta import clean_container, inspect_container
 from image_meta import clean_image, inspect_image, run_synthid_score
+from layer_b_discovery import layer_b_status
+from optional_deps import extras_status
 from score_stylometry import score_text_stylometry
 from text_detectors import detector_status, run_all_text_detectors, run_text_detectors
 from text_unicode import clean_text, inspect_text
@@ -134,6 +137,16 @@ def capabilities() -> dict[str, Any]:
         "harnesses": {
             "markllm": bool(os.environ.get("MARKLLM_DIR")),
         },
+        # Optional extras and Layer B configuration, so a front end can grey out
+        # what is unavailable instead of failing a run to find out.  Layer B is
+        # reported from configuration only: /capabilities is polled and must not
+        # become an outbound request per call.
+        "extras": extras_status(),
+        "layer_b": layer_b_status(
+            os.environ.get("WATERMARKS_REWRITE_BACKEND"),
+            os.environ.get("WATERMARKS_REWRITE_BASE_URL"),
+            allow_remote=read_bool_env("WATERMARKS_REWRITE_ALLOW_REMOTE"),
+        ),
     }
 
 
