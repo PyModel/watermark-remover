@@ -215,7 +215,7 @@ class RewritePlan:
         candidates: int | None = None,
         reasoning_effort: str | None = None,
         disable_thinking: bool | None = None,
-        allow_remote: bool = False,
+        allow_remote: bool | None = None,
     ) -> RewritePlan:
         """Resolve a live Layer B plan from explicit values, then the environment.
 
@@ -241,6 +241,8 @@ class RewritePlan:
         defaults = cls()
         if disable_thinking is None:
             disable_thinking = read_bool_env("WATERMARKS_REWRITE_DISABLE_THINKING")
+        if allow_remote is None:
+            allow_remote = read_flag_env("WATERMARKS_REWRITE_ALLOW_REMOTE")
         return cls(
             backend=resolved_backend,
             model=resolved_model,

@@ -118,7 +118,9 @@ class CleanRequest:
     rewrite_candidates: int | None = None
     rewrite_reasoning_effort: str | None = None
     rewrite_disable_thinking: bool | None = None
-    rewrite_allow_remote: bool = False
+    # None means "not stated": the environment decides. The TUI's checkbox
+    # is an explicit control and always sets True or False.
+    rewrite_allow_remote: bool | None = None
     tsapa: bool = False
     tsapa_generations: int = 5
     tsapa_population: int = 12

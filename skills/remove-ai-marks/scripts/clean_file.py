@@ -125,6 +125,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--rewrite-allow-remote",
         action="store_true",
+        # Tri-state, like --rewrite-disable-thinking above: absent means "ask
+        # the environment", not "deny". Without this the flag's own default of
+        # False was passed through as an explicit denial, so the documented
+        # WATERMARKS_REWRITE_ALLOW_REMOTE could never take effect under wm.
+        default=None,
         help="Permit a non-loopback Layer B endpoint (your text leaves this machine)",
     )
     p.add_argument("--tsapa", action="store_true", help="Alias for --rewrite tsapa")

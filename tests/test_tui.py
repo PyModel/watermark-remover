@@ -38,6 +38,13 @@ from tui import (
 
 ZWSP = "Delve into it.​ Moreover, it is important to note this.\n"
 
+#: Fields whose request value is tri-state but whose Plan control is not.
+#: The CLI has no way to say "no" to a store_true flag, so "not stated" has to
+#: mean "ask the environment"; the TUI has a visible checkbox, so unchecked is
+#: a stated no. Reuse therefore turns a None into an explicit False, and the
+#: endpoint policy the pane displays stays the one the run will apply.
+TRI_STATE_BINDINGS = {"rewrite_allow_remote"}
+
 
 # --- the honesty contract ----------------------------------------------------
 
@@ -691,6 +698,8 @@ def test_reuse_restores_every_bound_option(tmp_path: Path):
             await pilot.pause()
             restored = app.collect_request()
             for binding in PLAN_BINDINGS:
+                if binding.field in TRI_STATE_BINDINGS:
+                    continue
                 assert getattr(restored, binding.field) == getattr(saved, binding.field), (
                     binding.field
                 )
@@ -833,5 +842,30 @@ def test_an_invalid_form_never_leaves_a_runnable_command_behind(tmp_path: Path):
                     break
             assert copyable.startswith("# invalid options")
             assert "timeout: not a number" in copyable
+
+    _run(scenario())
+
+
+def test_the_allow_remote_checkbox_states_a_choice_either_way(tmp_path: Path):
+    """Unchecked must mean "no", not "let the environment decide".
+
+    The pane renders the endpoint policy from this field. If unchecked meant
+    "unstated", a set WATERMARKS_REWRITE_ALLOW_REMOTE would permit an egress
+    the pane was still calling blocked.
+    """
+    from textual.widgets import Checkbox
+    from tui_app import WatermarkTuiApp
+
+    source = tmp_path / "draft.txt"
+    source.write_text(ZWSP, encoding="utf-8")
+    app = WatermarkTuiApp(CleanRequest(paths=(source,)))
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app.collect_request().rewrite_allow_remote is False
+            app.query_one("#cb-allow-remote", Checkbox).value = True
+            await pilot.pause()
+            assert app.collect_request().rewrite_allow_remote is True
 
     _run(scenario())

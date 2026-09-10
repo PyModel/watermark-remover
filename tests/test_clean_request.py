@@ -366,3 +366,44 @@ def test_defaults_stay_out_of_the_command():
     argv = CleanRequest(paths=(Path("a.png"),), in_place=True).command_line()
     assert "--visible-prompt" not in argv
     assert "--timeout" not in argv
+
+
+def test_wm_honours_the_remote_opt_in_environment_variable(monkeypatch):
+    """An omitted --rewrite-allow-remote must ask the environment, not deny.
+
+    ``store_true`` handed ``False`` straight to ``live_from_environment``, so
+    the documented WATERMARKS_REWRITE_ALLOW_REMOTE could never take effect
+    under ``wm`` even though ``rewrite_text``'s own CLI honoured it.
+    """
+    monkeypatch.setenv("WATERMARKS_REWRITE_BACKEND", "openai-compatible")
+    monkeypatch.setenv("WATERMARKS_REWRITE_MODEL", "m")
+    monkeypatch.setenv("WATERMARKS_REWRITE_ALLOW_REMOTE", "1")
+
+    request = _parse(["a.txt", "--in-place", "--rewrite", "humanize"])
+    assert request.rewrite_allow_remote is None
+    assert build_rewrite_plan(request).allow_remote is True
+
+
+def test_an_explicit_refusal_outranks_the_environment(monkeypatch):
+    """The TUI's checkbox states a choice; a set variable must not override it."""
+    monkeypatch.setenv("WATERMARKS_REWRITE_BACKEND", "openai-compatible")
+    monkeypatch.setenv("WATERMARKS_REWRITE_MODEL", "m")
+    monkeypatch.setenv("WATERMARKS_REWRITE_ALLOW_REMOTE", "1")
+
+    stated = CleanRequest(
+        paths=(Path("a.txt"),),
+        in_place=True,
+        rewrite="humanize",
+        rewrite_allow_remote=False,
+    )
+    assert build_rewrite_plan(stated).allow_remote is False
+
+
+def test_remote_stays_denied_when_nothing_asks_for_it(monkeypatch):
+    """Default-deny is the whole point: silence is not an opt-in."""
+    monkeypatch.setenv("WATERMARKS_REWRITE_BACKEND", "openai-compatible")
+    monkeypatch.setenv("WATERMARKS_REWRITE_MODEL", "m")
+    monkeypatch.delenv("WATERMARKS_REWRITE_ALLOW_REMOTE", raising=False)
+
+    request = _parse(["a.txt", "--in-place", "--rewrite", "humanize"])
+    assert build_rewrite_plan(request).allow_remote is False
