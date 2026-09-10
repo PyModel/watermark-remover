@@ -731,7 +731,12 @@ class WatermarkTuiApp(App):
         try:
             request = self.collect_request()
         except ValueError as error:
-            self.query_one("#command-preview", Static).update(f"[red]{escape(str(error))}[/]")
+            message = f"invalid options: {error}"
+            self.query_one("#command-preview", Static).update(f"[red]{escape(message)}[/]")
+            # Clear the copyable box rather than leave the last valid command
+            # in it: a box that still offers a runnable command while the form
+            # is invalid hands the operator something the form no longer says.
+            self.query_one("#command-copyable", TextArea).text = f"# {message}"
             return
         command = request.command_string()
         self.query_one("#command-preview", Static).update(escape(command))

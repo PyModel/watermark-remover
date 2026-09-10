@@ -275,8 +275,15 @@ def test_generated_command_round_trips_and_carries_no_secret(tmp_path: Path):
         async with app.run_test() as pilot:
             await pilot.pause()
             app.query_one("#cb-nfkc", Checkbox).value = True
-            await pilot.pause()
-            preview = app.query_one("#command-copyable", TextArea).text
+            # The box is refreshed by Checkbox.Changed, so wait for the event
+            # rather than assume one pump cycle delivered it -- a single pause
+            # is enough on a fast machine and not on a loaded CI runner.
+            preview = ""
+            for _ in range(20):
+                await pilot.pause()
+                preview = app.query_one("#command-copyable", TextArea).text
+                if "--nfkc" in preview:
+                    break
             assert preview.startswith("wm ")
             assert "--nfkc" in preview
             # The selectable fallback must carry exactly what the button copies.
@@ -796,5 +803,35 @@ def test_a_bad_number_does_not_break_the_backends_pane(tmp_path: Path):
             await pilot.pause()
             rows = app.query_one("#backend-table").row_count
             assert rows > 0
+
+    _run(scenario())
+
+
+def test_an_invalid_form_never_leaves_a_runnable_command_behind(tmp_path: Path):
+    """A stale copyable command is the same defect as an unserialised flag.
+
+    The box is what the operator pastes into a shell. While the form is
+    invalid it must say so, not keep offering the last command that parsed.
+    """
+    from textual.widgets import Input, TextArea
+    from tui_app import WatermarkTuiApp
+
+    source = tmp_path / "draft.txt"
+    source.write_text(ZWSP, encoding="utf-8")
+    app = WatermarkTuiApp(CleanRequest(paths=(source,)))
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app.query_one("#command-copyable", TextArea).text.startswith("wm ")
+            app.query_one("#in-timeout", Input).value = "soon"
+            copyable = ""
+            for _ in range(20):
+                await pilot.pause()
+                copyable = app.query_one("#command-copyable", TextArea).text
+                if not copyable.startswith("wm "):
+                    break
+            assert copyable.startswith("# invalid options")
+            assert "timeout: not a number" in copyable
 
     _run(scenario())
