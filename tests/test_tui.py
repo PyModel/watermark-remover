@@ -689,3 +689,112 @@ def test_reuse_restores_every_bound_option(tmp_path: Path):
                 )
 
     _run(scenario())
+
+
+# --- numeric plan fields ------------------------------------------------------
+
+
+def test_a_zero_is_a_value_not_an_empty_field(tmp_path: Path):
+    """0, 0.0 and a temperature of 0.0 are all things an operator can mean.
+
+    ``PlanBinding.read`` fell back to the binding default on any falsy parse,
+    so a deliberately-zero seed, temperature or strength silently ran as
+    something else — and the copyable command showed the substitute.
+    """
+    from textual.widgets import Input
+    from tui_app import WatermarkTuiApp
+
+    source = tmp_path / "draft.txt"
+    source.write_text(ZWSP, encoding="utf-8")
+    app = WatermarkTuiApp(CleanRequest(paths=(source,)))
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.query_one("#in-temperature", Input).value = "0"
+            app.query_one("#in-seed", Input).value = "0"
+            app.query_one("#in-perturb-strength", Input).value = "0"
+            app.query_one("#in-degrade-strength", Input).value = "0"
+            await pilot.pause()
+            request = app.collect_request()
+            assert request.rewrite_temperature == 0.0
+            assert request.seed == 0
+            assert request.char_strength == 0.0
+            assert request.degrade_strength == 0.0
+
+    _run(scenario())
+
+
+def test_an_unparseable_number_is_refused_not_silently_defaulted(tmp_path: Path):
+    """A field typed wrong must stop the plan, not become the default.
+
+    A timeout of "soon" used to collapse to 1800.0: the run proceeded with a
+    value nobody chose, and the copyable command advertised it as chosen.
+    """
+    from textual.widgets import Input, Static
+    from tui_app import WatermarkTuiApp
+
+    source = tmp_path / "draft.txt"
+    source.write_text(ZWSP, encoding="utf-8")
+    app = WatermarkTuiApp(CleanRequest(paths=(source,)))
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.query_one("#in-timeout", Input).value = "soon"
+            await pilot.pause()
+            with pytest.raises(ValueError, match="timeout: not a number"):
+                app.collect_request()
+            preview = str(app.query_one("#command-preview", Static).render())
+            assert "not a number" in preview
+            assert "1800" not in preview
+
+    _run(scenario())
+
+
+def test_a_bad_number_names_the_field_it_came_from(tmp_path: Path):
+    """``lstrip("#in-")`` strips a character set, not a prefix.
+
+    "#in-inpaint-command" came out as "paint-command", naming a field that
+    does not exist.
+    """
+    from textual.widgets import Input
+    from tui_app import WatermarkTuiApp
+
+    source = tmp_path / "draft.txt"
+    source.write_text(ZWSP, encoding="utf-8")
+    app = WatermarkTuiApp(CleanRequest(paths=(source,)))
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.query_one("#in-dilate", Input).value = "wide"
+            with pytest.raises(ValueError, match=r"^dilate: not a number"):
+                app._number("#in-dilate", int)
+            app.query_one("#in-inpaint-command", Input).value = "fill {input}"
+            with pytest.raises(ValueError, match=r"^inpaint-command: not a number"):
+                app._number("#in-inpaint-command", int)
+
+    _run(scenario())
+
+
+def test_a_bad_number_does_not_break_the_backends_pane(tmp_path: Path):
+    """Half-typed input must not blank a pane that reports the endpoint policy."""
+    from textual.widgets import Input, TabbedContent
+    from tui_app import WatermarkTuiApp
+
+    source = tmp_path / "draft.txt"
+    source.write_text(ZWSP, encoding="utf-8")
+    app = WatermarkTuiApp(CleanRequest(paths=(source,)))
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.query_one("#in-timeout", Input).value = "soon"
+            await pilot.pause()
+            app.query_one(TabbedContent).active = "tab-backends"
+            await pilot.pause()
+            rows = app.query_one("#backend-table").row_count
+            assert rows > 0
+
+    _run(scenario())

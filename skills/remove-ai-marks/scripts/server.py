@@ -41,7 +41,7 @@ from common import (
     MAX_INPUT_BYTES,
     eprint,
     looks_binary,
-    read_bool_env,
+    read_flag_env,
     which,
 )
 from container_meta import clean_container, inspect_container
@@ -145,7 +145,11 @@ def capabilities() -> dict[str, Any]:
         "layer_b": layer_b_status(
             os.environ.get("WATERMARKS_REWRITE_BACKEND"),
             os.environ.get("WATERMARKS_REWRITE_BASE_URL"),
-            allow_remote=read_bool_env("WATERMARKS_REWRITE_ALLOW_REMOTE"),
+            # ``read_flag_env``, not ``read_bool_env``: /capabilities is a
+            # report, and it must say what the rewrite path would enforce.
+            # An unparseable opt-in denies there, so it reads as False here
+            # rather than failing the whole capability report.
+            allow_remote=read_flag_env("WATERMARKS_REWRITE_ALLOW_REMOTE"),
         ),
     }
 

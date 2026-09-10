@@ -44,6 +44,7 @@ from common import (
     cleaned_path,
     eprint,
     read_bool_env,
+    read_flag_env,
     read_text_input,
     validate_output_path,
     write_text_output,
@@ -252,7 +253,11 @@ class RewritePlan:
             timeout=timeout if timeout is not None else defaults.timeout,
             temperature=temperature if temperature is not None else defaults.temperature,
             candidates=candidates if candidates is not None else defaults.candidates,
-            reasoning_effort=reasoning_effort,
+            reasoning_effort=(
+                reasoning_effort
+                if reasoning_effort is not None
+                else os.environ.get("WATERMARKS_REWRITE_REASONING_EFFORT") or None
+            ),
             generations=generations,
             population=population,
             disable_thinking=disable_thinking,
@@ -279,10 +284,6 @@ def _env(name: str, default: str | None = None) -> str | None:
     if v is None or v == "":
         return default
     return v
-
-
-def _flag_env(name: str) -> bool:
-    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _tokens(text: str) -> list[str]:
@@ -983,7 +984,7 @@ def main() -> int:
             else args.disable_thinking
         )
         allow_remote = (
-            _flag_env("WATERMARKS_REWRITE_ALLOW_REMOTE")
+            read_flag_env("WATERMARKS_REWRITE_ALLOW_REMOTE")
             if args.allow_remote is None
             else args.allow_remote
         )

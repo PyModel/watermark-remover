@@ -509,3 +509,90 @@ def test_a_stream_that_yields_nothing_names_streaming_in_the_error(flood_server)
         _stream_openai_compatible(
             flood_server, "/v1/chat/completions", {}, {}, 10.0, lambda _: None
         )
+
+
+class _BoundedReadRecorder:
+    """A response that refuses to be read without a bound, and records it.
+
+    The flood-server tests above pass either way: they only prove the error is
+    raised, and the old code raised it *after* buffering the whole line. This
+    double proves the read itself was capped — an unbounded ``readline()``
+    fails the assertion instead of quietly succeeding.
+    """
+
+    def __init__(self, line_bytes: int) -> None:
+        self._line = b"x" * line_bytes
+        self.requested_sizes: list[int] = []
+        self._served = False
+
+    def readline(self, size: int = -1) -> bytes:
+        self.requested_sizes.append(size)
+        if size is None or size < 0:
+            raise AssertionError("Layer B stream read must be bounded")
+        if self._served:
+            return b""
+        self._served = True
+        return self._line[:size]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _RecordingOpener:
+    def __init__(self, response):
+        self._response = response
+
+    def open(self, request, timeout=None):
+        return self._response
+
+
+def test_the_stream_read_is_bounded_not_measured_after_the_fact():
+    """A line that never ends must not be buffered before it is rejected."""
+    from layer_b_http import MAX_STREAM_LINE_BYTES, LayerBHTTPError, stream_json_lines
+
+    response = _BoundedReadRecorder(MAX_STREAM_LINE_BYTES * 4)
+    with pytest.raises(LayerBHTTPError, match="line exceeds safety limit"):
+        list(
+            stream_json_lines(
+                "http://127.0.0.1:9/",
+                "/api/chat",
+                {},
+                timeout=1.0,
+                opener=_RecordingOpener(response),
+            )
+        )
+    assert response.requested_sizes == [MAX_STREAM_LINE_BYTES + 1]
+
+
+def test_a_bounded_stream_still_yields_every_line():
+    """The cap must not truncate ordinary traffic."""
+    from layer_b_http import stream_json_lines
+
+    class _Lines:
+        def __init__(self, lines):
+            self._lines = list(lines)
+
+        def readline(self, size=-1):
+            assert size and size > 0, "read must stay bounded"
+            return self._lines.pop(0) if self._lines else b""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    payloads = [b'{"a": 1}\n', b"\n", b": keep-alive\n", b'{"a": 2}\n']
+    got = list(
+        stream_json_lines(
+            "http://127.0.0.1:9/",
+            "/api/chat",
+            {},
+            timeout=1.0,
+            opener=_RecordingOpener(_Lines(payloads)),
+        )
+    )
+    assert got == [{"a": 1}, {"a": 2}]

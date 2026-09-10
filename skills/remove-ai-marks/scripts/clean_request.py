@@ -59,6 +59,13 @@ REWRITE_CLI_CHOICES = REWRITE_STRENGTHS
 QUALITY_PROFILES = ("fast", "balanced", "high")
 FORCED_KINDS = ("auto", "text", "image", "container")
 
+#: Defaults ``command_line`` compares against so it can omit a flag that is
+#: already the CLI's own default.  Named here rather than repeated as literals
+#: in ``clean_file``'s parser: the two must not drift, or a copied command
+#: silently runs with different settings than the one that produced it.
+DEFAULT_VISIBLE_PROMPT = "Remove watermark, fill with background"
+DEFAULT_TIMEOUT = 1800.0
+
 
 class CleanPlanPreflightError(RuntimeError):
     """A per-asset policy failed before batch execution."""
@@ -129,10 +136,10 @@ class CleanRequest:
     dilate: int | None = None
     visible_backend: str = "texture"
     inpaint_command: str | None = None
-    visible_prompt: str = "Remove watermark, fill with background"
+    visible_prompt: str = DEFAULT_VISIBLE_PROMPT
     quality: str = "balanced"
     dry_run: bool = False
-    timeout: float = 1800.0
+    timeout: float = DEFAULT_TIMEOUT
 
     # --- image degradation ----------------------------------------------
     degrade: str | None = None
@@ -364,6 +371,10 @@ class CleanRequest:
             argv += ["--inpaint-command", self.inpaint_command]
         if self.quality != "balanced":
             argv += ["--quality", self.quality]
+        if self.visible_prompt != DEFAULT_VISIBLE_PROMPT:
+            argv += ["--visible-prompt", self.visible_prompt]
+        if self.timeout != DEFAULT_TIMEOUT:
+            argv += ["--timeout", str(self.timeout)]
         if self.degrade:
             argv += ["--degrade", self.degrade]
         if self.morpho:

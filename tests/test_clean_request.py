@@ -232,3 +232,137 @@ def test_command_string_still_carries_no_api_key():
         rewrite_api_key="unit-test-secret-never-real",
     )
     assert "unit-test-secret-never-real" not in request.command_string()
+
+
+# --- the copyable command must reproduce the run ------------------------------
+
+#: Fields ``command_line`` deliberately does not carry, and why.  A field that
+#: is neither here nor round-tripped means a copied command runs something
+#: other than what produced it.
+UNSERIALISED_REQUEST_FIELDS = {
+    "paths": "positional; compared on its own",
+    "json": "CLI presentation, chosen per invocation",
+    "quiet": "CLI presentation, chosen per invocation",
+    "tsapa": "an alias for --rewrite tsapa; the strength flag already carries it",
+    "rewrite_api_key": "environment-only; never written into a copyable command",
+}
+
+#: Only meaningful under ``--rewrite tsapa``; the tsapa fixture covers them.
+TSAPA_ONLY_FIELDS = {"tsapa_generations", "tsapa_population"}
+
+
+def _round_trip_diff(request: CleanRequest) -> list[str]:
+    """Field names that do not survive ``command_line`` -> parse -> request."""
+    import dataclasses
+
+    restored = _parse(request.command_line()[1:])
+    skipped = set(UNSERIALISED_REQUEST_FIELDS)
+    if request.rewrite_strength != "tsapa":
+        skipped |= TSAPA_ONLY_FIELDS
+    return [
+        f.name
+        for f in dataclasses.fields(CleanRequest)
+        if f.name not in skipped and getattr(request, f.name) != getattr(restored, f.name)
+    ]
+
+
+def test_command_line_round_trips_every_option():
+    """Copy the command, run it, get the same request back.
+
+    ``--visible-prompt`` and ``--timeout`` were both stored, both used at
+    execution, and neither serialised: the copied command silently reverted to
+    the CLI defaults. This asserts the whole surface, not those two, so the
+    next added flag cannot repeat it.
+    """
+    request = CleanRequest(
+        paths=(Path("a.txt"),),
+        in_place=True,
+        glob="*.md",
+        extensions=".md,.txt",
+        force_type="text",
+        force_text=True,
+        nfkc=True,
+        aggressive_homoglyphs=True,
+        strip_semantic_format=True,
+        keep_non_ai_metadata=True,
+        soft_binding=True,
+        rewrite="humanize",
+        rewrite_backend="ollama",
+        rewrite_model="qwen3",
+        rewrite_base_url="http://127.0.0.1:11434",
+        rewrite_lang="fr",
+        rewrite_original_lang="en",
+        rewrite_timeout=12.5,
+        rewrite_temperature=0.3,
+        rewrite_candidates=3,
+        rewrite_reasoning_effort="low",
+        rewrite_disable_thinking=True,
+        rewrite_allow_remote=True,
+        char_perturb=True,
+        char_mode="space-swap",
+        char_strength=0.25,
+        seed=7,
+        detect_command="detect {input} {mask}",
+        dilate=3,
+        visible_backend="external",
+        inpaint_command="fill {input} {mask} {output}",
+        visible_prompt="erase the logo",
+        quality="high",
+        dry_run=True,
+        timeout=42.5,
+        degrade="freq-dct",
+        degrade_strength=0.9,
+        degrade_seed=11,
+        remove_synthid=True,
+        synthid_strength=0.8,
+        wmct_marker=True,
+        keep_artifacts=True,
+        audit="audit.json",
+    )
+    assert _round_trip_diff(request) == []
+
+
+def test_command_line_round_trips_the_mask_and_tsapa_branches():
+    """The mutually exclusive branches the first fixture cannot take."""
+    boxed = CleanRequest(paths=(Path("a.png"),), in_place=True, visible_box=(1, 2, 3, 4))
+    assert _round_trip_diff(boxed) == []
+
+    masked = CleanRequest(
+        paths=(Path("a.png"),),
+        in_place=True,
+        visible_mask=Path("m.pgm"),
+        morpho="grid",
+        degrade_strength=0.3,
+    )
+    assert _round_trip_diff(masked) == []
+
+    tsapa = CleanRequest(
+        paths=(Path("a.txt"),),
+        in_place=True,
+        rewrite="tsapa",
+        tsapa_generations=7,
+        tsapa_population=14,
+    )
+    assert _round_trip_diff(tsapa) == []
+
+
+def test_visible_prompt_and_timeout_reach_the_command():
+    """The two flags the round-trip test was written for, named explicitly."""
+    request = CleanRequest(
+        paths=(Path("a.png"),),
+        in_place=True,
+        visible_prompt="erase the logo",
+        timeout=42.5,
+    )
+    argv = request.command_line()
+    assert "--visible-prompt" in argv
+    assert argv[argv.index("--visible-prompt") + 1] == "erase the logo"
+    assert "--timeout" in argv
+    assert float(argv[argv.index("--timeout") + 1]) == 42.5
+
+
+def test_defaults_stay_out_of_the_command():
+    """A command that spells out every default is unreadable, and drifts."""
+    argv = CleanRequest(paths=(Path("a.png"),), in_place=True).command_line()
+    assert "--visible-prompt" not in argv
+    assert "--timeout" not in argv

@@ -31,6 +31,8 @@ from clean_asset import (
     clean_asset,
 )
 from clean_request import (
+    DEFAULT_TIMEOUT,
+    DEFAULT_VISIBLE_PROMPT,
     REWRITE_CLI_CHOICES,
     CleanPlanPreflightError,
     CleanRequest,
@@ -144,7 +146,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default="texture",
     )
     p.add_argument("--inpaint-command", help="Inpainter template: {input} {mask} {output} {prompt}")
-    p.add_argument("--visible-prompt", default="Remove watermark, fill with background")
+    p.add_argument("--visible-prompt", default=DEFAULT_VISIBLE_PROMPT)
     p.add_argument("--soft-binding", action="store_true")
 
     # Quality profile, dry-run, timeout
@@ -162,7 +164,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--timeout",
         type=float,
-        default=1800.0,
+        default=DEFAULT_TIMEOUT,
         help="Seconds to wait for each external inpaint command (default: 1800)",
     )
 

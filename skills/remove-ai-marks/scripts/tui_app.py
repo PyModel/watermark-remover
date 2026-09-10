@@ -662,14 +662,22 @@ class WatermarkTuiApp(App):
         return raw or None
 
     def _number(self, widget_id: str, cast) -> object | None:
+        """Parse a numeric field: empty means "unset", garbage means invalid.
+
+        Raising rather than returning ``None`` on garbage is the point.  A
+        field the operator typed something into but got wrong must not quietly
+        become the default — that runs a clean with a timeout or a strength
+        nobody asked for, and the copyable command would show the substituted
+        value as though it had been chosen.
+        """
         raw = self._value(widget_id)
         if raw is None:
             return None
         try:
             return cast(raw)
-        except ValueError:
-            self._status(f"{widget_id.lstrip('#in-')}: not a number ({raw})")
-            return None
+        except ValueError as error:
+            field = widget_id.removeprefix("#in-")
+            raise ValueError(f"{field}: not a number ({raw})") from error
 
     def _selected_value(self, widget_id: str) -> str | None:
         """Read a Select, treating "nothing chosen" as None.
@@ -776,7 +784,11 @@ class WatermarkTuiApp(App):
 
     @on(Button.Pressed, "#btn-candidates")
     def _candidates_pressed(self) -> None:
-        request = self.collect_request()
+        try:
+            request = self.collect_request()
+        except ValueError as error:
+            self._status(f"invalid options: {error}")
+            return
         if request.rewrite_strength is None:
             self._status("choose a Layer B strength first")
             return
@@ -895,7 +907,12 @@ class WatermarkTuiApp(App):
                 # import that actually failed — off the visible width.
                 availability.hint.replace("Reason: ", "").split(". ")[-1],
             )
-        request = self.collect_request() if self.is_mounted else self.request
+        # A half-typed number must not blank the Backends pane: fall back to
+        # the last valid request so the endpoint row still says something true.
+        try:
+            request = self.collect_request() if self.is_mounted else self.request
+        except ValueError:
+            request = self.request
         policy = classify_endpoint(
             request.rewrite_base_url, allow_remote=request.rewrite_allow_remote
         )
@@ -923,7 +940,11 @@ class WatermarkTuiApp(App):
     @on(Button.Pressed, "#btn-probe")
     @on(Button.Pressed, "#btn-discover")
     def _probe_pressed(self) -> None:
-        request = self.collect_request()
+        try:
+            request = self.collect_request()
+        except ValueError as error:
+            self._status(f"invalid options: {error}")
+            return
         backend = request.rewrite_backend
         if not backend:
             self._status("choose a Layer B backend first")
@@ -1295,10 +1316,12 @@ class PlanBinding:
         if self.kind == "path":
             raw = app._value(self.selector)
             return Path(raw) if raw else None
-        if self.kind == "int":
-            return app._number(self.selector, int) or self.default
-        if self.kind == "float":
-            return app._number(self.selector, float) or self.default
+        if self.kind in ("int", "float"):
+            # ``is None``, not truthiness: 0, 0.0 and a temperature of 0.0 are
+            # all values an operator can legitimately mean, and falling back to
+            # the default for them silently runs something else.
+            value = app._number(self.selector, int if self.kind == "int" else float)
+            return self.default if value is None else value
         raise AssertionError(f"unknown binding kind: {self.kind}")
 
     def write(self, app: WatermarkTuiApp, value: object) -> None:

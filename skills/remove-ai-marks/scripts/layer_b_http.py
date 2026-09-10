@@ -401,9 +401,17 @@ def stream_json_lines(
     total = 0
     try:
         with client.open(request, timeout=timeout) as response:
-            for raw_line in response:
+            while True:
+                # Bound the *read*: iterating the response calls readline()
+                # with no size limit, so a stream that never sends a newline
+                # is fully buffered before any length check can reject it.
+                # Asking for one byte past the cap is what makes an oversized
+                # line detectable without holding it.
+                raw_line = response.readline(MAX_STREAM_LINE_BYTES + 1)
                 if not isinstance(raw_line, bytes):
                     raise LayerBHTTPError("Layer B HTTP stream must yield bytes")
+                if not raw_line:
+                    break
                 if len(raw_line) > MAX_STREAM_LINE_BYTES:
                     raise LayerBHTTPError("Layer B HTTP stream line exceeds safety limit")
                 total += len(raw_line)

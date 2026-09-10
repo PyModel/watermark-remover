@@ -19,7 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from asset_kind import SUPPORTED_EXTENSIONS, classify_asset
 from batch_inputs import select_inputs
-from common import EXIT_PARTIAL, MAX_INPUT_BYTES, emit_json, eprint, read_text_input
+from common import EXIT_PARTIAL, MAX_INPUT_BYTES, emit_json, eprint, looks_binary
 from container_meta import inspect_container
 from image_meta import inspect_image
 from inspect_soft_binding import inspect_soft_binding
@@ -109,7 +109,27 @@ def _inspect_asset(
     kind = classify_asset(path, forced_kind=force_type)
 
     if kind == "text":
-        report = inspect_text(read_text_input(str(path)), aggressive=aggressive)
+        data = path.read_bytes()
+        binary_kind = looks_binary(data)
+        if binary_kind is not None:
+            # ``read_text_input`` refuses this by printing to stderr and
+            # raising ``SystemExit`` — correct for a CLI entry point, wrong
+            # for a data seam.  ``SystemExit`` is a ``BaseException``, so the
+            # service and the TUI worker, which both catch ``Exception``,
+            # never see it: the refusal escapes as a dead worker instead of a
+            # report.  Refuse in the payload, in the same shape the oversize
+            # refusal above already returns.
+            return (
+                {
+                    "kind": "refused",
+                    "path": str(path),
+                    "note": f"looks like {binary_kind}, not text",
+                    "suspicious": False,
+                    "unscanned": True,
+                },
+                None,
+            )
+        report = inspect_text(data.decode("utf-8", errors="surrogateescape"), aggressive=aggressive)
         return (
             {
                 "kind": "text",
@@ -171,6 +191,9 @@ def _inspect_single(path: Path, args) -> dict:
 
     kind = result["kind"]
     if kind == "refused":
+        # Human mode has no JSON to read the reason out of, and a refusal that
+        # prints nothing looks like a clean file.
+        eprint(f"Refused: {path} — {result['note']}")
         return result
     if kind == "text":
         print("Kind: text")
