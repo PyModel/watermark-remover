@@ -186,7 +186,9 @@ Always include:
 `wm-tui` (install `watermark-remover[tui]`) drives this same workflow with the
 before/after evidence on screen: Layer A carrier counts, stylometry, and the
 Layer B token stream side by side, plus the equivalent `wm …` command for every
-run so the result is reproducible outside the UI. It fills a `CleanRequest` and
+run so the result is reproducible outside the UI. Its Start pane is the whole
+job in three steps — add files, choose a preset, clean — and each preset names
+its result class at the point of choice rather than only in the results. It fills a `CleanRequest` and
 goes through `clean_request.plan_work` / `clean_file.run_clean_item`, so every
 refusal documented here applies there unchanged. It never displays or persists
 an API key, and it labels results by layer — Verifiable, Best-effort,

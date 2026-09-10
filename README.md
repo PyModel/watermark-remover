@@ -126,18 +126,42 @@ wm-tui ./drafts --recursive --glob "*.md"
 `clean_file.run_clean_item`, and inherits every refusal the CLI makes. It never
 speaks HTTP itself and never displays or persists an API key.
 
-Six panes: **Files** (select, rescan), **Inspect** (Layer A carriers, metadata,
-stylometry, soft binding), **Plan** (every option, plus the equivalent `wm …`
-command), **Run** (sequential batch, per-file result table, live Layer B token
-stream, before/after diff), **Backends** (extras availability, Layer B endpoint
-probe and model discovery), **History** (every command this session generated,
-copyable and re-loadable).
+It opens on **Start**, which is the whole job in three steps: add a file or a
+folder, choose a preset, press Clean. Nothing has to be configured first, and
+nothing about a preset is hidden — every option it sets is a visible control on
+the Plan tab and appears in the equivalent `wm …` command.
 
-The only command-line arguments are `path`, `--recursive`, `--glob`, and
-`--extensions` — the file selection. Everything else, including the Layer B
-backend, endpoint, and model, is configured in the Plan pane, and the exact
-`wm` command it corresponds to is shown and copyable so a run can be reproduced
-outside the UI.
+| Preset | What it turns on | Result class |
+| --- | --- | --- |
+| Hidden marks | zero-width carriers, bidi controls, AI metadata — identical to a bare `wm FILE` | Verifiable |
+| Hidden marks, aggressive | adds NFKC normalisation and homoglyph folding | Verifiable |
+| Deep clean (LLM rewrite) | adds a local-model paraphrase; needs a Layer B endpoint | Best-effort |
+| Images: metadata + degrade | strips C2PA/AI metadata, then perturbs the frequency domain | Best-effort |
+
+No preset can set `--in-place`, `--strip-semantic-format` or `--dry-run`: those
+overwrite the input, change what the text means, or replace the run with a
+description, and each is a deliberate choice with its own confirmation.
+
+The rest of Start is setup. The **Layer B endpoint** block sets the backend,
+base URL and model and probes them; **Save setup** writes them to
+`~/.config/watermark-remover/tui.json` (`$XDG_CONFIG_HOME` or `%APPDATA%` when
+set, or `WATERMARKS_TUI_SETTINGS` to point somewhere else) so the next run
+starts configured. The API key is never in that file — it is read from
+`WATERMARKS_REWRITE_API_KEY` at run time and has no field to be written to.
+**Installed capabilities** lists every optional extra and hands you the exact
+`pip install` line for the missing ones.
+
+The other panes: **Files** (select, rescan, glob and extension filters),
+**Inspect** (Layer A carriers, metadata, stylometry, soft binding), **Plan**
+(every option, plus the equivalent `wm …` command), **Run** (sequential batch,
+per-file result table, live Layer B token stream, before/after diff),
+**History** (every command this session generated, copyable and re-loadable).
+
+The command-line arguments are `path`, `--recursive`, `--glob`, and
+`--extensions` — the initial file selection; more paths can be added from
+Start once it is running. Everything else is configured in the UI, and the
+exact `wm` command it corresponds to is shown and copyable so a run can be
+reproduced outside it.
 
 Results are labeled by *layer*, never by outcome: Layer A and Layer M are
 Verifiable, Layer B and Layer V are Best-effort, soft binding is

@@ -16,7 +16,7 @@ import difflib
 import os
 import sys
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import ClassVar
 
@@ -57,6 +57,7 @@ from clean_request import (
     CleanRequest,
     build_rewrite_plan,
     describe_dropped_text_transforms,
+    dropped_text_transforms,
     plan_work,
     resolve_kind,
 )
@@ -76,17 +77,83 @@ from score_stylometry import score_text_stylometry
 from tui import (
     DEFAULT_REWRITE_TIMEOUT,
     IDLE_STREAM_TITLE,
+    PRESETS,
     STREAM_VIEW_CHARS,
     HistoryEntry,
+    Preset,
+    TuiSettings,
+    apply_preset,
     discover_files,
     estimate_rewrite_seconds,
     format_badge,
     format_duration,
+    layer_for_result,
+    preset_for,
     result_class_for,
+    save_settings,
     should_confirm_cost,
 )
 
 REWRITE_ENV_KEY = "WATERMARKS_REWRITE_API_KEY"
+
+#: Column label and share of the leftover width, per table.  ``DataTable``
+#: sizes columns to their content, which leaves a table of short rows stopping
+#: a third of the way across its pane with a dark strip after it; these weights
+#: are what spread the columns over the whole width instead.
+CAPABILITY_COLUMNS: tuple[tuple[str, int], ...] = (
+    ("capability", 2),
+    ("state", 1),
+    ("detail", 5),
+)
+RUN_COLUMNS: tuple[tuple[str, int], ...] = (
+    ("file", 4),
+    ("kind", 1),
+    ("result", 1),
+    ("class", 2),
+    ("residual", 1),
+    ("note", 4),
+)
+HISTORY_COLUMNS: tuple[tuple[str, int], ...] = (
+    ("time", 1),
+    ("summary", 8),
+)
+
+
+def _column_widths(total: int, spec: tuple[tuple[str, int], ...]) -> list[int]:
+    """Split ``total`` columns across ``spec``, exactly and without overflow.
+
+    Every column gets at least its own label, so a narrow terminal degrades to
+    a readable header rather than a row of ellipses.  Anything left over is
+    shared by weight and the remainder lands on the last column, which is what
+    makes the widths add up to ``total`` rather than to one or two less.
+    """
+    floors = [max(len(label), 4) for label, _ in spec]
+    if total <= sum(floors):
+        return floors
+    weights = [weight for _, weight in spec]
+    extra = total - sum(floors)
+    share = sum(weights) or 1
+    widths = [
+        floor + extra * weight // share for floor, weight in zip(floors, weights, strict=True)
+    ]
+    widths[-1] += total - sum(widths)
+    return widths
+
+
+@dataclass
+class _TableModel:
+    """The rows a ``DataTable`` is showing, kept so it can be re-laid out.
+
+    Column widths can only be given when a column is added, so filling the
+    pane's width after a resize means re-adding the columns — and therefore
+    re-adding the rows.  Holding them here is what makes that possible without
+    reading them back out of the widget.
+    """
+
+    spec: tuple[tuple[str, int], ...]
+    rows: list[tuple[str, ...]] = field(default_factory=list)
+    #: Width the columns were last laid out for. Negative forces a redraw.
+    width: int = 0
 
 
 class ConfirmModal(ModalScreen[bool]):
@@ -198,20 +265,8 @@ class WatermarkTuiApp(App):
        vertical scrollbar -- two columns stolen from every pane, on a screen
        that had nothing to scroll. */
     #tabs { height: 1fr; }
-    #files-list { height: 1fr; border: round $primary; }
-    #inspect-report { height: 1fr; border: round $primary; padding: 1; }
-    #command-preview { height: auto; min-height: 3; border: round $accent; padding: 0 1; }
-    #command-copyable { height: 5; border: round $panel; }
-    #run-table { height: 1fr; min-height: 6; }
-    #run-log { height: 1fr; min-height: 6; border: round $panel; }
-    #backend-table { height: 1fr; }
-    #history-table { height: 1fr; }
-    /* Side by side: the stream is what the model is writing now, the diff is
-       what changed — reading one without the other is half the answer, and
-       stacking them starved the result table above. */
-    #run-panes { height: 10; }
-    #diff-view { width: 1fr; border: round $panel; }
-    #stream-view { width: 1fr; border: round $accent; }
+
+    /* -- the shared row grid --------------------------------------------- */
     .row { height: auto; }
     /* ``.muted``, not a bare ``Static``: ``Checkbox`` subclasses ``Static``,
        so the type selector also caught every checkbox and stretched it to
@@ -230,15 +285,8 @@ class WatermarkTuiApp(App):
        neighbours stretched past it. */
     .field { width: 1fr; }
     .wide { width: 1fr; }
-    #modal-body {
-        width: 84; height: auto; max-height: 90%;
-        border: thick $warning; background: $surface; padding: 1 2;
-    }
-    #modal-title { text-style: bold; }
-    #modal-text { padding: 1 0; }
-    #modal-buttons { height: auto; align-horizontal: right; }
-    #candidate-table { height: 10; }
-    #candidate-preview { height: 12; }
+
+    /* -- type ------------------------------------------------------------- */
     .muted { color: $text-muted; }
     /* Names the controls in the row beneath it.  A placeholder is gone the
        moment a field is filled, and "10" in a row of three inputs says
@@ -248,6 +296,53 @@ class WatermarkTuiApp(App):
        undifferentiated wall of controls. */
     .section { text-style: bold; margin-top: 1; }
     .section:first-of-type { margin-top: 0; }
+
+    /* -- panes ------------------------------------------------------------ */
+    TabPane { padding: 1 1 0 1; }
+    /* Every scrolling surface gets the same titled frame, so a pane reads as
+       a labelled thing rather than text floating on the terminal. */
+    DataTable { border: round $panel; }
+    DataTable:focus { border: round $accent; }
+    #files-list { height: 1fr; border: round $panel; }
+    #files-list:focus { border: round $accent; }
+    #inspect-report { height: 1fr; border: round $panel; padding: 1; }
+    #command-preview { height: auto; min-height: 3; border: round $accent; padding: 0 1; }
+    #command-copyable { height: 5; border: round $panel; }
+    #run-table { height: 1fr; min-height: 6; }
+    #run-log { height: 1fr; min-height: 6; border: round $panel; }
+    #history-table { height: 1fr; }
+    /* Side by side: the stream is what the model is writing now, the diff is
+       what changed — reading one without the other is half the answer, and
+       stacking them starved the result table above. */
+    #run-panes { height: 10; }
+    #diff-view { width: 1fr; border: round $panel; }
+    #stream-view { width: 1fr; border: round $accent; }
+    #status-bar { height: 1; padding: 0 1; background: $panel; color: $text-muted; }
+
+    /* -- the Start pane --------------------------------------------------- */
+    /* One bordered, titled block per step.  The onboarding is four things to
+       do in order; a flat column of controls does not say that. */
+    .step { height: auto; border: round $primary 50%; padding: 0 1 1 1; margin-bottom: 1; }
+    .step:focus-within { border: round $accent; }
+    /* One line, not three: a summary padded to the height of a button row
+       left a hole in the middle of the first thing the operator reads. */
+    #start-files { width: 1fr; height: auto; padding: 0 1; }
+    #start-ready { width: 1fr; height: 3; content-align: left middle; padding: 0 1; }
+    #preset-detail { height: auto; min-height: 2; padding: 0 1; }
+    #backend-table { height: auto; max-height: 12; }
+    #install-command { height: 3; border: round $panel; }
+    #btn-start-run { min-width: 22; }
+
+    /* -- modals ----------------------------------------------------------- */
+    #modal-body {
+        width: 84; height: auto; max-height: 90%;
+        border: thick $warning; background: $surface; padding: 1 2;
+    }
+    #modal-title { text-style: bold; }
+    #modal-text { padding: 1 0; }
+    #modal-buttons { height: auto; align-horizontal: right; }
+    #candidate-table { height: 10; }
+    #candidate-preview { height: 12; }
     """
 
     BINDINGS: ClassVar[list] = [
@@ -257,9 +352,14 @@ class WatermarkTuiApp(App):
         ("ctrl+r", "run", "Run"),
     ]
 
-    def __init__(self, request: CleanRequest) -> None:
+    def __init__(self, request: CleanRequest, *, preset: Preset | None = None) -> None:
         super().__init__()
         self.request = request
+        # The saved setup's preset, or the safest one.  Landing on a preset is
+        # what makes "add files, press Clean" work without a tour of the Plan
+        # tab; the pane names the preset and the command preview shows exactly
+        # what it turned on, so nothing about it is implicit.
+        self.preset: Preset = preset or PRESETS[0]
         self.files: list[Path] = []
         self.selected: list[Path] = []
         self.history: list[HistoryEntry] = []
@@ -267,15 +367,48 @@ class WatermarkTuiApp(App):
         # Namespaced deliberately: textual's App owns a private `_running`, and
         # reusing that name silently reads the framework's lifecycle state.
         self._clean_running = False
-        # Kept so rebuilding the Backends table does not discard a probe the
+        # Kept so rebuilding the capability table does not discard a probe the
         # operator just ran.
         self._last_probe = None
+        # Install command per capability row, by row index; "" for the rows
+        # that are not an extra.
+        self._install_commands: list[str] = []
+        # Which extras are installed, cached.  The endpoint row is rebuilt on
+        # every keystroke in the base-URL field — the control and the row it
+        # describes are on the same pane now, so a stale row would contradict
+        # the field right next to it — and re-importing five optional packages
+        # per keystroke to learn nothing new is not worth that.
+        self._extra_rows: list[tuple[tuple[str, ...], str]] | None = None
+        # Asset kind per discovered file, from the last rescan.  Classifying
+        # reads the file, so it happens once per rescan rather than on every
+        # keystroke that redraws the readiness line.
+        self._kinds: dict[Path, str] = {}
+        # Guards every handler that reaches into the widget tree.  Textual
+        # mounts children as ``compose`` yields them and processes messages in
+        # between, so a ``Select`` constructed with a value posts ``Changed``
+        # before the widgets its handler would go on to query exist — and the
+        # same messages can still be in flight while the app is tearing down,
+        # where the query raises instead of finding a widget.  Both only ever
+        # showed up on a loaded runner, which is exactly why the flag is
+        # explicit rather than a timing assumption.
+        self._widgets_live = False
+        self._tables: dict[str, _TableModel] = {
+            "#run-table": _TableModel(RUN_COLUMNS),
+            "#backend-table": _TableModel(CAPABILITY_COLUMNS),
+            "#history-table": _TableModel(HISTORY_COLUMNS),
+        }
 
     # -- layout ------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with TabbedContent(initial="tab-files", id="tabs"):
+        # Start first, and it is the setup pane: the old landing tab was a file
+        # list over a plan nobody had configured yet, and the capability table
+        # that told you what was missing was five tabs away with no way to act
+        # on any of it.
+        with TabbedContent(initial="tab-start", id="tabs"):
+            with TabPane("Start", id="tab-start"):
+                yield from self._compose_start()
             with TabPane("Files", id="tab-files"):
                 yield from self._compose_files()
             with TabPane("Inspect", id="tab-inspect"):
@@ -284,12 +417,104 @@ class WatermarkTuiApp(App):
                 yield from self._compose_plan()
             with TabPane("Run", id="tab-run"):
                 yield from self._compose_run()
-            with TabPane("Backends", id="tab-backends"):
-                yield from self._compose_backends()
             with TabPane("History", id="tab-history"):
                 yield from self._compose_history()
         yield Static("", id="status-bar")
         yield Footer()
+
+    def _compose_start(self) -> ComposeResult:
+        """Add files, choose what to remove, point at a backend, clean."""
+        with VerticalScroll(id="start"):
+            with Vertical(classes="step") as step:
+                step.border_title = "1 · Add files"
+                yield Static(
+                    "add as many as you like · filters on the Files tab", classes="caption"
+                )
+                with Horizontal(classes="row"):
+                    yield Input(
+                        placeholder="path to a file or a folder",
+                        id="in-add-path",
+                        classes="wide",
+                    )
+                    yield Button("Add", variant="primary", id="btn-add-path")
+                    yield Button("Clear", id="btn-clear-paths")
+                yield Static("", id="start-files", classes="muted")
+
+            with Vertical(classes="step") as step:
+                step.border_title = "2 · Choose what to remove"
+                with Horizontal(classes="row"):
+                    yield Select(
+                        [(preset.label, preset.key) for preset in PRESETS],
+                        value=self.preset.key,
+                        allow_blank=False,
+                        id="sel-preset",
+                        classes="field",
+                    )
+                    yield Static(
+                        "every option a preset sets stays visible on the Plan tab",
+                        classes="muted",
+                    )
+                yield Static("", id="preset-detail")
+
+            with Vertical(classes="step") as step:
+                step.border_title = "3 · Clean"
+                with Horizontal(classes="row"):
+                    yield Button("Clean now", variant="primary", id="btn-start-run")
+                    yield Button("Advanced options", id="btn-advanced")
+                    yield Static("", id="start-ready", classes="muted")
+
+            with Vertical(classes="step") as step:
+                step.border_title = "Layer B endpoint — only the rewrite preset needs one"
+                yield Static("backend · base URL · model", classes="caption")
+                with Horizontal(classes="row"):
+                    yield Select(
+                        [(name, name) for name in LIVE_REWRITE_BACKENDS],
+                        prompt="backend",
+                        allow_blank=True,
+                        id="sel-backend",
+                        classes="field",
+                    )
+                    yield Input(
+                        placeholder="base URL (http://127.0.0.1:11434)",
+                        id="in-base-url",
+                        classes="field",
+                    )
+                    # Free text, not a discovery-only picker: an endpoint that
+                    # does not list models (or is not reachable yet) must still
+                    # be usable.
+                    yield Input(placeholder="model", id="in-model", classes="field")
+                    yield Button("Probe", id="btn-probe")
+                yield Static("discovered models · reasoning effort", classes="caption")
+                with Horizontal(classes="row"):
+                    yield Select(
+                        [], prompt="discovered", allow_blank=True, id="sel-model", classes="field"
+                    )
+                    yield Select(
+                        [(name, name) for name in REASONING_EFFORTS],
+                        prompt="reasoning effort",
+                        allow_blank=True,
+                        id="sel-effort",
+                        classes="field",
+                    )
+                    yield Checkbox("disable thinking", False, id="cb-disable-thinking")
+                with Horizontal(classes="row"):
+                    yield Checkbox("allow remote endpoint", False, id="cb-allow-remote")
+                    yield Button("Save setup", id="btn-save-settings")
+                    yield Static("", id="endpoint-state", classes="muted")
+                yield Static("", id="settings-state", classes="muted")
+                yield Static("", id="api-key-state", classes="muted")
+
+            with Vertical(classes="step") as step:
+                step.border_title = "Installed capabilities"
+                yield DataTable(id="backend-table", cursor_type="row", zebra_stripes=True)
+                yield Static("select a row for the command that installs it", classes="caption")
+                yield TextArea("", read_only=True, id="install-command")
+                with Horizontal(classes="row"):
+                    yield Button("Refresh", id="btn-refresh-backends")
+                    yield Static(
+                        "the core clean needs nothing extra; the rows above are opt-in backends",
+                        classes="muted",
+                    )
 
     def _compose_files(self) -> ComposeResult:
         with Horizontal(classes="row"):
@@ -302,7 +527,9 @@ class WatermarkTuiApp(App):
             )
             yield Checkbox("recursive", self.request.recursive, id="cb-recursive")
             yield Button("Rescan", id="btn-rescan")
-        yield SelectionList[str](id="files-list")
+        listing = SelectionList[str](id="files-list")
+        listing.border_title = "space toggles · every file is selected after a rescan"
+        yield listing
         yield Static("", id="files-summary", classes="muted")
 
     def _compose_inspect(self) -> ComposeResult:
@@ -341,7 +568,15 @@ class WatermarkTuiApp(App):
                 yield Checkbox("detect soft binding", False, id="cb-soft")
 
             yield Label("Layer B — LLM rewrite  " + format_badge("B"), classes="section")
-            yield Static("strength · backend · endpoint", classes="caption")
+            # The endpoint, the model and the key state are set-once settings
+            # and live on the Start tab; what stays here is what changes per
+            # run.  Splitting them that way is what lets Start be short enough
+            # to read.
+            yield Static(
+                "strength · candidates · temperature · per-call timeout (s) — "
+                "backend and model are on the Start tab",
+                classes="caption",
+            )
             with Horizontal(classes="row"):
                 yield Select(
                     [(name, name) for name in REWRITE_CLI_CHOICES],
@@ -350,45 +585,11 @@ class WatermarkTuiApp(App):
                     id="sel-rewrite",
                     classes="field",
                 )
-                yield Select(
-                    [(name, name) for name in LIVE_REWRITE_BACKENDS],
-                    prompt="backend",
-                    allow_blank=True,
-                    id="sel-backend",
-                    classes="field",
-                )
-                yield Input(
-                    placeholder="base URL (http://127.0.0.1:11434)",
-                    id="in-base-url",
-                    classes="field",
-                )
-            yield Static("model · discovered models · candidates", classes="caption")
-            with Horizontal(classes="row"):
-                # Free text, not a discovery-only picker: an endpoint that does
-                # not list models (or is not reachable yet) must still be usable.
-                yield Input(placeholder="model", id="in-model", classes="field")
-                yield Select(
-                    [], prompt="discovered", allow_blank=True, id="sel-model", classes="field"
-                )
-                yield Button("Discover models", id="btn-discover")
                 yield Input(
                     placeholder="candidates", value="1", id="in-candidates", classes="field"
                 )
-            yield Static("temperature · timeout (s) · reasoning effort", classes="caption")
-            with Horizontal(classes="row"):
                 yield Input(placeholder="temperature", id="in-temperature", classes="field")
                 yield Input(placeholder="timeout s", id="in-rewrite-timeout", classes="field")
-                yield Select(
-                    [(name, name) for name in REASONING_EFFORTS],
-                    prompt="reasoning effort",
-                    allow_blank=True,
-                    id="sel-effort",
-                    classes="field",
-                )
-            with Horizontal(classes="row"):
-                yield Checkbox("disable thinking", False, id="cb-disable-thinking")
-                yield Checkbox("allow remote endpoint", False, id="cb-allow-remote")
-                yield Static("", id="endpoint-state", classes="muted")
             yield Static(
                 "pivot language · original language · tsapa generations · tsapa population",
                 classes="caption",
@@ -404,7 +605,6 @@ class WatermarkTuiApp(App):
                     "generates N candidates for one text file and lets you choose",
                     classes="muted",
                 )
-            yield Static("", id="api-key-state", classes="muted")
 
             yield Label("Character perturbation", classes="section")
             with Horizontal(classes="row"):
@@ -508,7 +708,9 @@ class WatermarkTuiApp(App):
             yield Button("Run", variant="primary", id="btn-run")
             yield Button("Stop after current file", id="btn-cancel", disabled=True)
             yield Static("", id="run-state", classes="muted")
-        yield DataTable(id="run-table")
+        results = DataTable(id="run-table", zebra_stripes=True)
+        results.border_title = "results — one row per file, badged by layer"
+        yield results
         with Horizontal(id="run-panes"):
             stream = TextArea("", read_only=True, id="stream-view")
             stream.border_title = IDLE_STREAM_TITLE
@@ -516,44 +718,113 @@ class WatermarkTuiApp(App):
             diff = TextArea("", read_only=True, id="diff-view")
             diff.border_title = "before / after"
             yield diff
-        yield RichLog(id="run-log", markup=True, wrap=True)
-
-    def _compose_backends(self) -> ComposeResult:
-        with Horizontal(classes="row"):
-            yield Button("Refresh", id="btn-refresh-backends")
-            yield Button("Probe Layer B endpoint", id="btn-probe")
-        yield DataTable(id="backend-table")
+        log = RichLog(id="run-log", markup=True, wrap=True)
+        log.border_title = "log — the after-state of every file, re-inspected"
+        yield log
 
     def _compose_history(self) -> ComposeResult:
         with Horizontal(classes="row"):
             yield Button("Copy", id="btn-history-copy")
             yield Button("Reuse", id="btn-history-reuse")
             yield Static("in-memory, this session only", classes="muted")
-        yield DataTable(id="history-table", cursor_type="row")
+        table = DataTable(id="history-table", cursor_type="row", zebra_stripes=True)
+        table.border_title = "every command this session generated"
+        yield table
         yield TextArea("", read_only=True, id="history-copyable")
 
     # -- lifecycle ---------------------------------------------------------
 
     def on_mount(self) -> None:
-        self.query_one("#run-table", DataTable).add_columns(
-            "file", "kind", "result", "class", "residual", "note"
-        )
-        self.query_one("#backend-table", DataTable).add_columns("capability", "state", "detail")
-        self.query_one("#history-table", DataTable).add_columns("time", "summary")
+        self._widgets_live = True
+        for selector in self._tables:
+            self._relayout_table(selector)
         self._refresh_api_key_state()
+        # The preset is applied, not merely displayed: the Plan widgets and the
+        # command preview must say what pressing "Clean now" would actually do.
+        self.apply_request(apply_preset(self.request, self.preset))
         self.action_rescan()
         self.refresh_backends()
         self._sync_preview()
 
+    def on_unmount(self) -> None:
+        self._widgets_live = False
+
+    def on_resize(self) -> None:
+        """Re-lay the tables when the terminal changes size."""
+        self._relayout_tables()
+
+    def _relayout_tables(self) -> None:
+        """Re-lay every table that now knows how wide it is.
+
+        A table in a hidden ``TabPane`` has no width to divide up, so the one
+        on the tab you open second would keep the fallback columns it was given
+        at mount — the very dark strip this is here to remove.
+        """
+        if not self._widgets_live:
+            return
+        for selector in self._tables:
+            if self.query(selector):
+                self._relayout_table(selector)
+
+    # -- tables ------------------------------------------------------------
+
+    def _relayout_table(self, selector: str) -> bool:
+        """Rebuild a table so its columns span the pane. True when it redrew.
+
+        ``DataTable`` sizes each column to its content and column widths can
+        only be given when the column is added, so a table of short rows stops
+        halfway across the pane and the header band ends in a dark strip.
+        Filling the width means re-adding the columns, which means re-adding
+        the rows — which is why the rows are kept in ``_TableModel``.
+        """
+        model = self._tables[selector]
+        table = self.query_one(selector, DataTable)
+        width = table.size.width
+        if width == model.width and table.columns:
+            return False
+        model.width = width
+        usable = width - 2 * table.cell_padding * len(model.spec)
+        # Before the first layout the table has no width to divide up; add the
+        # columns anyway so a row written now is not dropped for want of one.
+        widths = _column_widths(usable, model.spec) if usable > 0 else [None] * len(model.spec)
+        table.clear(columns=True)
+        for (label, _), column_width in zip(model.spec, widths, strict=True):
+            table.add_column(label, width=column_width)
+        for row in model.rows:
+            table.add_row(*row)
+        return True
+
+    def _add_table_row(self, selector: str, *cells: str) -> None:
+        self._tables[selector].rows.append(cells)
+        if not self._widgets_live:
+            return
+        # A relayout re-adds every row itself; appending twice would double it.
+        if not self._relayout_table(selector):
+            self.query_one(selector, DataTable).add_row(*cells)
+
+    def _set_table_rows(self, selector: str, rows: list[tuple[str, ...]]) -> None:
+        model = self._tables[selector]
+        model.rows = rows
+        model.width = -1  # no real width is negative, so this forces the redraw
+        if not self._widgets_live:
+            return
+        self._relayout_table(selector)
+
     def _status(self, message: str) -> None:
+        if not self._widgets_live:
+            return
         self.query_one("#status-bar", Static).update(message)
 
     def _log(self, message: str) -> None:
+        if not self._widgets_live:
+            return
         self.query_one("#run-log", RichLog).write(message)
 
     # -- files -------------------------------------------------------------
 
     def action_rescan(self) -> None:
+        if not self._widgets_live:
+            return
         self.request = replace(
             self.request,
             glob=self.query_one("#in-glob", Input).value or "*",
@@ -567,13 +838,26 @@ class WatermarkTuiApp(App):
             self._status(f"selection error: {error}")
             self.files = []
             self.selected = []
+            self._update_files_summary()
             self._sync_preview()
             return
         self.files = files
+        self._kinds = {path: self._classify(path) for path in files}
         listing.add_options([(str(path), str(path), True) for path in files])
+        # Everything the rescan found is selected: the list it replaced no
+        # longer matches, so carrying a previous deselection forward would
+        # silently apply it to different files.  ``_update_files_summary``
+        # says so rather than leaving it to be discovered.
         self.selected = list(files)
         self._update_files_summary()
         self._sync_preview()
+
+    def _classify(self, path: Path) -> str:
+        """Best-effort asset kind. A file we cannot classify is not a warning."""
+        try:
+            return resolve_kind(path, self.request)
+        except (ValueError, OSError):
+            return "unknown"
 
     def _update_files_summary(self) -> None:
         filters = [f"glob {self.request.glob}"]
@@ -584,9 +868,184 @@ class WatermarkTuiApp(App):
         self.query_one("#files-summary", Static).update(
             f"{len(self.selected)} of {len(self.files)} selected · " + " · ".join(filters)
         )
+        self._sync_start()
+
+    # -- start pane --------------------------------------------------------
+
+    def _sync_start(self) -> None:
+        """Keep the onboarding pane's three answers current."""
+        if not self._widgets_live:
+            return
+        roots = len(self.request.paths)
+        self.query_one("#start-files", Static).update(
+            f"{len(self.files)} file(s) under {roots} path(s) · {len(self.selected)} selected"
+        )
+        self.query_one("#preset-detail", Static).update(
+            f"{self.preset.badge()}  {escape(self.preset.description)}"
+        )
+        self.query_one("#start-ready", Static).update(self._readiness())
+        # The Run pane's own state line, which nothing wrote to before: the
+        # operator arrives there from another tab and has to be told what
+        # pressing Run would act on.
+        self.query_one("#run-state", Static).update(
+            f"{len(self.selected)} file(s) · {escape(self.preset.label)} {self.preset.badge()}"
+        )
+        # The endpoint controls and the row that reports the endpoint policy
+        # are on the same pane; a row that lags the field above it by a tab
+        # switch is a pane arguing with itself.
+        if self.is_mounted:
+            self.refresh_backends(recheck=False)
+
+    def _readiness(self) -> str:
+        """What still stands between this form and a run. Never a bare "ready"."""
+        blockers = []
+        if not self.selected:
+            blockers.append("step 1: no files selected")
+        if self.preset.requires_endpoint and not self._value("#in-base-url"):
+            blockers.append("this preset needs a Layer B endpoint — set one below")
+        extra = self.preset.requires_extra
+        if extra and not check_optional(extra).available:
+            blockers.append(f"needs watermark-remover[{extra}]")
+        blockers.extend(self._selection_warnings())
+        if blockers:
+            return "[yellow]" + escape(" · ".join(blockers)) + "[/]"
+        return f"[green]ready[/] — {len(self.selected)} file(s), {self.preset.badge()}"
+
+    def _selection_warnings(self) -> list[str]:
+        """What this plan would do to this selection that the operator has not seen.
+
+        Two shapes, and the difference matters.  A text transform on a
+        container is a *silent no-op*: ``.md`` and ``.html`` route to the
+        container pipeline, the rewrite chosen in step 2 never runs, and the
+        old UI said so only in one row of a results table afterwards.  Image
+        degradation on a non-image is a *refusal*, and it aborts in preflight —
+        so one ``.md`` in the folder means the whole batch writes nothing.
+        Both belong in front of the operator before the run, not after it.
+        """
+        try:
+            request = self.collect_request()
+        except ValueError:
+            return []
+        warnings = []
+        counted: dict[str, int] = {}
+        for path in self.selected:
+            for name in dropped_text_transforms(request, self._kinds.get(path, "unknown")):
+                counted[name] = counted.get(name, 0) + 1
+        warnings.extend(
+            f"{count} file(s) would skip {name} — tick “force text” on Plan"
+            for name, count in sorted(counted.items())
+        )
+        if request.degrade or request.morpho:
+            others = sum(1 for path in self.selected if self._kinds.get(path, "unknown") != "image")
+            if others:
+                warnings.append(
+                    f"{others} selected file(s) are not images — image degradation "
+                    "refuses the whole run in preflight, writing nothing"
+                )
+        return warnings
+
+    @on(Button.Pressed, "#btn-add-path")
+    @on(Input.Submitted, "#in-add-path")
+    def _add_path(self) -> None:
+        raw = self._value("#in-add-path")
+        if raw is None:
+            self._status("type a file or folder path first")
+            return
+        path = Path(raw).expanduser()
+        if not path.exists():
+            self._status(f"no such path: {path}")
+            return
+        # ``..`` segments and symlinks hide re-adds from plain Path equality.
+        if path.resolve() in {root.resolve() for root in self.request.paths}:
+            self._status(f"already added: {path}")
+            return
+        self.request = replace(self.request, paths=(*self.request.paths, path))
+        self.query_one("#in-add-path", Input).value = ""
+        self.action_rescan()
+        self._status(f"added {path}")
+
+    @on(Button.Pressed, "#btn-clear-paths")
+    def _clear_paths(self) -> None:
+        self.request = replace(self.request, paths=())
+        self.action_rescan()
+        self._status("cleared — add a file or folder to start again")
+
+    @on(Select.Changed, "#sel-preset")
+    def _preset_changed(self, event: Select.Changed) -> None:
+        """Apply a preset through the same widgets everything else reads."""
+        if not self._widgets_live:
+            return
+        chosen = preset_for(None if isinstance(event.value, NoSelection) else str(event.value))
+        if chosen is None:
+            return
+        self.preset = chosen
+        # Round-trip through the form so the preset lands in the Plan widgets:
+        # a preset that only changed a private field would not show up in the
+        # command preview, and the run would not match what the pane claims.
+        try:
+            current = self.collect_request()
+        except ValueError:
+            current = self.request
+        self.apply_request(apply_preset(current, chosen))
+        self._status(f"{chosen.label} — {result_class_for(chosen.layer)}")
+
+    @on(Button.Pressed, "#btn-advanced")
+    def _show_advanced(self) -> None:
+        self.query_one("#tabs", TabbedContent).active = "tab-plan"
+
+    @on(Button.Pressed, "#btn-start-run")
+    def _start_run(self) -> None:
+        self.query_one("#tabs", TabbedContent).active = "tab-run"
+        self.action_run()
+
+    @on(Button.Pressed, "#btn-save-settings")
+    def _save_setup(self) -> None:
+        """Remember the endpoint. Never the key — it has no field to land in."""
+        try:
+            request = self.collect_request()
+        except ValueError as error:
+            self._status(f"invalid options: {error}")
+            return
+        settings = TuiSettings(
+            preset=self.preset.key,
+            rewrite_backend=request.rewrite_backend,
+            rewrite_base_url=request.rewrite_base_url,
+            rewrite_model=request.rewrite_model,
+            rewrite_reasoning_effort=request.rewrite_reasoning_effort,
+            rewrite_allow_remote=request.rewrite_allow_remote,
+        )
+        try:
+            where = save_settings(settings)
+        except OSError as error:
+            self.query_one("#settings-state", Static).update(
+                f"[red]could not save: {escape(str(error))}[/]"
+            )
+            return
+        self.query_one("#settings-state", Static).update(
+            f"saved to {escape(str(where))} — the API key is never written"
+        )
+
+    @on(DataTable.RowHighlighted, "#backend-table")
+    def _capability_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        """Show the command that installs the highlighted capability.
+
+        ``refresh_backends`` strips the shared "Install watermark-remover[...]"
+        preamble so the import that actually failed stays visible in a narrow
+        detail column — but that preamble was the actionable half.  It belongs
+        here, in something selectable.
+        """
+        if not self._widgets_live:
+            return
+        row = event.cursor_row
+        command = self._install_commands[row] if 0 <= row < len(self._install_commands) else ""
+        self.query_one("#install-command", TextArea).text = (
+            command or "# nothing to install for this row"
+        )
 
     @on(SelectionList.SelectedChanged, "#files-list")
     def _files_changed(self) -> None:
+        if not self._widgets_live:
+            return
         listing = self.query_one("#files-list", SelectionList)
         self.selected = [Path(value) for value in listing.selected]
         self._update_files_summary()
@@ -745,6 +1204,8 @@ class WatermarkTuiApp(App):
         self._sync_preview()
 
     def _sync_preview(self) -> None:
+        if not self._widgets_live:
+            return
         try:
             request = self.collect_request()
         except ValueError as error:
@@ -762,6 +1223,7 @@ class WatermarkTuiApp(App):
         self.query_one("#command-copyable", TextArea).text = command
         self._sync_endpoint_state(request)
         self._sync_visible_state(request)
+        self._sync_start()
 
     def _sync_endpoint_state(self, request: CleanRequest) -> None:
         if request.rewrite_strength is None:
@@ -789,6 +1251,8 @@ class WatermarkTuiApp(App):
     @on(Select.Changed, "#sel-model")
     def _discovered_model_chosen(self, event: Select.Changed) -> None:
         """A discovered model fills the free-text field, which stays the source."""
+        if not self._widgets_live:
+            return
         if not isinstance(event.value, NoSelection):
             self.query_one("#in-model", Input).value = str(event.value)
 
@@ -883,6 +1347,8 @@ class WatermarkTuiApp(App):
         self.call_from_thread(self._write_stream, fragment)
 
     def _write_stream(self, fragment: str) -> None:
+        if not self._widgets_live:
+            return
         view = self.query_one("#stream-view", TextArea)
         # Bounded on purpose: a long document would otherwise grow the widget's
         # document without limit while the run is still going.
@@ -895,6 +1361,8 @@ class WatermarkTuiApp(App):
         An always-visible box that only ever fills on one code path reads as
         broken; naming the reason is cheaper than hiding it.
         """
+        if not self._widgets_live:
+            return
         view = self.query_one("#stream-view", TextArea)
         view.text = ""
         view.border_title = IDLE_STREAM_TITLE if filename is None else f"generating {filename}"
@@ -907,60 +1375,82 @@ class WatermarkTuiApp(App):
 
     @on(TabbedContent.TabActivated, "#tabs")
     def _tab_activated(self, event: TabbedContent.TabActivated) -> None:
-        """Rebuild the Backends table when it comes into view.
+        """Rebuild the capability table when it comes into view.
 
         Its Layer B rows are derived from the *current* plan, so a table left
         as it was at mount reports "no base URL set" over a plan that has one —
         stale state presented as fact.
         """
-        if event.pane.id == "tab-backends":
+        if not self._widgets_live:
+            return
+        if event.pane.id == "tab-start":
             self.refresh_backends()
+        # A pane that was hidden until now has only just been given a width.
+        self.call_after_refresh(self._relayout_tables)
 
-    def refresh_backends(self) -> None:
-        table = self.query_one("#backend-table", DataTable)
-        table.clear()
-        for extra in KNOWN_EXTRAS:
-            availability = check_optional(extra)
-            table.add_row(
-                f"extra: {extra}",
-                "available" if availability.available else "missing",
-                # The hint's shared "install watermark-remover[...]" preamble
-                # repeats on every row and pushes the part that differs — the
-                # import that actually failed — off the visible width.
-                availability.hint.replace("Reason: ", "").split(". ")[-1],
-            )
-        # A half-typed number must not blank the Backends pane: fall back to
+    def refresh_backends(self, *, recheck: bool = True) -> None:
+        """Rebuild the capability table. ``recheck`` re-imports the extras."""
+        if not self._widgets_live:
+            return
+        if recheck or self._extra_rows is None:
+            self._extra_rows = [
+                (
+                    (
+                        f"extra: {extra}",
+                        "available" if availability.available else "missing",
+                        # The hint's shared "install watermark-remover[...]"
+                        # preamble repeats on every row and pushes the part that
+                        # differs — the import that actually failed — off the
+                        # visible width.  The preamble is not lost: it becomes
+                        # the row's install command.
+                        availability.hint.replace("Reason: ", "").split(". ")[-1],
+                    ),
+                    ("" if availability.available else f'pip install "watermark-remover[{extra}]"'),
+                )
+                for extra, availability in ((name, check_optional(name)) for name in KNOWN_EXTRAS)
+            ]
+        rows: list[tuple[str, ...]] = [row for row, _ in self._extra_rows]
+        commands: list[str] = [command for _, command in self._extra_rows]
+        # A half-typed number must not blank the capability pane: fall back to
         # the last valid request so the endpoint row still says something true.
         try:
-            request = self.collect_request() if self.is_mounted else self.request
+            request = self.collect_request()
         except ValueError:
             request = self.request
         policy = classify_endpoint(
             request.rewrite_base_url, allow_remote=request.rewrite_allow_remote
         )
-        table.add_row(
-            "layer B endpoint",
-            "allowed" if policy.allowed else "blocked",
-            policy.reason or f"host {policy.host or '-'} (loopback={policy.loopback})",
+        rows.append(
+            (
+                "layer B endpoint",
+                "allowed" if policy.allowed else "blocked",
+                policy.reason or f"host {policy.host or '-'} (loopback={policy.loopback})",
+            )
         )
-        table.add_row(
-            "layer B api key",
-            "set" if os.environ.get(REWRITE_ENV_KEY) else "not set",
-            f"{REWRITE_ENV_KEY} — never displayed",
+        commands.append("")
+        rows.append(
+            (
+                "layer B api key",
+                "set" if os.environ.get(REWRITE_ENV_KEY) else "not set",
+                f"{REWRITE_ENV_KEY} — never displayed",
+            )
         )
+        # An export line, not the key: this is the shape of the thing to set,
+        # and the value stays somewhere this process never reads it back out.
+        commands.append(f"export {REWRITE_ENV_KEY}=...   # set it in your shell, not here")
         if self._last_probe is not None:
-            self._add_probe_row(table, self._last_probe)
-
-    @staticmethod
-    def _add_probe_row(table: DataTable, probe) -> None:
-        table.add_row(
-            f"probe: {escape(probe.backend)}",
-            "reachable" if probe.reachable else "unreachable",
-            escape(probe.summary),
-        )
+            rows.append(
+                (
+                    f"probe: {escape(self._last_probe.backend)}",
+                    "reachable" if self._last_probe.reachable else "unreachable",
+                    escape(self._last_probe.summary),
+                )
+            )
+            commands.append("")
+        self._install_commands = commands
+        self._set_table_rows("#backend-table", rows)
 
     @on(Button.Pressed, "#btn-probe")
-    @on(Button.Pressed, "#btn-discover")
     def _probe_pressed(self) -> None:
         try:
             request = self.collect_request()
@@ -985,12 +1475,14 @@ class WatermarkTuiApp(App):
         self.call_from_thread(self._apply_probe, probe)
 
     def _apply_probe(self, probe) -> None:
+        self._last_probe = probe
+        if not self._widgets_live:
+            return
         self._status(f"{probe.backend}: {probe.summary}")
         if probe.models:
             model_select = self.query_one("#sel-model", Select)
             model_select.set_options([(name, name) for name in probe.models])
-        self._last_probe = probe
-        self._add_probe_row(self.query_one("#backend-table", DataTable), probe)
+        self.refresh_backends()
 
     # -- run ---------------------------------------------------------------
 
@@ -1087,8 +1579,7 @@ class WatermarkTuiApp(App):
     def clean_worker(self, request: CleanRequest) -> None:
         self._cancel_requested = False
         self.call_from_thread(self._set_running, True)
-        table_clear = self.query_one("#run-table", DataTable).clear
-        self.call_from_thread(table_clear)
+        self.call_from_thread(self._set_table_rows, "#run-table", [])
 
         batch = len(request.paths) > 1
         # Preflight every destination before the first write: a failing plan
@@ -1153,10 +1644,10 @@ class WatermarkTuiApp(App):
     def _render_dry_run(self, request: CleanRequest, work_items) -> None:
         """Show what a visible-mark clean would do. Nothing is written."""
         self._begin_stream(None)
-        table = self.query_one("#run-table", DataTable)
         for item, output, plan in work_items:
             payload = dry_run_payload(item.path, output, plan, request.in_place)
-            table.add_row(
+            self._add_table_row(
+                "#run-table",
                 escape(item.path.name),
                 "image",
                 "dry-run",
@@ -1178,6 +1669,8 @@ class WatermarkTuiApp(App):
 
     def _set_running(self, running: bool) -> None:
         self._clean_running = running
+        if not self._widgets_live:
+            return
         self.query_one("#btn-run", Button).disabled = running
         self.query_one("#btn-cancel", Button).disabled = not running
 
@@ -1195,23 +1688,18 @@ class WatermarkTuiApp(App):
         payload: dict,
         before: str | None,
     ) -> None:
+        if not self._widgets_live:
+            return
         kind = payload.get("kind", "unknown")
         failed = payload.get("exit_code", 0) != 0
         # The badge follows the layer that did the work, never the outcome.
-        layer = (
-            "B"
-            if request.rewrite_strength and kind == "text"
-            else (
-                "V"
-                if request.visible_requested() and kind == "image"
-                else ("A" if kind == "text" else "M")
-            )
-        )
+        layer = layer_for_result(request, str(kind))
         note = payload.get("error") or ""
         skipped = payload.get("skipped_text_transforms")
         if skipped:
             note = f"skipped {', '.join(skipped)}"
-        self.query_one("#run-table", DataTable).add_row(
+        self._add_table_row(
+            "#run-table",
             escape(path.name),
             escape(str(kind)),
             "error" if failed else "written",
@@ -1264,16 +1752,17 @@ class WatermarkTuiApp(App):
             request=request,
         )
         self.history.insert(0, entry)
-        table = self.query_one("#history-table", DataTable)
-        table.clear()
-        for item in self.history:
-            table.add_row(item.when, item.summary)
+        if not self._widgets_live:
+            return
+        self._set_table_rows("#history-table", [(item.when, item.summary) for item in self.history])
         self.query_one("#history-copyable", TextArea).text = entry.command
 
     # -- history -----------------------------------------------------------
 
     @on(DataTable.RowHighlighted, "#history-table")
     def _history_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if not self._widgets_live:
+            return
         if 0 <= event.cursor_row < len(self.history):
             self.query_one("#history-copyable", TextArea).text = self.history[
                 event.cursor_row
@@ -1301,6 +1790,8 @@ class WatermarkTuiApp(App):
         Driven by the same table ``collect_request`` reads, so "Reuse" cannot
         quietly drop an option that only one of the two knows about.
         """
+        if not self._widgets_live:
+            return
         for binding in PLAN_BINDINGS:
             binding.write(self, getattr(request, binding.field))
         self.query_one("#cb-disable-thinking", Checkbox).value = bool(
