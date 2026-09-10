@@ -47,7 +47,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from asset_kind import SUPPORTED_EXTENSIONS
 from batch_inputs import select_inputs
-from clean_file import run_clean_item
+from clean_file import dry_run_payload, run_clean_item
 from clean_request import (
     QUALITY_PROFILES,
     REWRITE_CLI_CHOICES,
@@ -73,6 +73,8 @@ from rewrite_text import (
 from score_stylometry import score_text_stylometry
 from tui import (
     DEFAULT_REWRITE_TIMEOUT,
+    IDLE_STREAM_TITLE,
+    STREAM_VIEW_CHARS,
     HistoryEntry,
     discover_files,
     estimate_rewrite_seconds,
@@ -192,11 +194,16 @@ class WatermarkTuiApp(App):
     #inspect-report { height: 1fr; border: round $primary; padding: 1; }
     #command-preview { height: auto; min-height: 3; border: round $accent; padding: 0 1; }
     #command-copyable { height: 5; border: round $panel; }
-    #run-table { height: 1fr; }
-    #run-log { height: 12; border: round $panel; }
+    #run-table { height: 1fr; min-height: 6; }
+    #run-log { height: 1fr; min-height: 6; border: round $panel; }
     #backend-table { height: 1fr; }
     #history-table { height: 1fr; }
-    #diff-view { height: 14; border: round $panel; }
+    /* Side by side: the stream is what the model is writing now, the diff is
+       what changed — reading one without the other is half the answer, and
+       stacking them starved the result table above. */
+    #run-panes { height: 10; }
+    #diff-view { width: 1fr; border: round $panel; }
+    #stream-view { width: 1fr; border: round $accent; }
     .row { height: auto; }
     .row > Static { width: 1fr; height: 3; content-align: left middle; padding: 0 1; }
     .field { width: 32; }
@@ -211,6 +218,14 @@ class WatermarkTuiApp(App):
     #candidate-table { height: 10; }
     #candidate-preview { height: 12; }
     .muted { color: $text-muted; }
+    /* Names the controls in the row beneath it.  A placeholder is gone the
+       moment a field is filled, and "10" in a row of three inputs says
+       nothing about which field it is. */
+    .caption { color: $text-muted; height: 1; padding: 0 1; }
+    /* Breathing room between groups; a form with no rhythm reads as one
+       undifferentiated wall of controls. */
+    .section { text-style: bold; margin-top: 1; }
+    .section:first-of-type { margin-top: 0; }
     """
 
     BINDINGS: ClassVar[list] = [
@@ -230,12 +245,15 @@ class WatermarkTuiApp(App):
         # Namespaced deliberately: textual's App owns a private `_running`, and
         # reusing that name silently reads the framework's lifecycle state.
         self._clean_running = False
+        # Kept so rebuilding the Backends table does not discard a probe the
+        # operator just ran.
+        self._last_probe = None
 
     # -- layout ------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with TabbedContent(initial="tab-files"):
+        with TabbedContent(initial="tab-files", id="tabs"):
             with TabPane("Files", id="tab-files"):
                 yield from self._compose_files()
             with TabPane("Inspect", id="tab-inspect"):
@@ -273,18 +291,19 @@ class WatermarkTuiApp(App):
 
     def _compose_plan(self) -> ComposeResult:
         with VerticalScroll():
-            yield Label("Layer A — hidden Unicode  " + format_badge("A"))
+            yield Label("Layer A — hidden Unicode  " + format_badge("A"), classes="section")
             with Horizontal(classes="row"):
                 yield Checkbox("NFKC", self.request.nfkc, id="cb-nfkc")
                 yield Checkbox("aggressive homoglyphs", False, id="cb-homoglyphs")
                 yield Checkbox("strip semantic format", False, id="cb-semantic")
 
-            yield Label("Layer M — metadata  " + format_badge("M"))
+            yield Label("Layer M — metadata  " + format_badge("M"), classes="section")
             with Horizontal(classes="row"):
                 yield Checkbox("keep non-AI metadata", False, id="cb-keep-meta")
                 yield Checkbox("detect soft binding", False, id="cb-soft")
 
-            yield Label("Layer B — LLM rewrite  " + format_badge("B"))
+            yield Label("Layer B — LLM rewrite  " + format_badge("B"), classes="section")
+            yield Static("strength · backend · endpoint", classes="caption")
             with Horizontal(classes="row"):
                 yield Select(
                     [(name, name) for name in REWRITE_CLI_CHOICES],
@@ -305,6 +324,7 @@ class WatermarkTuiApp(App):
                     id="in-base-url",
                     classes="field",
                 )
+            yield Static("model · discovered models · candidates", classes="caption")
             with Horizontal(classes="row"):
                 # Free text, not a discovery-only picker: an endpoint that does
                 # not list models (or is not reachable yet) must still be usable.
@@ -316,6 +336,7 @@ class WatermarkTuiApp(App):
                 yield Input(
                     placeholder="candidates", value="1", id="in-candidates", classes="field"
                 )
+            yield Static("temperature · timeout (s) · reasoning effort", classes="caption")
             with Horizontal(classes="row"):
                 yield Input(placeholder="temperature", id="in-temperature", classes="field")
                 yield Input(placeholder="timeout s", id="in-rewrite-timeout", classes="field")
@@ -330,6 +351,7 @@ class WatermarkTuiApp(App):
                 yield Checkbox("disable thinking", False, id="cb-disable-thinking")
                 yield Checkbox("allow remote endpoint", False, id="cb-allow-remote")
                 yield Static("", id="endpoint-state", classes="muted")
+            yield Static("pivot language · tsapa generations · tsapa population", classes="caption")
             with Horizontal(classes="row"):
                 yield Input(placeholder="pivot lang", id="in-lang", classes="field")
                 yield Input(placeholder="tsapa generations", id="in-generations", classes="field")
@@ -342,7 +364,7 @@ class WatermarkTuiApp(App):
                 )
             yield Static("", id="api-key-state", classes="muted")
 
-            yield Label("Character perturbation")
+            yield Label("Character perturbation", classes="section")
             with Horizontal(classes="row"):
                 yield Checkbox("char perturb", False, id="cb-perturb")
                 yield Select(
@@ -354,7 +376,7 @@ class WatermarkTuiApp(App):
                 )
                 yield Input(placeholder="strength 0-1", id="in-perturb-strength", classes="field")
 
-            yield Label("Layer V — visible marks  " + format_badge("V"))
+            yield Label("Layer V — visible marks  " + format_badge("V"), classes="section")
             with Horizontal(classes="row"):
                 yield Input(placeholder="mask path", id="in-mask", classes="field")
                 yield Input(placeholder="box x,y,w,h", id="in-box", classes="field")
@@ -374,15 +396,16 @@ class WatermarkTuiApp(App):
                     classes="field",
                 )
                 yield Checkbox("remove SynthID", False, id="cb-synthid")
+                yield Checkbox("dry run", False, id="cb-dry-run")
                 yield Static("", id="visible-state", classes="muted")
 
-            yield Label("Output")
+            yield Label("Output", classes="section")
             with Horizontal(classes="row"):
                 yield Input(placeholder="output path or directory", id="in-output", classes="wide")
                 yield Checkbox("in place", False, id="cb-in-place")
                 yield Checkbox("keep artifacts", False, id="cb-artifacts")
 
-            yield Label("Equivalent command")
+            yield Label("Equivalent command", classes="section")
             yield Static("", id="command-preview")
             with Horizontal(classes="row"):
                 yield Button("Copy command", id="btn-copy-command")
@@ -395,7 +418,13 @@ class WatermarkTuiApp(App):
             yield Button("Stop after current file", id="btn-cancel", disabled=True)
             yield Static("", id="run-state", classes="muted")
         yield DataTable(id="run-table")
-        yield TextArea("", read_only=True, id="diff-view")
+        with Horizontal(id="run-panes"):
+            stream = TextArea("", read_only=True, id="stream-view")
+            stream.border_title = IDLE_STREAM_TITLE
+            yield stream
+            diff = TextArea("", read_only=True, id="diff-view")
+            diff.border_title = "before / after"
+            yield diff
         yield RichLog(id="run-log", markup=True, wrap=True)
 
     def _compose_backends(self) -> ComposeResult:
@@ -631,6 +660,7 @@ class WatermarkTuiApp(App):
             visible_backend=visible_backend,
             quality=self._selected_value("#sel-quality") or "balanced",
             remove_synthid=self.query_one("#cb-synthid", Checkbox).value,
+            dry_run=self.query_one("#cb-dry-run", Checkbox).value,
             keep_artifacts=self.query_one("#cb-artifacts", Checkbox).value,
         )
 
@@ -646,7 +676,7 @@ class WatermarkTuiApp(App):
         except ValueError as error:
             self.query_one("#command-preview", Static).update(f"[red]{escape(str(error))}[/]")
             return
-        command = " ".join(request.command_line())
+        command = request.command_string()
         self.query_one("#command-preview", Static).update(escape(command))
         # The selectable copy of the command is the fallback for terminals that
         # ignore OSC 52 — it must always carry the same string as the button.
@@ -733,6 +763,7 @@ class WatermarkTuiApp(App):
                 self._status("cancelled: remote endpoint not approved")
                 return
         self._status(f"generating {plan.candidates} candidate(s)…")
+        self._begin_stream(path.name)
         candidates = await self._generate_candidates(path, plan)
         if not candidates:
             return
@@ -757,16 +788,50 @@ class WatermarkTuiApp(App):
         """Generate off the UI thread; a model call must never block the terminal."""
         try:
             text = path.read_text(encoding="utf-8", errors="surrogateescape")
-            return generate_candidates(text, plan)
+            return generate_candidates(text, plan, on_token=self._append_stream)
         except Exception as error:
-            self.call_from_thread(self._status, f"candidate generation failed: {error}")
+            self.call_from_thread(
+                self._status, f"candidate generation failed: {escape(str(error))}"
+            )
             return []
+
+    def _append_stream(self, fragment: str) -> None:
+        """Token sink: called from the reader thread, so hop to the UI thread."""
+        self.call_from_thread(self._write_stream, fragment)
+
+    def _write_stream(self, fragment: str) -> None:
+        view = self.query_one("#stream-view", TextArea)
+        # Bounded on purpose: a long document would otherwise grow the widget's
+        # document without limit while the run is still going.
+        view.text = (view.text + fragment)[-STREAM_VIEW_CHARS:]
+        view.scroll_end(animate=False)
+
+    def _begin_stream(self, filename: str | None) -> None:
+        """Reset the stream box, and label why it is empty when nothing streams.
+
+        An always-visible box that only ever fills on one code path reads as
+        broken; naming the reason is cheaper than hiding it.
+        """
+        view = self.query_one("#stream-view", TextArea)
+        view.text = ""
+        view.border_title = IDLE_STREAM_TITLE if filename is None else f"generating {filename}"
 
     # -- backends ----------------------------------------------------------
 
     @on(Button.Pressed, "#btn-refresh-backends")
     def _refresh_pressed(self) -> None:
         self.refresh_backends()
+
+    @on(TabbedContent.TabActivated, "#tabs")
+    def _tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        """Rebuild the Backends table when it comes into view.
+
+        Its Layer B rows are derived from the *current* plan, so a table left
+        as it was at mount reports "no base URL set" over a plan that has one —
+        stale state presented as fact.
+        """
+        if event.pane.id == "tab-backends":
+            self.refresh_backends()
 
     def refresh_backends(self) -> None:
         table = self.query_one("#backend-table", DataTable)
@@ -776,7 +841,10 @@ class WatermarkTuiApp(App):
             table.add_row(
                 f"extra: {extra}",
                 "available" if availability.available else "missing",
-                availability.hint,
+                # The hint's shared "install watermark-remover[...]" preamble
+                # repeats on every row and pushes the part that differs — the
+                # import that actually failed — off the visible width.
+                availability.hint.replace("Reason: ", "").split(". ")[-1],
             )
         request = self.collect_request() if self.is_mounted else self.request
         policy = classify_endpoint(
@@ -791,6 +859,16 @@ class WatermarkTuiApp(App):
             "layer B api key",
             "set" if os.environ.get(REWRITE_ENV_KEY) else "not set",
             f"{REWRITE_ENV_KEY} — never displayed",
+        )
+        if self._last_probe is not None:
+            self._add_probe_row(table, self._last_probe)
+
+    @staticmethod
+    def _add_probe_row(table: DataTable, probe) -> None:
+        table.add_row(
+            f"probe: {escape(probe.backend)}",
+            "reachable" if probe.reachable else "unreachable",
+            escape(probe.summary),
         )
 
     @on(Button.Pressed, "#btn-probe")
@@ -819,12 +897,8 @@ class WatermarkTuiApp(App):
         if probe.models:
             model_select = self.query_one("#sel-model", Select)
             model_select.set_options([(name, name) for name in probe.models])
-        table = self.query_one("#backend-table", DataTable)
-        table.add_row(
-            f"probe: {probe.backend}",
-            "reachable" if probe.reachable else "unreachable",
-            probe.summary,
-        )
+        self._last_probe = probe
+        self._add_probe_row(self.query_one("#backend-table", DataTable), probe)
 
     # -- run ---------------------------------------------------------------
 
@@ -949,6 +1023,12 @@ class WatermarkTuiApp(App):
             self._fail_preflight(f"preflight failed: {escape(str(error))}")
             return
 
+        if request.dry_run:
+            # Mirrors clean_file.main: a dry run describes and returns before
+            # any directory is created or any byte is written.
+            self.call_from_thread(self._render_dry_run, request, work_items)
+            return
+
         if batch and request.output and not request.in_place:
             request.output.mkdir(parents=True, exist_ok=True)
 
@@ -962,13 +1042,42 @@ class WatermarkTuiApp(App):
                 break
             before = self._read_text(item.path)
             self.call_from_thread(self._status, f"cleaning {item.path.name}…")
-            payload = run_clean_item(item.path, output, silent, plan)
+            streaming = plan.text.rewrite_plan is not None
+            self.call_from_thread(self._begin_stream, item.path.name if streaming else None)
+            payload = run_clean_item(
+                item.path,
+                output,
+                silent,
+                plan,
+                on_token=self._append_stream if streaming else None,
+            )
             done += 1
             self.call_from_thread(self._render_result, request, item.path, payload, before)
 
         self.call_from_thread(self._set_running, False)
         self.call_from_thread(self._status, f"done: {done} of {len(work_items)} file(s)")
         self.call_from_thread(self._record_history, request)
+
+    def _render_dry_run(self, request: CleanRequest, work_items) -> None:
+        """Show what a visible-mark clean would do. Nothing is written."""
+        self._begin_stream(None)
+        table = self.query_one("#run-table", DataTable)
+        for item, output, plan in work_items:
+            payload = dry_run_payload(item.path, output, plan, request.in_place)
+            table.add_row(
+                escape(item.path.name),
+                "image",
+                "dry-run",
+                format_badge("V"),
+                "-",
+                escape(str(payload["output"])),
+            )
+            self._log(f"[bold]dry-run {escape(str(payload['input']))}[/]")
+            for action in payload["actions"]:
+                self._log(f"  - {escape(str(action))}")
+        self._set_running(False)
+        self._status(f"dry run: {len(work_items)} file(s) described, nothing written")
+        self._record_history(request)
 
     def _fail_preflight(self, message: str) -> None:
         self.call_from_thread(self._log, f"[red]{message}[/]")
@@ -1011,18 +1120,20 @@ class WatermarkTuiApp(App):
         if skipped:
             note = f"skipped {', '.join(skipped)}"
         self.query_one("#run-table", DataTable).add_row(
-            path.name,
-            kind,
+            escape(path.name),
+            escape(str(kind)),
             "error" if failed else "written",
             "-" if failed else result_class_for(layer),
             "yes" if payload.get("residual") else "",
-            note,
+            escape(note),
         )
         if failed:
             self._log(f"[red]{escape(path.name)}: {escape(str(payload.get('error')))}[/]")
             return
         if skipped:
-            self._log(f"[yellow]{describe_dropped_text_transforms(request, kind, path)}[/]")
+            # Carries the file name, so it is operator-controlled text: escape
+            # it or a name like report[1].md is swallowed as a style tag.
+            self._log(f"[yellow]{escape(describe_dropped_text_transforms(request, kind, path))}[/]")
         output = payload.get("output")
         if output and before is not None:
             after = self._read_text(Path(output))
@@ -1057,7 +1168,7 @@ class WatermarkTuiApp(App):
         entry = HistoryEntry(
             when=time.strftime("%H:%M"),
             summary=" · ".join(summary_parts),
-            command=" ".join(request.command_line()),
+            command=request.command_string(),
             request=request,
         )
         self.history.insert(0, entry)

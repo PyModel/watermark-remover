@@ -202,3 +202,33 @@ def test_command_line_never_carries_an_api_key():
 
 def test_command_line_of_a_default_request_is_just_the_paths():
     assert CleanRequest(paths=(Path("a.txt"),)).command_line() == ["wm", "a.txt"]
+
+
+def test_command_string_is_shell_safe_for_awkward_names():
+    """A copyable command that does not survive a paste is worse than none.
+
+    Spaces split an argument in two, and ``[1]`` is a glob pattern in every
+    common shell — both would silently clean the wrong files, or none.
+    """
+    import shlex
+
+    request = CleanRequest(
+        paths=(Path("report[1] draft.txt"), Path("a b/c'd.md")),
+        output=Path("out dir"),
+        nfkc=True,
+    )
+    command = request.command_string()
+    # The round trip is the guarantee: a shell splits this back into exactly
+    # the argv the CLI would have received.
+    assert shlex.split(command) == request.command_line()
+    # And the bare, unquoted form is not what got emitted.
+    assert " report[1] draft.txt " not in f" {command} "
+
+
+def test_command_string_still_carries_no_api_key():
+    request = CleanRequest(
+        paths=(Path("a.txt"),),
+        rewrite="humanize",
+        rewrite_api_key="unit-test-secret-never-real",
+    )
+    assert "unit-test-secret-never-real" not in request.command_string()

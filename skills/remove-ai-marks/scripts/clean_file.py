@@ -46,7 +46,7 @@ from common import (
 from morphomod import VISIBLE_CLEAN_BACKENDS
 from operation import ExitCode, OperationStatus, status_to_exit_code
 from perturb_text import MODES as PERTURB_MODES
-from rewrite_text import LIVE_REWRITE_BACKENDS, REASONING_EFFORTS, remote_warning
+from rewrite_text import LIVE_REWRITE_BACKENDS, REASONING_EFFORTS, TokenSink, remote_warning
 
 # Preserved under the old private name: external callers are not expected, but
 # the rename should not be the thing that breaks an in-tree import.
@@ -290,7 +290,7 @@ def main() -> int:
         return ExitCode.USAGE_ERROR.value
     if request.dry_run:
         results = [
-            _dry_run_payload(item.path, output, plan, request.in_place)
+            dry_run_payload(item.path, output, plan, request.in_place)
             for item, output, plan in work
         ]
         payload = {"total": len(results), "results": results} if batch else results[0]
@@ -321,12 +321,17 @@ def main() -> int:
     return ExitCode.RESIDUAL_OR_ERROR.value
 
 
-def _dry_run_payload(
+def dry_run_payload(
     path: Path,
     output: Path | None,
     plan: CleanPlan,
     in_place: bool,
 ) -> dict:
+    """Describe what a visible-mark clean would do, without touching a file.
+
+    Shared with the TUI so its preview is the CLI's preview, not a second
+    description that can drift from what actually runs.
+    """
     visible = plan.visible
     if visible is None:
         raise ValueError("dry-run requires a visible cleaning plan")
@@ -431,18 +436,21 @@ def run_clean_item(
     output_path: Path | None,
     request: CleanRequest,
     plan: CleanPlan,
+    *,
+    on_token: TokenSink | None = None,
 ) -> dict:
     """Clean one asset and return its JSON payload.
 
     Shared with the TUI, which passes a request with ``json=True`` so this
-    stays silent and the caller renders the payload itself.
+    stays silent and the caller renders the payload itself, plus an *on_token*
+    sink so a Layer B rewrite is visible while it runs.
     """
     dest = path if request.in_place else output_path or cleaned_path(path)
     try:
         rewrite_plan = plan.text.rewrite_plan
         if rewrite_plan is not None and (warning := remote_warning(rewrite_plan.base_url)):
             eprint(warning)
-        result = clean_asset(path, dest, plan)
+        result = clean_asset(path, dest, plan, on_token=on_token)
     except Exception as error:
         if not request.json:
             eprint(f"error on {path}: {error}")
@@ -463,8 +471,9 @@ def run_clean_item(
     return payload
 
 
-#: Preserved private alias for in-tree callers predating the rename.
+#: Preserved private aliases for in-tree callers predating the renames.
 _run_clean_item = run_clean_item
+_dry_run_payload = dry_run_payload
 
 
 if __name__ == "__main__":

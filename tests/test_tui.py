@@ -396,3 +396,201 @@ def test_remote_endpoint_is_blocked_in_the_plan_panel(tmp_path: Path):
             assert "blocked" in str(state)
 
     _run(scenario())
+
+
+def _tiny_png() -> bytes:
+    import struct
+    import zlib
+
+    def chunk(ctype: bytes, payload: bytes) -> bytes:
+        crc = zlib.crc32(payload, zlib.crc32(ctype)) & 0xFFFFFFFF
+        return struct.pack(">I", len(payload)) + ctype + payload + struct.pack(">I", crc)
+
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(b"\x00\x00\x00"))
+        + chunk(b"IEND", b"")
+    )
+
+
+def test_dry_run_describes_the_visible_clean_and_writes_nothing(tmp_path: Path):
+    """The CLI's --dry-run has a TUI surface, and it is the CLI's own preview."""
+    from textual.widgets import Checkbox, DataTable, Input, RichLog, TabbedContent, TextArea
+    from tui_app import WatermarkTuiApp
+
+    source = tmp_path / "shot.png"
+    source.write_bytes(_tiny_png())
+    destination = tmp_path / "shot.cleaned.png"
+    app = WatermarkTuiApp(CleanRequest(paths=(source,)))
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.query_one("#in-output", Input).value = str(destination)
+            app.query_one("#in-box", Input).value = "0,0,1,1"
+            app.query_one("#cb-dry-run", Checkbox).value = True
+            await pilot.pause()
+            assert "--dry-run" in app.query_one("#command-copyable", TextArea).text
+
+            # RichLog defers writes until it has been laid out, so the Run pane
+            # has to be the visible tab for the log assertions below to mean
+            # anything.
+            app.query_one(TabbedContent).active = "tab-run"
+            await pilot.pause()
+            app.action_run()
+            for _ in range(200):
+                await pilot.pause()
+                if app.query_one("#run-table", DataTable).row_count:
+                    break
+            assert app.query_one("#run-table", DataTable).row_count == 1
+            # The whole point: a preview leaves the filesystem alone.
+            assert not destination.exists()
+            assert not any(tmp_path.glob("*.mask.pgm"))
+            log = app.query_one("#run-log", RichLog)
+            rendered = "".join(strip.text for strip in log.lines)
+            assert "inpaint" in rendered
+
+    _run(scenario())
+
+
+def test_dry_run_is_refused_on_a_text_asset(tmp_path: Path):
+    """--dry-run is image-only in the CLI; the TUI inherits the refusal."""
+    from textual.widgets import Checkbox, Input, RichLog, TabbedContent
+    from tui_app import WatermarkTuiApp
+
+    source = tmp_path / "draft.txt"
+    source.write_text(ZWSP, encoding="utf-8")
+    app = WatermarkTuiApp(CleanRequest(paths=(source,)))
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.query_one("#in-output", Input).value = str(tmp_path / "out.txt")
+            app.query_one("#cb-dry-run", Checkbox).value = True
+            app.query_one(TabbedContent).active = "tab-run"
+            await pilot.pause()
+            app.action_run()
+            for _ in range(60):
+                await pilot.pause()
+            log = app.query_one("#run-log", RichLog)
+            rendered = "".join(strip.text for strip in log.lines)
+            assert "only valid for image assets" in rendered
+            assert not (tmp_path / "out.txt").exists()
+
+    _run(scenario())
+
+
+def test_a_bracketed_filename_survives_the_run_log(tmp_path: Path):
+    """Operator-controlled strings reach Rich, which treats [x] as a style tag.
+
+    ``notes[bold]x.md`` rendering as ``notesx.md`` is not cosmetic: the log is
+    the record of which file was touched.
+    """
+    from textual.widgets import Checkbox, Input, RichLog, TabbedContent
+    from tui_app import WatermarkTuiApp
+
+    source = tmp_path / "notes[bold]x.md"
+    source.write_text("---\nai_generated: true\n---\nhi" + ZWSP + "\n", encoding="utf-8")
+    app = WatermarkTuiApp(CleanRequest(paths=(source,)))
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.query_one("#in-output", Input).value = str(tmp_path / "out.md")
+            # A text-body flag on a container asset triggers the skipped-
+            # transform note, which is the line that carries the file name.
+            app.query_one("#cb-nfkc", Checkbox).value = True
+            app.query_one(TabbedContent).active = "tab-run"
+            await pilot.pause()
+            app.action_run()
+            for _ in range(200):
+                await pilot.pause()
+                if app.history:
+                    break
+            for _ in range(10):
+                await pilot.pause()
+            rendered = "".join(strip.text for strip in app.query_one("#run-log", RichLog).lines)
+            assert "notes[bold]x.md" in rendered
+            assert "notesx.md" not in rendered
+
+    _run(scenario())
+
+
+def test_the_copyable_command_is_shell_safe(tmp_path: Path):
+    import shlex
+
+    from textual.widgets import TextArea
+    from tui_app import WatermarkTuiApp
+
+    source = tmp_path / "report[1] draft.txt"
+    source.write_text(ZWSP, encoding="utf-8")
+    app = WatermarkTuiApp(CleanRequest(paths=(source,)))
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            command = app.query_one("#command-copyable", TextArea).text
+            assert shlex.split(command) == app.collect_request().command_line()
+
+    _run(scenario())
+
+
+def test_the_backends_pane_is_current_when_you_look_at_it(tmp_path: Path):
+    """Its Layer B rows describe the current plan, so a mount-time snapshot lies."""
+    from textual.widgets import DataTable, Input, TabbedContent
+    from tui_app import WatermarkTuiApp
+
+    (tmp_path / "draft.txt").write_text(ZWSP, encoding="utf-8")
+    app = WatermarkTuiApp(CleanRequest(paths=(tmp_path,)))
+
+    def endpoint_row(table: DataTable) -> tuple:
+        for row in table.rows:
+            cells = table.get_row(row)
+            if cells[0] == "layer B endpoint":
+                return cells
+        raise AssertionError("no layer B endpoint row")
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            table = app.query_one("#backend-table", DataTable)
+            assert endpoint_row(table)[1] == "blocked"
+
+            app.query_one("#in-base-url", Input).value = "http://127.0.0.1:11434"
+            app.query_one(TabbedContent).active = "tab-backends"
+            for _ in range(6):
+                await pilot.pause()
+            assert endpoint_row(table)[1] == "allowed"
+
+    _run(scenario())
+
+
+def test_a_probe_result_survives_leaving_and_returning_to_the_pane(tmp_path: Path):
+    """Rebuilding the table must not throw away the probe the operator just ran."""
+    from textual.widgets import DataTable, TabbedContent
+    from tui_app import WatermarkTuiApp
+
+    (tmp_path / "draft.txt").write_text(ZWSP, encoding="utf-8")
+    app = WatermarkTuiApp(CleanRequest(paths=(tmp_path,)))
+
+    class _Probe:
+        backend = "ollama"
+        reachable = True
+        summary = "reachable, 2 model(s)"
+        models = ()
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._apply_probe(_Probe())
+            table = app.query_one("#backend-table", DataTable)
+            app.query_one(TabbedContent).active = "tab-plan"
+            await pilot.pause()
+            app.query_one(TabbedContent).active = "tab-backends"
+            for _ in range(6):
+                await pilot.pause()
+            labels = [table.get_row(row)[0] for row in table.rows]
+            assert "probe: ollama" in labels
+
+    _run(scenario())

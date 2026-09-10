@@ -33,6 +33,17 @@ REWRITTEN = f"A plainly worded replacement sentence.{ZWSP}"
 SOURCE = f"Delve into it.{ZWSP} Moreover, it is important to note this.\n"
 
 
+class _QuietServer(ThreadingHTTPServer):
+    """The streaming tests hang up mid-response on purpose.
+
+    ``socketserver`` prints a traceback for the resulting broken pipe, which is
+    expected here and only makes real failures harder to spot.
+    """
+
+    def handle_error(self, request, client_address):
+        return
+
+
 class _ChatHandler(BaseHTTPRequestHandler):
     replies: ClassVar[list[str]] = []
     seen: ClassVar[list[dict]] = []
@@ -58,7 +69,7 @@ class _ChatHandler(BaseHTTPRequestHandler):
 def chat_server():
     _ChatHandler.replies = []
     _ChatHandler.seen = []
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _ChatHandler)
+    server = _QuietServer(("127.0.0.1", 0), _ChatHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     yield f"http://127.0.0.1:{server.server_port}"
@@ -270,3 +281,231 @@ def test_tui_records_the_run_in_history_without_a_secret(chat_server, tmp_path: 
             assert "api-key" not in entry.command
 
     asyncio.run(scenario())
+
+
+# --- streaming ---------------------------------------------------------------
+
+
+class _StreamHandler(BaseHTTPRequestHandler):
+    mode: ClassVar[str] = "openai"
+    chunks: ClassVar[list[str]] = ["Hello ", "streamed ", "world."]
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        body = json.loads(self.rfile.read(length) or b"{}")
+        assert body.get("stream") is True, "streaming path must ask for a stream"
+        self.send_response(200)
+        self.send_header(
+            "Content-Type",
+            "text/event-stream" if self.mode == "openai" else "application/x-ndjson",
+        )
+        self.end_headers()
+        for chunk in self.chunks:
+            if self.mode == "openai":
+                line = json.dumps({"choices": [{"delta": {"content": chunk}}]})
+                self.wfile.write(f"data: {line}\n\n".encode())
+            else:
+                self.wfile.write(
+                    (json.dumps({"message": {"content": chunk}, "done": False}) + "\n").encode()
+                )
+            self.wfile.flush()
+        if self.mode == "openai":
+            self.wfile.write(b"data: [DONE]\n\n")
+        else:
+            self.wfile.write((json.dumps({"done": True}) + "\n").encode())
+        self.wfile.flush()
+
+    def log_message(self, *args):
+        return
+
+
+@pytest.fixture
+def stream_server():
+    server = _QuietServer(("127.0.0.1", 0), _StreamHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_port}"
+    server.shutdown()
+    server.server_close()
+
+
+def test_openai_stream_delivers_fragments_and_the_full_text(stream_server):
+    _StreamHandler.mode = "openai"
+    seen: list[str] = []
+    plan = build_rewrite_plan(_request(stream_server))
+    candidates = generate_candidates(SOURCE, plan, on_token=seen.append)
+    assert seen == ["Hello ", "streamed ", "world."]
+    assert candidates[0].text == "Hello streamed world."
+
+
+def test_ollama_stream_delivers_fragments(stream_server):
+    _StreamHandler.mode = "ollama"
+    seen: list[str] = []
+    plan = build_rewrite_plan(
+        _request(stream_server, rewrite_backend="ollama", rewrite_model="stub")
+    )
+    candidates = generate_candidates(SOURCE, plan, on_token=seen.append)
+    assert "".join(seen) == "Hello streamed world."
+    assert candidates[0].text == "Hello streamed world."
+
+
+def test_a_raising_token_sink_never_loses_the_generation(stream_server):
+    """The sink runs on the reader thread; its failure must not kill the read."""
+    _StreamHandler.mode = "openai"
+
+    def hostile(_fragment: str) -> None:
+        raise RuntimeError("callback exploded")
+
+    plan = build_rewrite_plan(_request(stream_server))
+    candidates = generate_candidates(SOURCE, plan, on_token=hostile)
+    assert candidates[0].text == "Hello streamed world."
+
+
+def test_streaming_without_a_sink_stays_on_the_non_streaming_path(chat_server):
+    """No sink means no stream: the plain request path is unchanged."""
+    plan = build_rewrite_plan(_request(chat_server))
+    generate_candidates(SOURCE, plan)
+    assert _ChatHandler.seen[0].get("stream") is not True
+
+
+class _FloodHandler(BaseHTTPRequestHandler):
+    """Emits one absurd line, then keeps going — an endpoint that lies about size."""
+
+    line_bytes: ClassVar[int] = (1 << 20) + 64
+    lines: ClassVar[int] = 1
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", "0")) or 0)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.end_headers()
+        filler = "x" * self.line_bytes
+        for _ in range(self.lines):
+            self.wfile.write((json.dumps({"message": {"content": filler}}) + "\n").encode())
+            self.wfile.flush()
+
+    def log_message(self, *args):
+        return
+
+
+@pytest.fixture
+def flood_server():
+    server = _QuietServer(("127.0.0.1", 0), _FloodHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_port}"
+    server.shutdown()
+    server.server_close()
+
+
+def test_a_single_stream_line_over_the_cap_is_refused(flood_server):
+    """A stream has no Content-Length, so the per-line cap is the only bound."""
+    from layer_b_http import LayerBHTTPError, stream_json_lines
+
+    _FloodHandler.line_bytes = (1 << 20) + 64
+    _FloodHandler.lines = 1
+    with pytest.raises(LayerBHTTPError, match="line exceeds safety limit"):
+        list(stream_json_lines(flood_server, "/api/chat", {}, timeout=10.0))
+
+
+def test_many_small_lines_still_hit_the_total_cap(flood_server):
+    """Under the per-line cap, the running total is what stops a flood."""
+    from layer_b_http import LayerBHTTPError, stream_json_lines
+
+    _FloodHandler.line_bytes = 4096
+    _FloodHandler.lines = 64
+    with pytest.raises(LayerBHTTPError, match="stream exceeds safety limit"):
+        list(
+            stream_json_lines(
+                flood_server,
+                "/api/chat",
+                {},
+                timeout=10.0,
+                response_limit=20_000,
+            )
+        )
+
+
+def test_a_stream_survives_keepalives_and_garbage_lines(stream_server):
+    """Providers interleave comments and blank lines; those are skipped, not fatal."""
+    from layer_b_http import stream_json_lines
+
+    _StreamHandler.mode = "openai"
+    _StreamHandler.chunks = ["a", "b"]
+    try:
+        objects = list(
+            stream_json_lines(stream_server, "/v1/chat/completions", {"stream": True}, timeout=10.0)
+        )
+    finally:
+        _StreamHandler.chunks = ["Hello ", "streamed ", "world."]
+    assert len(objects) == 2
+
+
+def test_the_clean_pipeline_streams_when_given_a_sink(stream_server, tmp_path):
+    """The Run pane's stream box is fed by the same seam the CLI cleans through."""
+    from clean_file import run_clean_item
+    from clean_request import build_clean_plan, resolve_kind
+
+    _StreamHandler.mode = "openai"
+    source = tmp_path / "note.txt"
+    source.write_text(SOURCE, encoding="utf-8")
+    request = _request(stream_server, paths=(source,))
+    plan = build_clean_plan(request, tmp_path / "note.clean.txt", resolve_kind(source, request))
+
+    seen: list[str] = []
+    payload = run_clean_item(
+        source, tmp_path / "note.clean.txt", request, plan, on_token=seen.append
+    )
+
+    assert "".join(seen) == "Hello streamed world."
+    assert payload["exit_code"] == 0
+    assert "Hello streamed world." in (tmp_path / "note.clean.txt").read_text(encoding="utf-8")
+
+
+def test_the_clean_pipeline_does_not_stream_without_a_sink(chat_server, tmp_path):
+    from clean_file import run_clean_item
+    from clean_request import build_clean_plan, resolve_kind
+
+    source = tmp_path / "note.txt"
+    source.write_text(SOURCE, encoding="utf-8")
+    request = _request(chat_server, paths=(source,))
+    plan = build_clean_plan(request, tmp_path / "note.clean.txt", resolve_kind(source, request))
+    run_clean_item(source, tmp_path / "note.clean.txt", request, plan)
+    assert _ChatHandler.seen[0].get("stream") is not True
+
+
+def test_a_backend_that_ignores_stream_still_produces_a_rewrite(chat_server, tmp_path):
+    """Asking to watch must not change whether the rewrite works.
+
+    ``_ChatHandler`` answers every request with a plain, non-streamed body — the
+    behaviour of any endpoint without SSE support.  Passing a sink used to turn
+    that into "empty content"; it now degrades to a single fragment.
+    """
+    from clean_file import run_clean_item
+    from clean_request import build_clean_plan, resolve_kind
+
+    source = tmp_path / "note.txt"
+    source.write_text(SOURCE, encoding="utf-8")
+    destination = tmp_path / "note.clean.txt"
+    request = _request(chat_server, paths=(source,))
+    plan = build_clean_plan(request, destination, resolve_kind(source, request))
+
+    seen: list[str] = []
+    payload = run_clean_item(source, destination, request, plan, on_token=seen.append)
+
+    assert _ChatHandler.seen[0].get("stream") is True
+    assert seen == [REWRITTEN]
+    assert payload["exit_code"] == 0
+    assert "plainly worded replacement" in destination.read_text(encoding="utf-8")
+
+
+def test_a_stream_that_yields_nothing_names_streaming_in_the_error(flood_server):
+    """The operator must not be sent hunting a working non-streaming endpoint."""
+    from rewrite_text import _stream_openai_compatible
+
+    _FloodHandler.line_bytes = 8
+    _FloodHandler.lines = 1
+    with pytest.raises(RuntimeError, match="may not support streaming"):
+        _stream_openai_compatible(
+            flood_server, "/v1/chat/completions", {}, {}, 10.0, lambda _: None
+        )

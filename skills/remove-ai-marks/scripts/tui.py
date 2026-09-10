@@ -62,6 +62,15 @@ RESULT_CLASS_STYLE = {
 #: Default Layer B timeout used for the batch cost estimate when none is set.
 DEFAULT_REWRITE_TIMEOUT = 120.0
 
+#: Border title for the Layer B stream pane when no rewrite is running.  An
+#: always-visible box that only fills on one code path reads as broken, so it
+#: says why it is empty rather than hiding.
+IDLE_STREAM_TITLE = "Layer B stream — no live rewrite in this plan"
+
+#: Characters kept in the live Layer B stream view.  A rewrite of a long
+#: document would otherwise grow the widget without bound while it runs.
+STREAM_VIEW_CHARS = 8000
+
 #: Worst-case seconds above which a run is worth stopping to confirm.  A single
 #: file with one candidate sits under this; a batch, or any TSAPA search, does
 #: not.  A gate that fires on every rewrite is a gate nobody reads.

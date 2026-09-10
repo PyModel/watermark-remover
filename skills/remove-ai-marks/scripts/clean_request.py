@@ -27,6 +27,7 @@ The CLI and the TUI both go through here, so a refusal is a refusal on both.
 from __future__ import annotations
 
 import math
+import shlex
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -267,8 +268,18 @@ class CleanRequest:
             )
         )
 
+    def command_string(self) -> str:
+        """``command_line`` as one shell-safe line, for display and copying.
+
+        Quoting is not cosmetic here: file names routinely carry spaces and
+        glob metacharacters, and a copyable command that silently splits
+        ``report[1] draft.txt`` into two arguments is worse than no command at
+        all.
+        """
+        return shlex.join(self.command_line())
+
     def command_line(self) -> list[str]:
-        """The ``wm`` invocation equivalent to this request.
+        """The ``wm`` invocation equivalent to this request, as argv.
 
         Rendered from the request, never from a built ``RewritePlan``, so an
         API key can never reach the string (``--rewrite-api-key`` has no CLI

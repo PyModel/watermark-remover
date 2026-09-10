@@ -25,12 +25,14 @@ Security notes:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import itertools
 import json
 import math
 import os
 import re
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
@@ -403,7 +405,115 @@ def build_prompt(strength: str, text: str, *, lang: str, original_lang: str) -> 
     raise ValueError(f"unknown strength: {strength}")
 
 
-def _call_ollama(base_url: str, model: str, prompt: str, timeout: float, temperature: float) -> str:
+#: Called with each new text fragment as it arrives. Used by front ends that
+#: want to show generation progress; the accumulated result is unchanged.
+TokenSink = Callable[[str], None]
+
+
+def _emit(on_token: TokenSink, fragment: str, parts: list[str]) -> None:
+    """Record a fragment and hand it to the sink, which must never break the read.
+
+    A front end's callback runs on whatever thread is draining the socket; if it
+    raises, the generation would be lost along with it.
+    """
+    parts.append(fragment)
+    with contextlib.suppress(Exception):
+        on_token(fragment)
+
+
+def _no_stream_content(backend: str) -> str:
+    """Message for a stream that produced nothing.
+
+    Worth naming streaming explicitly: the same endpoint may answer a plain
+    request perfectly well, so "empty content" alone sends the operator looking
+    at the wrong thing.
+    """
+    return (
+        f"{backend} returned no content over a streamed request; the endpoint may not "
+        "support streaming responses"
+    )
+
+
+def _stream_ollama(
+    base_url: str,
+    model: str,
+    prompt: str,
+    timeout: float,
+    temperature: float,
+    on_token: TokenSink,
+) -> str:
+    parts: list[str] = []
+    for event in layer_b_http.stream_json_lines(
+        base_url,
+        "/api/chat",
+        {
+            "model": model,
+            "stream": True,
+            "messages": [{"role": "user", "content": prompt}],
+            "options": {"temperature": temperature},
+        },
+        timeout=timeout,
+    ):
+        message = event.get("message")
+        if isinstance(message, dict):
+            fragment = message.get("content")
+            if isinstance(fragment, str) and fragment:
+                _emit(on_token, fragment, parts)
+        if event.get("done") is True:
+            break
+    out = "".join(parts).strip()
+    if not out:
+        raise RuntimeError(_no_stream_content("ollama"))
+    return out
+
+
+def _stream_openai_compatible(
+    base_url: str,
+    route: str,
+    payload: dict,
+    headers: dict[str, str],
+    timeout: float,
+    on_token: TokenSink,
+) -> str:
+    parts: list[str] = []
+    for event in layer_b_http.stream_json_lines(
+        base_url,
+        route,
+        {**payload, "stream": True},
+        headers=headers,
+        timeout=timeout,
+    ):
+        choices = event.get("choices")
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            continue
+        # ``delta`` is a streamed chunk; ``message`` is what a server that
+        # ignored ``stream: true`` sends back instead.  Accepting both means a
+        # backend without SSE support degrades to one big fragment rather than
+        # failing only when a front end asks to watch.
+        chunk = choices[0].get("delta")
+        if not isinstance(chunk, dict):
+            chunk = choices[0].get("message")
+        if isinstance(chunk, dict):
+            fragment = chunk.get("content")
+            if isinstance(fragment, str) and fragment:
+                _emit(on_token, fragment, parts)
+    out = "".join(parts).strip()
+    if not out:
+        raise RuntimeError(_no_stream_content("openai-compatible"))
+    return out
+
+
+def _call_ollama(
+    base_url: str,
+    model: str,
+    prompt: str,
+    timeout: float,
+    temperature: float,
+    *,
+    on_token: TokenSink | None = None,
+) -> str:
+    if on_token is not None:
+        return _stream_ollama(base_url, model, prompt, timeout, temperature, on_token)
     data = layer_b_http.request_json(
         base_url,
         "/api/chat",
@@ -434,6 +544,7 @@ def _call_openai_compatible(
     temperature: float = 0.9,
     reasoning_effort: str | None = None,
     disable_thinking: bool = False,
+    on_token: TokenSink | None = None,
 ) -> str:
     route = "/v1/chat/completions"
     headers: dict[str, str] = {}
@@ -453,6 +564,8 @@ def _call_openai_compatible(
         # Supported by Qwen/Transformers-compatible servers; opt-in so generic
         # OpenAI-compatible endpoints never receive an unknown extension.
         payload["chat_template_kwargs"] = {"enable_thinking": False}
+    if on_token is not None:
+        return _stream_openai_compatible(base_url, route, payload, headers, timeout, on_token)
     data = layer_b_http.request_json(base_url, route, payload, headers=headers, timeout=timeout)
     choices = data.get("choices")
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
@@ -466,7 +579,14 @@ def _call_openai_compatible(
     return content.strip()
 
 
-def rewrite(text: str, plan: RewritePlan) -> tuple[str, dict]:
+def rewrite(text: str, plan: RewritePlan, *, on_token: TokenSink | None = None) -> tuple[str, dict]:
+    """Run the planned Layer B rewrite and return ``(text, info)``.
+
+    *on_token*, when given, receives generated fragments as they arrive so a
+    front end can show progress.  It is a presentation callback only: it never
+    influences the result, and it is not honoured for ``tsapa``, whose calls are
+    an internal evolutionary population rather than one visible generation.
+    """
     if not isinstance(text, str):
         raise TypeError("text must be a string")
     if not isinstance(plan, RewritePlan):
@@ -535,7 +655,9 @@ def rewrite(text: str, plan: RewritePlan) -> tuple[str, dict]:
     outs: list[str] = []
     for _ in range(n):
         if backend == "ollama":
-            outs.append(_call_ollama(base_url, model, prompt, timeout, temperature))
+            outs.append(
+                _call_ollama(base_url, model, prompt, timeout, temperature, on_token=on_token)
+            )
         elif backend == "openai-compatible":
             outs.append(
                 _call_openai_compatible(
@@ -547,6 +669,7 @@ def rewrite(text: str, plan: RewritePlan) -> tuple[str, dict]:
                     temperature=temperature,
                     reasoning_effort=reasoning_effort,
                     disable_thinking=disable_thinking,
+                    on_token=on_token,
                 )
             )
         else:
@@ -592,7 +715,12 @@ class RewriteCandidate:
     selected: bool
 
 
-def generate_candidates(text: str, plan: RewritePlan) -> list[RewriteCandidate]:
+def generate_candidates(
+    text: str,
+    plan: RewritePlan,
+    *,
+    on_token: TokenSink | None = None,
+) -> list[RewriteCandidate]:
     """Generate every candidate and score them, without discarding the losers.
 
     ``rewrite`` returns only the winner — correct for a pipeline, useless for a
@@ -604,6 +732,10 @@ def generate_candidates(text: str, plan: RewritePlan) -> list[RewriteCandidate]:
 
     Not supported for ``tsapa``, whose candidates are an internal evolutionary
     population rather than N independent generations.
+
+    When *on_token* is given, each backend call streams and the sink receives
+    fragments as they arrive, so a front end can show generation in progress
+    instead of a spinner.
     """
     if not isinstance(plan, RewritePlan):
         raise TypeError("plan must be a RewritePlan")
@@ -624,7 +756,14 @@ def generate_candidates(text: str, plan: RewritePlan) -> list[RewriteCandidate]:
     for _ in range(max(1, plan.candidates)):
         if plan.backend == "ollama":
             outs.append(
-                _call_ollama(plan.base_url, plan.model, prompt, plan.timeout, plan.temperature)
+                _call_ollama(
+                    plan.base_url,
+                    plan.model,
+                    prompt,
+                    plan.timeout,
+                    plan.temperature,
+                    on_token=on_token,
+                )
             )
         else:
             outs.append(
@@ -637,6 +776,7 @@ def generate_candidates(text: str, plan: RewritePlan) -> list[RewriteCandidate]:
                     temperature=plan.temperature,
                     reasoning_effort=plan.reasoning_effort,
                     disable_thinking=plan.disable_thinking,
+                    on_token=on_token,
                 )
             )
 

@@ -130,6 +130,24 @@ Prefer a rewrite model different from the suspected origin. Preserve facts, numb
 
 `clean_file.py --tsapa` refuses to run without a live backend; it never writes a prompt into the user’s output or silently falls back.
 
+Layer B in one pass with the deterministic clean, over one file or a whole tree
+(every strength, not just tsapa):
+
+```bash
+python3 "$SCRIPTS/clean_file.py" INPUT -o OUTPUT \
+  --rewrite humanize \
+  --rewrite-backend openai-compatible \
+  --rewrite-base-url http://127.0.0.1:8000 \
+  --rewrite-model my-model \
+  --rewrite-candidates 3
+```
+
+Settings resolve explicit flag > `WATERMARKS_REWRITE_*` environment > default, so
+a configured environment works with a bare `--rewrite`. Non-loopback endpoints
+need `--rewrite-allow-remote`. On a non-text asset the text-body options are
+deliberate no-ops — mixed batches depend on that — and the run reports which
+transforms it skipped.
+
 ### 6. Character perturbation — explicit opt-in only
 
 ```bash
@@ -162,6 +180,17 @@ Always include:
 - residual warnings (soft binding, remote manifest, pixel/audio/video signal);
 - output paths and whether a `.bak` was created;
 - ethics: owned content, no fraudulent authorship/compliance claim.
+
+## Interactive surface
+
+`wm-tui` (install `watermark-remover[tui]`) drives this same workflow with the
+before/after evidence on screen: Layer A carrier counts, stylometry, and the
+Layer B token stream side by side, plus the equivalent `wm …` command for every
+run so the result is reproducible outside the UI. It fills a `CleanRequest` and
+goes through `clean_request.plan_work` / `clean_file.run_clean_item`, so every
+refusal documented here applies there unchanged. It never displays or persists
+an API key, and it labels results by layer — Verifiable, Best-effort,
+Detection-only — never by outcome.
 
 ## Hard limits
 
