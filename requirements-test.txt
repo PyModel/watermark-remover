@@ -1,7 +1,7 @@
 # Test/lint dependencies for local dev and CI.
 pytest>=9.1.1,<10
 pypdf>=6.16.2,<7
-ruff>=0.16.5,<1
+ruff>=0.16.6,<1
 # OpenAPI contract validation for wm-serve (CI validates /openapi.json).
 openapi-spec-validator==0.9.0
 # Interactive TUI (wm-tui) — installed so CI actually exercises the tui tests.
