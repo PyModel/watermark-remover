@@ -97,7 +97,7 @@ def test_openapi_spec_covers_all_endpoints(conn):
     status, body = _get(conn, "/openapi.json")
     assert status == 200
     assert body["openapi"] == "3.0.3"
-    assert body["info"]["title"] == "watermarks-remover service"
+    assert body["info"]["title"] == "watermark-remover service"
     expected = {
         "/health": {"get"},
         "/capabilities": {"get"},

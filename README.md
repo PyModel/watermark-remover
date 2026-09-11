@@ -25,7 +25,7 @@ The core runs on Python 3.10+ using the standard library only. Anything that nee
 | **V** | Visible image logos and overlays | Mask, hole fill, dilation, inpaint, restore | Mask removal verifiable, fidelity best-effort |
 | **M** | C2PA, EXIF, XMP, document properties | Format-aware metadata rewrite | Verifiable per format |
 | Soft binding | Remote manifests, in-content binding | Detection and warning only | Detection only |
-| SynthID | Pixel-domain SynthID-class signal | Optional external adapter | Score only |
+| SynthID | Pixel-domain SynthID-class signal | Optional external adapter | Score + best-effort removal |
 
 Optional edges, none required by the core:
 
