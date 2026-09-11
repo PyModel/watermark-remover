@@ -52,7 +52,7 @@ def _json_ok(payload: dict[str, Any]) -> bytes:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = f"watermarks-remover-synthid/{VERSION}"
+    server_version = f"watermark-remover-synthid/{VERSION}"
 
     def log_message(self, fmt: str, *args: object) -> None:
         print(f"{self.address_string()} - {fmt % args}", file=sys.stderr)

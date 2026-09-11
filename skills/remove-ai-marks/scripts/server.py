@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""HTTP service exposing the watermarks-remover cleaning pipeline.
+"""HTTP service exposing the watermark-remover cleaning pipeline.
 
 Stdlib-only. The agent skill and any web app can call it over HTTP instead of
 running the CLI scripts locally.
@@ -403,7 +403,7 @@ def openapi_spec() -> dict[str, Any]:
     spec: dict[str, Any] = {
         "openapi": "3.0.3",
         "info": {
-            "title": "watermarks-remover service",
+            "title": "watermark-remover service",
             "version": VERSION,
             "description": "Strip multi-vendor AI provenance marks (Unicode, C2PA/EXIF/XMP, containers). "
             "Files are passed base64-encoded in JSON; cleaned bytes come back base64-encoded.",
@@ -462,7 +462,7 @@ def _decode_input(body: dict[str, Any]) -> tuple[bytes, str]:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = f"watermarks-remover/{VERSION}"
+    server_version = f"watermark-remover/{VERSION}"
 
     def log_message(self, fmt: str, *args: object) -> None:
         eprint(f"{self.address_string()} - {fmt % args}")
@@ -785,7 +785,7 @@ def main() -> int:
         eprint("warning: no API key set — only bind to loopback or a trusted network")
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
-    eprint(f"watermarks-remover service {VERSION} on http://{args.host}:{args.port}")
+    eprint(f"watermark-remover service {VERSION} on http://{args.host}:{args.port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
