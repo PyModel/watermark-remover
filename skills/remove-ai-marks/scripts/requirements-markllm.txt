@@ -10,12 +10,14 @@
 #
 # Pillow is pinned to 12.3.0 (same as requirements-synthid-scorer.txt) for
 # the 24 known CVEs fixed after the upstream 9.4.0 pin.
-# torch is pinned with a wildcard so a platform wheel (e.g. 2.13.0+cpu from
-# the CPU index, or 2.13.0+cuXXX from a GPU index) satisfies it. Installers
+# torch is pinned without a local label, so a platform wheel (e.g. 2.14.0+cpu
+# from the CPU index, or 2.14.0+cuXXX from a GPU index) satisfies it (PEP 440
+# ignores the candidate's local label). No ".*" wildcard: dependency review
+# cannot parse one and matches every old torch advisory against it. Installers
 # pick the right index first (Dockerfile.markllm: CPU; setup_markllm.sh:
 # GPU when nvidia-smi is present), then this file's remaining pins resolve
 # against the already-installed torch.
-torch==2.13.0.*
+torch==2.14.0
 transformers==5.16.1
 # transformers 5.15.0 caps tokenizers at <=0.23.0; there is no 0.23.0
 # release (0.22.2 -> 0.23.1), so the highest compatible pin is 0.22.2.
@@ -25,10 +27,10 @@ accelerate==1.15.0
 SentencePiece==0.2.2
 nltk==3.10.3
 jieba==0.42.1
-tqdm==4.70.0
-matplotlib==3.11.1
+tqdm==4.70.1
+matplotlib==3.11.2
 Cython==3.3.0
-numpy==2.5.2
+numpy==2.5.3
 scipy==1.18.1
-huggingface_hub==1.30.0
+huggingface_hub==1.32.0
 Pillow==12.3.0
