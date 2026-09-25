@@ -66,7 +66,7 @@ def _bomb_value() -> bytes:
 def test_ztext_bomb_fails_closed():
     """A zTXt chunk expanding past the cap yields no AI finding (fail closed)."""
     data = _minimal_png_with_text_chunk(b"zTXt", _ztext_payload(_bomb_value()))
-    has_c2pa, has_ai, findings = inspect_png(data)
+    has_c2pa, has_ai, findings, _notes = inspect_png(data)
     assert has_c2pa is False
     assert has_ai is False
     assert not any("AI generator" in f for f in findings)
@@ -75,7 +75,7 @@ def test_ztext_bomb_fails_closed():
 def test_itext_compressed_bomb_fails_closed():
     """A compressed iTXt chunk expanding past the cap also fails closed."""
     data = _minimal_png_with_text_chunk(b"iTXt", _itext_compressed_payload(_bomb_value()))
-    has_c2pa, has_ai, findings = inspect_png(data)
+    has_c2pa, has_ai, findings, _notes = inspect_png(data)
     assert has_c2pa is False
     assert has_ai is False
     assert not any("AI generator" in f for f in findings)
@@ -85,7 +85,7 @@ def test_large_under_cap_ztext_still_detected():
     """Legitimate large compressed text under the cap still flags the generator."""
     value = b"ChatGPT" + b"x" * (LARGE_BUT_OK_BYTES - len(b"ChatGPT"))
     data = _minimal_png_with_text_chunk(b"zTXt", _ztext_payload(value))
-    has_c2pa, has_ai, findings = inspect_png(data)
+    has_c2pa, has_ai, findings, _notes = inspect_png(data)
     assert has_c2pa is False
     assert has_ai is True
     assert any("AI generator" in f and "ChatGPT" in f for f in findings)
@@ -94,7 +94,7 @@ def test_large_under_cap_ztext_still_detected():
 def test_compressed_itext_still_detected():
     """The compressed iTXt path (comp-flag=1) still flags the generator."""
     data = _minimal_png_with_text_chunk(b"iTXt", _itext_compressed_payload(b"ChatGPT"))
-    has_c2pa, has_ai, findings = inspect_png(data)
+    has_c2pa, has_ai, findings, _notes = inspect_png(data)
     assert has_c2pa is False
     assert has_ai is True
     assert any("AI generator" in f and "ChatGPT" in f for f in findings)

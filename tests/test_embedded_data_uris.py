@@ -28,13 +28,13 @@ def test_svg_embedded_png_c2pa_cleaned():
     svg_data = f"""<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
   <image width="100" height="100" xlink:href="data:image/png;base64,{png_b64}" />
 </svg>""".encode()
-    has_c2pa, has_ai, findings, _ = inspect_svg(svg_data)
+    has_c2pa, has_ai, findings, _notes, _ = inspect_svg(svg_data)
     assert has_c2pa is True
     assert has_ai is True
     assert any("embedded data:image/png" in f for f in findings)
     cleaned_bytes, actions = clean_svg(svg_data)
-    assert any("cleaned embedded data:image/png" in a for a in actions)
-    has_c2pa_after, has_ai_after, _, _ = inspect_svg(cleaned_bytes)
+    assert any("cleaned embedded data:image/png" in a.text for a in actions)
+    has_c2pa_after, has_ai_after, _, _notes, _ = inspect_svg(cleaned_bytes)
     assert has_c2pa_after is False
     assert has_ai_after is False
     assert b"c2pa" not in cleaned_bytes.lower()
@@ -48,8 +48,8 @@ def test_svg_embedded_base64_with_newlines():
   <image href="data:image/png;base64,{multiline_b64}" />
 </svg>""".encode()
     cleaned_bytes, actions = clean_svg(svg_data)
-    assert any("cleaned embedded data:image/png" in a for a in actions)
-    has_c2pa, _, _, _ = inspect_svg(cleaned_bytes)
+    assert any("cleaned embedded data:image/png" in a.text for a in actions)
+    has_c2pa, _, _, _notes, _ = inspect_svg(cleaned_bytes)
     assert has_c2pa is False
 
 
@@ -63,14 +63,14 @@ def test_html_embedded_jpeg_c2pa_cleaned():
   <img src="data:image/jpeg;base64,{jpeg_b64}" alt="test" />
 </body>
 </html>"""
-    has_c2pa, has_ai, findings, _ = inspect_html(html_text)
+    has_c2pa, has_ai, findings, _notes, _ = inspect_html(html_text)
     assert has_c2pa is True
     assert has_ai is True
     assert any("embedded data:image/jpeg" in f for f in findings)
     cleaned_text, actions = clean_html(html_text)
-    assert any("cleaned embedded data:image/jpeg" in a for a in actions)
+    assert any("cleaned embedded data:image/jpeg" in a.text for a in actions)
     assert "c2pa-manifest-fake" not in cleaned_text
-    has_c2pa_after, has_ai_after, _, _ = inspect_html(cleaned_text)
+    has_c2pa_after, has_ai_after, _, _notes, _ = inspect_html(cleaned_text)
     assert has_c2pa_after is False
     assert has_ai_after is False
 
@@ -86,11 +86,11 @@ author: Dev
 Here is an image:
 ![diagram](data:image/png;base64,{png_b64})
 """
-    has_c2pa, _, findings, _ = inspect_markdown(md_text)
+    has_c2pa, _, findings, _notes, _ = inspect_markdown(md_text)
     assert has_c2pa is True
     assert any("embedded data:image/png" in f for f in findings)
     cleaned_text, actions = clean_markdown(md_text)
-    assert any("cleaned embedded data:image/png" in a for a in actions)
+    assert any("cleaned embedded data:image/png" in a.text for a in actions)
     assert "c2pa" not in cleaned_text.lower()
 
 
@@ -105,7 +105,7 @@ def test_already_clean_embedded_image_no_op():
     html_text = f'<img src="data:image/png;base64,{png_b64}">'
     cleaned_text, actions = clean_html(html_text)
     assert cleaned_text == html_text
-    assert "no HTML AI meta removed" in actions
+    assert [a.text for a in actions] == ["no HTML AI meta removed"]
 
 
 def test_corrupted_data_uri_graceful_fallback():
@@ -118,10 +118,10 @@ def test_nested_svg_data_uri_cleaned():
     nested_svg = '<svg><metadata><ai:GeneratedBy>DALL-E</ai:GeneratedBy></metadata><rect width="10" height="10"/></svg>'
     nested_b64 = base64.b64encode(nested_svg.encode("utf-8")).decode("ascii")
     parent_html = f'<img src="data:image/svg+xml;base64,{nested_b64}">'
-    _has_c2pa, has_ai, _, _ = inspect_html(parent_html)
+    _has_c2pa, has_ai, _, _notes, _ = inspect_html(parent_html)
     assert has_ai is True
     cleaned_html, actions = clean_html(parent_html)
-    assert any("cleaned embedded data:image/svg+xml" in a for a in actions)
+    assert any("cleaned embedded data:image/svg+xml" in a.text for a in actions)
     assert "DALL-E" not in base64.b64decode(cleaned_html.split("base64,")[1].split('"')[0]).decode(
         "utf-8"
     )

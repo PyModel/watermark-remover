@@ -41,6 +41,10 @@ def main() -> int:
             print("Findings:")
             for f in report.findings:
                 print(f"  - [{classify_finding_confidence(f)}] {f}")
+        if report.notes:
+            print("Notes:")
+            for note in report.notes:
+                print(f"  - {note}")
         ct = report.tools.get("c2patool") or {}
         print(f"c2patool: {'yes' if ct.get('available') else 'no'}")
         et = report.tools.get("exiftool") or {}

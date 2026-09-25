@@ -172,7 +172,7 @@ def _inspect_asset(
             "kind": "container",
             "path": str(path),
             **report.to_dict(),
-            "suspicious": report.has_c2pa or report.has_ai_metadata,
+            "suspicious": report.has_c2pa or report.has_ai_metadata or report.layer_a_total > 0,
         },
         None,
     )
@@ -213,6 +213,8 @@ def _inspect_single(path: Path, args) -> dict:
     print(f"AI metadata: {result.get('has_ai_metadata')}")
     for finding in result.get("findings", []):
         print(f"  - {finding}")
+    for note in result.get("notes", []):
+        print(f"  note: {note}")
     if kind == "image" and result.get("soft_binding", {}).get("soft_binding", {}).get("found"):
         print(f"Soft binding: {result['soft_binding']['soft_binding']['labels']}")
     return result

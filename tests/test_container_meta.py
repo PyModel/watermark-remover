@@ -59,14 +59,14 @@ ai_generated: true
 ---
 Body\u200b text.
 """
-    _c2, has_ai, findings, _d = inspect_markdown(text)
+    _c2, has_ai, findings, _notes, _d = inspect_markdown(text)
     assert has_ai
     assert any("generator" in f or "ai" in f.lower() for f in findings)
     cleaned, actions = clean_markdown(text)
     assert "generator:" not in cleaned
     assert "ai_generated:" not in cleaned
     assert "title: Hello" in cleaned
-    assert any("drop" in a for a in actions)
+    assert any("drop" in a.text for a in actions)
 
 
 def test_markdown_frontmatter_with_blank_line_does_not_crash():
@@ -86,14 +86,14 @@ def test_markdown_drops_nested_children_of_dropped_key():
     assert "version: 4" not in cleaned
     assert "title: Demo" in cleaned  # siblings untouched
     assert "author: you" in cleaned
-    assert any("drop frontmatter key: model" in a for a in actions)
+    assert any("drop frontmatter key: model" in a.text for a in actions)
 
 
 def test_markdown_clean_output_is_no_longer_flagged():
     """Round-trip: re-inspecting a cleaned document reports nothing AI-ish."""
     text = "---\ntitle: Demo\nmodel:\n  name: claude-opus\ngenerator: Claude\n---\nBody\n"
     cleaned, _ = clean_markdown(text)
-    _c2, has_ai, findings, _d = inspect_markdown(cleaned)
+    _c2, has_ai, findings, _notes, _d = inspect_markdown(cleaned)
     assert not has_ai, findings
 
 
@@ -110,21 +110,22 @@ def test_html_meta_strip():
 <meta name="viewport" content="width=device-width">
 <meta name="description" content="ok">
 </head><body data-ai-model="gpt">Hi</body></html>"""
-    _c2, has_ai, _findings, _ = inspect_html(html)
+    _c2, has_ai, _findings, _notes, _ = inspect_html(html)
     assert has_ai
     cleaned, actions = clean_html(html)
     assert "ChatGPT" not in cleaned
     assert "viewport" in cleaned
     assert "data-ai-model" not in cleaned
-    assert any("drop" in a for a in actions)
+    assert any("drop" in a.text for a in actions)
 
 
 def test_html_cms_generator_not_ai():
     html = '<meta name="generator" content="WordPress 6.0">'
-    has_c2pa, has_ai, findings, _ = inspect_html(html)
+    has_c2pa, has_ai, findings, notes, _ = inspect_html(html)
     assert not has_c2pa
     assert not has_ai
-    assert any("cms" in f for f in findings)
+    assert findings == []
+    assert any("cms" in note for note in notes)
 
 
 def test_html_cms_generator_preserved_by_clean():
@@ -139,10 +140,11 @@ def test_html_cms_generator_attribute_names_are_case_insensitive():
         '<META NAME="generator" CONTENT="WordPress 6.0">',
         '<meta Name="generator" Content="WordPress 6.0">',
     ):
-        has_c2pa, has_ai, findings, _ = inspect_html(html)
+        has_c2pa, has_ai, findings, notes, _ = inspect_html(html)
         assert not has_c2pa
         assert not has_ai
-        assert any("cms" in finding for finding in findings)
+        assert findings == []
+        assert any("cms" in note for note in notes)
         assert clean_html(html)[0] == html
 
     ai_html = '<META NAME="generator" CONTENT="Claude">'
@@ -154,7 +156,7 @@ def test_html_ai_generator_still_dropped():
     html = '<meta name="generator" content="Claude">'
     cleaned, actions = clean_html(html)
     assert "Claude" not in cleaned
-    assert any("drop" in a for a in actions)
+    assert any("drop" in a.text for a in actions)
 
 
 def test_pdf_stream_byte_collision_not_ai(tmp_path: Path):
@@ -163,7 +165,7 @@ def test_pdf_stream_byte_collision_not_ai(tmp_path: Path):
     pdf = b"%PDF-1.4\n1 0 obj<< /Length 4 >>stream\nAIGC\nendstream\nendobj\n%%EOF\n"
     src = tmp_path / "collision.pdf"
     src.write_bytes(pdf)
-    has_c2pa, has_ai, _findings, _ = inspect_pdf(src, pdf)
+    has_c2pa, has_ai, _findings, _notes, _ = inspect_pdf(src, pdf)
     assert not has_c2pa
     assert not has_ai
 
@@ -174,12 +176,12 @@ def test_svg_metadata():
   <metadata>c2pa contentcredentials Anthropic</metadata>
   <circle cx="1" cy="1" r="1"/>
 </svg>"""
-    has_c2pa, has_ai, _findings, _ = inspect_svg(svg)
+    has_c2pa, has_ai, _findings, _notes, _ = inspect_svg(svg)
     assert has_c2pa or has_ai
     cleaned, actions = clean_svg(svg)
     assert b"<metadata" not in cleaned.lower() or b"c2pa" not in cleaned.lower()
     assert b"<circle" in cleaned
-    assert any("metadata" in a or "drop" in a for a in actions)
+    assert any("metadata" in a.text or "drop" in a.text for a in actions)
 
 
 def _make_docx_with_app(app_name: str = "Claude AI Writer") -> bytes:
@@ -213,7 +215,9 @@ def _make_docx_with_app(app_name: str = "Claude AI Writer") -> bytes:
 def test_docx_strips_app_and_customxml(tmp_path: Path):
     data = _make_docx_with_app()
     cleaned, actions = clean_docx(data)
-    assert any("customXml" in a or "Application" in a or "drop" in a for a in actions)
+    assert any(
+        "customXml" in a.text or "Application" in a.text or "drop" in a.text for a in actions
+    )
     with zipfile.ZipFile(io.BytesIO(cleaned)) as zf:
         names = zf.namelist()
         assert "word/document.xml" in names
@@ -288,7 +292,7 @@ def test_docx_dropped_customxml_prunes_dangling_relationships():
         assert 'Target="document.xml"' in rels
         assert 'TargetMode="External"' in rels
     assert _dangling_rels(cleaned) == []
-    assert any("prune dangling relationships" in a for a in actions)
+    assert any("prune dangling relationships" in a.text for a in actions)
 
 
 def _make_docx_with_body_text(body_text: str = "Claude wrote this.") -> bytes:
@@ -320,7 +324,7 @@ def test_docx_body_vendor_word_is_not_ai_metadata():
     from container_meta import inspect_docx
 
     data = _make_docx_with_body_text()
-    has_c2pa, has_ai, findings, _ = inspect_docx(data)
+    has_c2pa, has_ai, findings, _notes, _ = inspect_docx(data)
     assert not has_c2pa
     assert not has_ai
     assert not any("Claude" in f for f in findings)
@@ -330,7 +334,7 @@ def test_docx_metadata_vendor_word_is_still_flagged():
     from container_meta import inspect_docx
 
     data = _make_docx_with_app("Claude AI Writer")
-    _has_c2pa, has_ai, findings, _ = inspect_docx(data)
+    _has_c2pa, has_ai, findings, _notes, _ = inspect_docx(data)
     assert has_ai
     assert any("Claude" in f for f in findings)
 
@@ -450,8 +454,8 @@ def test_docx_scrubs_docprops_provenance_fields_unconditionally():
     ET.fromstring(core)  # noqa: S314
     ET.fromstring(app)  # noqa: S314
 
-    assert any("scrub docProps/core.xml field dc:creator" in a for a in actions)
-    assert any("drop part docProps/custom.xml" in a for a in actions)
+    assert any("scrub docProps/core.xml field dc:creator" in a.text for a in actions)
+    assert any("drop part docProps/custom.xml" in a.text for a in actions)
 
 
 def test_docx_docprops_scrub_clears_residual_warning(tmp_path: Path):
@@ -467,7 +471,7 @@ def test_docx_docprops_scrub_clears_residual_warning(tmp_path: Path):
 def test_docx_layer_a_strips_invisible_body_chars():
     data = _make_docx_with_invisible_body()
     cleaned, actions = clean_docx(data)
-    assert any(a.startswith("layer A text: removed=") for a in actions)
+    assert any(a.text.startswith("layer A text: removed=") for a in actions)
     with zipfile.ZipFile(io.BytesIO(cleaned)) as zf:
         doc = zf.read("word/document.xml").decode()
         assert "Hello\u200b" not in doc
@@ -481,7 +485,7 @@ def test_docx_layer_a_strips_invisible_body_chars():
 def test_docx_layer_a_can_be_disabled():
     data = _make_docx_with_invisible_body()
     cleaned, actions = clean_docx(data, also_layer_a_text=False)
-    assert not any(a.startswith("layer A text:") for a in actions)
+    assert not any(a.text.startswith("layer A text:") for a in actions)
     with zipfile.ZipFile(io.BytesIO(cleaned)) as zf:
         assert "Hello\u200b" in zf.read("word/document.xml").decode()
 
@@ -492,6 +496,12 @@ def test_docx_layer_a_via_clean_container(tmp_path: Path):
     dest = tmp_path / "out.docx"
     result = clean_container(src, dest)
     assert any(a.startswith("layer A text: removed=") for a in result["actions"])
+    # Each human line has a structured twin, in order, so no consumer parses text.
+    details = result["action_details"]
+    assert [d["text"] for d in details] == result["actions"]
+    [layer_a] = [d for d in details if d["code"] == "layer_a_text"]
+    assert layer_a["effect"] == "change"
+    assert layer_a["params"] == {"removed": 3, "replaced": 1}
     with zipfile.ZipFile(dest) as zf:
         doc = zf.read("word/document.xml").decode()
         assert "Hello\u200b" not in doc
@@ -518,7 +528,7 @@ def _make_odt_with_invisible_text() -> bytes:
 def test_odt_layer_a_strips_invisible_text():
     data = _make_odt_with_invisible_text()
     cleaned, actions = clean_odt(data)
-    assert any(a.startswith("layer A text: removed=") for a in actions)
+    assert any(a.text.startswith("layer A text: removed=") for a in actions)
     with zipfile.ZipFile(io.BytesIO(cleaned)) as zf:
         content = zf.read("content.xml").decode()
         assert "\u200b" not in content
@@ -548,7 +558,7 @@ def _make_odt(generator: str = "Anthropic Claude") -> bytes:
 def test_odt_drops_generator(tmp_path: Path):
     data = _make_odt()
     cleaned, actions = clean_odt(data)
-    assert any("generator" in a for a in actions)
+    assert any("generator" in a.text for a in actions)
     with zipfile.ZipFile(io.BytesIO(cleaned)) as zf:
         meta = zf.read("meta.xml").decode()
         assert "Claude" not in meta
@@ -568,7 +578,7 @@ def test_odt_drops_marked_non_metadata_part_and_prunes_manifest():
         {"Pictures/vendor-note.txt": b"OpenAI Claude c2pa business data"},
     )
     cleaned, actions = clean_odt(data)
-    assert any("drop part Pictures/vendor-note.txt" in a for a in actions)
+    assert any("drop part Pictures/vendor-note.txt" in a.text for a in actions)
     with zipfile.ZipFile(io.BytesIO(cleaned)) as zf:
         assert "Pictures/vendor-note.txt" not in zf.namelist()
         manifest = zf.read("META-INF/manifest.xml").decode()
@@ -604,8 +614,8 @@ def test_odt_dropped_part_removes_manifest_entry():
         extra_parts={"custommeta.xml": b"<meta><creator>Anthropic Claude</creator></meta>"},
     )
     cleaned, actions = clean_odt(data)
-    assert any("drop part custommeta.xml" in a for a in actions)
-    assert any("drop manifest entries" in a for a in actions)
+    assert any("drop part custommeta.xml" in a.text for a in actions)
+    assert any("drop manifest entries" in a.text for a in actions)
     with zipfile.ZipFile(io.BytesIO(cleaned)) as zf:
         assert zf.namelist().count("META-INF/manifest.xml") == 1
         manifest = zf.read("META-INF/manifest.xml").decode()
@@ -641,7 +651,7 @@ def test_odt_manifest_untouched_when_nothing_dropped():
         extra_parts={},
     )
     cleaned, actions = clean_odt(data)
-    assert not any("manifest" in a for a in actions)
+    assert not any("manifest" in a.text for a in actions)
     with zipfile.ZipFile(io.BytesIO(cleaned)) as zf:
         manifest = zf.read("META-INF/manifest.xml").decode()
         assert 'full-path="content.xml"' in manifest
@@ -743,7 +753,7 @@ def test_docx_rejects_suspicious_compression_ratio():
         assert "compression ratio" in str(error)
     else:
         raise AssertionError("expected zip-bomb rejection")
-    _c2pa, _ai, findings, _ = inspect_docx(data)
+    _c2pa, _ai, findings, _notes, _ = inspect_docx(data)
     assert any("unsafe/invalid" in finding for finding in findings)
 
 
@@ -818,8 +828,8 @@ def test_inspect_container_truncated_zip():
     truncated = bytes([0x50, 0x4B, 0x03, 0x04]) + bytes(8)
     garbage = b"not a zip at all"
     for data in (truncated, garbage):
-        assert inspect_docx(data) == (False, False, ["not a valid DOCX zip"], {})
-        assert inspect_odt(data) == (False, False, ["not a valid ODT zip"], {})
+        assert inspect_docx(data) == (False, False, ["not a valid DOCX zip"], [], {})
+        assert inspect_odt(data) == (False, False, ["not a valid ODT zip"], [], {})
         assert detect_container_format(Path("x.bin"), data) == "unknown"
 
 
@@ -849,7 +859,7 @@ def test_pdf_degraded_clean_without_crash(tmp_path: Path):
     src = tmp_path / "t.pdf"
     dest = tmp_path / "t.cleaned.pdf"
     src.write_bytes(pdf)
-    has_c2pa, has_ai, findings, _ = inspect_pdf(src, pdf)
+    has_c2pa, has_ai, findings, _notes, _ = inspect_pdf(src, pdf)
     assert has_ai or has_c2pa or findings
     actions, meta = clean_pdf(src, dest)
     assert dest.is_file()
@@ -902,3 +912,40 @@ def test_clean_file_in_place_for_every_container_ext(tmp_path: Path, ext: str, m
         data["format"]
         == {"docx": "docx", "odt": "odt", "svg": "svg", "md": "markdown", "html": "html"}[ext]
     )
+
+
+def test_cms_generator_meta_with_spaced_attributes_is_kept() -> None:
+    page = '<html><head><meta name = "generator" content = "WordPress 6.5"></head></html>'
+    _c2pa, has_ai, findings, notes, _details = container_meta.inspect_html(page)
+    assert not has_ai
+    assert findings == []
+    assert any("cms generator" in note for note in notes)
+    cleaned, _actions = clean_html(page)
+    assert 'content = "WordPress 6.5"' in cleaned
+
+
+def test_markdown_word_content_in_a_key_is_not_c2pa() -> None:
+    doc = "---\ncontent_generator: ChatGPT\ntitle: x\n---\nbody\n"
+    c2pa, has_ai, findings, _notes, _details = container_meta.inspect_markdown(doc)
+    assert has_ai and findings
+    assert c2pa is False
+
+
+def test_markdown_content_credentials_key_is_c2pa() -> None:
+    doc = "---\ncontent_credentials: yes\n---\nbody\n"
+    c2pa, _has_ai, _findings, _notes, _details = container_meta.inspect_markdown(doc)
+    assert c2pa is True
+
+
+def test_markdown_key_matching_name_and_value_counts_once() -> None:
+    doc = "---\ngenerator: Claude\n---\nbody\n"
+    _c2pa, _has_ai, findings, _notes, _details = container_meta.inspect_markdown(doc)
+    assert findings == ["frontmatter key: generator"]
+
+
+def test_marker_hits_list_each_marker_once_regardless_of_case() -> None:
+    has_c2pa, has_ai, findings = container_meta._blob_hits(
+        b"c2pa C2PA jumb JUMB contentcredentials"
+    )
+    assert has_c2pa and has_ai
+    assert findings == ["marker:c2pa", "marker:jumb", "marker:contentcredentials"]

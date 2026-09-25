@@ -90,17 +90,17 @@ def test_detect_heif_brands():
 def test_c2pa_uuid_box_is_detected_and_neutralized():
     ftyp = _box(b"ftyp", b"heic" + b"\x00\x00\x00\x00" + b"mif1heic")
     data = ftyp + _box(b"uuid", C2PA_BMFF_UUID + b"manifest payload")
-    has_c2pa, has_ai, findings, _ = inspect_heif(data)
+    has_c2pa, has_ai, findings, _notes, _ = inspect_heif(data)
     assert has_c2pa and has_ai
     assert any("uuid" in finding for finding in findings)
     cleaned, actions = neutralize_heif(data)
     assert C2PA_BMFF_UUID not in cleaned
     assert b"free" in cleaned
-    assert any("uuid" in action for action in actions)
+    assert any("uuid" in action.text for action in actions)
 
 
 def test_inspect_flags_c2pa_and_ai():
-    has_c2pa, has_ai, findings, details = inspect_heif(make_heif())
+    has_c2pa, has_ai, findings, _notes, details = inspect_heif(make_heif())
     assert has_c2pa and has_ai
     assert details["format"] == "heif"
     assert any("jumb" in f for f in findings)
@@ -117,9 +117,9 @@ def test_neutralize_keep_non_ai_preserves_camera_exif_and_pixels():
         assert marker not in cleaned.lower() or marker == b"jumb"  # type retyped to free
     assert b"jumb" not in cleaned  # box type overwritten
     assert b"free" in cleaned
-    has_c2pa, has_ai, _, _ = inspect_heif(cleaned)
+    has_c2pa, has_ai, _, _notes, _ = inspect_heif(cleaned)
     assert not has_c2pa and not has_ai
-    assert any("neutralized" in a for a in actions)
+    assert any("neutralized" in a.text for a in actions)
 
 
 def test_neutralize_strip_all_zeroes_exif_extent():
@@ -128,26 +128,26 @@ def test_neutralize_strip_all_zeroes_exif_extent():
     assert len(cleaned) == len(data)
     assert b"Canon EOS R5" not in cleaned
     assert PIXEL_BYTES in cleaned
-    has_c2pa, has_ai, _, _ = inspect_heif(cleaned)
+    has_c2pa, has_ai, _, _notes, _ = inspect_heif(cleaned)
     assert not has_c2pa and not has_ai
 
 
 def test_image_meta_delegates():
     data = make_heif(b"avif")
-    has_c2pa, has_ai, _ = inspect_avif(data)
+    has_c2pa, has_ai, _, _notes = inspect_avif(data)
     assert has_c2pa and has_ai
     cleaned, _actions = strip_avif(data, strip_all=True)
     assert detect_heif(cleaned) == "avif"
     assert b"Canon" not in cleaned
     cleaned2, _ = strip_heic(make_heif(b"heic"), strip_all=False)
     assert b"Canon EOS R5" in cleaned2
-    has_c2pa2, has_ai2, _ = inspect_heic(cleaned2)
+    has_c2pa2, has_ai2, _, _notes = inspect_heic(cleaned2)
     assert not has_c2pa2 and not has_ai2
 
 
 def test_external_data_reference_is_reported_and_cleaning_fails_closed():
     data = make_heif(with_jumb=False, data_reference_index=1)
-    has_c2pa, has_ai, findings, _ = inspect_heif(data)
+    has_c2pa, has_ai, findings, _notes, _ = inspect_heif(data)
     assert has_ai and has_c2pa  # byte-scan still sees C2PA tokens in the external item
     assert any("unsupported external/idat" in finding for finding in findings)
     try:
@@ -201,7 +201,7 @@ def test_malformed_iloc_is_reported_and_cleaning_fails_closed():
     # iloc v0 declares one item but contains no item record.
     iloc = _fullbox(b"iloc", 0, bytes([0x44, 0x00]) + struct.pack(">H", 1))
     malformed = ftyp + _fullbox(b"meta", 0, iloc)
-    has_c2pa, has_ai, findings, details = inspect_heif(malformed)
+    has_c2pa, has_ai, findings, _notes, details = inspect_heif(malformed)
     assert not has_c2pa and has_ai
     assert details["malformed"] is True
     assert any("malformed HEIF metadata table" in finding for finding in findings)
@@ -292,16 +292,18 @@ def test_detect_format_avif_and_heif():
 
 def test_inspect_heif_detects_c2pa_and_xmp():
     avif_bytes = _minimal_avif_with_c2pa_and_xmp()
-    has_c2pa, has_ai, findings, _details = inspect_heif(avif_bytes)
+    has_c2pa, has_ai, findings, notes, _details = inspect_heif(avif_bytes)
     assert has_c2pa is True
     assert has_ai is True
     assert any("C2PA" in f or "jumb" in f.lower() for f in findings)
-    assert any("uuid" in f.lower() or "XMP" in f for f in findings)
+    # This XMP box carries no AI markers: it is reported, but as context.
+    assert any("XMP uuid box" in note for note in notes)
+    assert not any("XMP uuid box" in f for f in findings)
 
 
 def test_inspect_heif_heic_ai_metadata():
     heic_bytes = _minimal_heic_with_xmp()
-    _has_c2pa, has_ai, findings, _details = inspect_heif(heic_bytes)
+    _has_c2pa, has_ai, findings, _notes, _details = inspect_heif(heic_bytes)
     assert has_ai is True
     assert any("trainedAlgorithmicMedia" in f or "XMP" in f for f in findings)
 
@@ -310,11 +312,11 @@ def test_neutralize_heif_removes_c2pa_and_xmp():
     avif_bytes = _minimal_avif_with_c2pa_and_xmp()
     cleaned, actions = neutralize_heif(avif_bytes)
 
-    assert any("jumb" in a.lower() for a in actions)
-    assert any("xmp" in a.lower() or "uuid" in a.lower() for a in actions)
+    assert any("jumb" in a.text.lower() for a in actions)
+    assert any("xmp" in a.text.lower() or "uuid" in a.text.lower() for a in actions)
 
     # Re-inspect cleaned bytes
-    has_c2pa, has_ai, _findings, _details = inspect_heif(cleaned)
+    has_c2pa, has_ai, _findings, _notes, _details = inspect_heif(cleaned)
     assert has_c2pa is False
     assert has_ai is False
 
@@ -367,3 +369,28 @@ def test_fixture_avif_and_heic_are_detected_and_cleaned(tmp_path: Path):
         assert report["format"] == expect
         assert report["still_has_c2pa"] is False
         assert report["still_has_ai_metadata"] is False
+
+
+FIXTURES = ROOT / "tests" / "fixtures"
+
+
+def test_heif_context_is_a_note_never_a_finding():
+    """Brands, marker-free boxes and a missing iinf table are context, not marks."""
+    _c2pa, _ai, findings, notes, _ = inspect_heif((FIXTURES / "sample_c2pa.heic").read_bytes())
+    assert findings == [
+        "XMP uuid box @ 83: digitalSourceType, trainedAlgorithmicMedia, algorithmicMedia"
+    ]
+    assert "brands: heic, mif1" in notes
+    assert "no iinf item table (or unsupported version)" in notes
+
+
+def test_a_cleaned_heif_has_no_findings(tmp_path: Path):
+    """No C2PA or AI verdict means no findings: every consumer counts findings as marks."""
+    for name in ("sample_c2pa.heic", "sample_c2pa.avif"):
+        dest = tmp_path / name
+        report = clean_image(FIXTURES / name, dest)
+        assert not report["still_has_c2pa"] and not report["still_has_ai_metadata"]
+        assert report["post_findings"] == []
+        after = inspect_image(dest)
+        assert after.findings == []
+        assert any(note.startswith("brands: ") for note in after.notes)

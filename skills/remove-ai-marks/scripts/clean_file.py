@@ -21,8 +21,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from asset_kind import SUPPORTED_EXTENSIONS
-from batch_inputs import select_inputs
+import pipeline_actions as act
 from clean_asset import (
     DEGRADE_CLI_CHOICES,
     MORPHO_CLI_CHOICES,
@@ -39,6 +38,7 @@ from clean_request import (
     describe_dropped_text_transforms,
     dropped_text_transforms,
     plan_work,
+    select_request_inputs,
 )
 from common import (
     atomic_write_text,
@@ -48,6 +48,7 @@ from common import (
 from morphomod import VISIBLE_CLEAN_BACKENDS
 from operation import ExitCode, OperationStatus, status_to_exit_code
 from perturb_text import MODES as PERTURB_MODES
+from pipeline_actions import report_actions
 from rewrite_text import LIVE_REWRITE_BACKENDS, REASONING_EFFORTS, TokenSink, remote_warning
 
 # Preserved under the old private name: external callers are not expected, but
@@ -246,32 +247,13 @@ def main() -> int:
     except ValueError as error:
         eprint(f"invalid options: {error}")
         return ExitCode.USAGE_ERROR.value
-    allowed = request.allowed_extensions(SUPPORTED_EXTENSIONS)
-    excluded_roots = (
-        (request.output,)
-        if request.output
-        and not request.in_place
-        and any(source.is_dir() for source in request.paths)
-        else ()
-    )
     try:
-        selection = select_inputs(
-            request.paths,
-            recursive=request.recursive,
-            pattern=request.glob,
-            extensions=allowed,
-            excluded_roots=excluded_roots,
-        )
+        selection = select_request_inputs(request)
     except ValueError as error:
         eprint(f"invalid input selection: {error}")
         return ExitCode.USAGE_ERROR.value
     items = selection.items
     batch = selection.batch
-    if batch and (request.visible_mask or request.visible_box):
-        eprint(
-            "error: --visible-mask/--visible-box are single-file options; use --detect-command for batch"
-        )
-        return ExitCode.USAGE_ERROR.value
     if request.in_place and request.output:
         eprint("warning: -o ignored with --in-place")
     try:
@@ -350,14 +332,14 @@ def dry_run_payload(
     else:
         localization = "external-detector"
     actions = [
-        f"localize visible mark via {localization}",
-        f"fill holes + dilate radius={visible.dilation_radius}",
-        f"inpaint with {visible.backend} backend",
-        "strip requested metadata",
+        act.plan_localize(localization),
+        act.plan_refine_mask(visible.dilation_radius),
+        act.plan_inpaint(visible.backend),
+        act.plan_strip_metadata(),
     ]
     if plan.degrade is not None:
-        actions.append(f"apply {plan.degrade.strategy} degradation")
-    actions.append(f"publish mask to {visible.mask_output} and image to {destination}")
+        actions.append(act.plan_degrade(plan.degrade.strategy))
+    actions.append(act.plan_publish(str(visible.mask_output), str(destination)))
     return {
         "kind": "image",
         "status": "dry-run",
@@ -366,7 +348,7 @@ def dry_run_payload(
         "mask": str(visible.mask_output),
         "backend": visible.backend,
         "timeout": visible.timeout,
-        "actions": actions,
+        **report_actions(actions),
         "exit_code": ExitCode.SUCCESS.value,
     }
 
@@ -405,7 +387,7 @@ def _error_payload(path: Path, output: Path, error: Exception) -> dict:
         "kind": "unknown",
         "input": str(path),
         "output": str(output),
-        "actions": [f"error: {error}"],
+        **report_actions([act.failed(error)]),
         "error": str(error),
         "exit_code": status_to_exit_code(OperationStatus.FAILED),
     }
@@ -476,11 +458,6 @@ def run_clean_item(
         if dropped and not request.quiet:
             eprint(describe_dropped_text_transforms(request, result.kind, path))
     return payload
-
-
-#: Preserved private aliases for in-tree callers predating the renames.
-_run_clean_item = run_clean_item
-_dry_run_payload = dry_run_payload
 
 
 if __name__ == "__main__":

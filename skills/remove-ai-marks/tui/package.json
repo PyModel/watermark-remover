@@ -1,0 +1,19 @@
+{
+  "name": "wm-tui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/index.tsx",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opentui/core": "0.5.12",
+    "@opentui/solid": "0.5.12",
+    "solid-js": "1.9.12"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.9.0"
+  }
+}

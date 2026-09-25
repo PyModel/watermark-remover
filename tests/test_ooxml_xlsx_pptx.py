@@ -192,18 +192,19 @@ def test_pptx_detection_and_classification(tmp_path):
 
 def test_xlsx_inspect_and_clean():
     xlsx_bytes = _create_synthetic_xlsx()
-    has_c2pa, has_ai, findings, _details = inspect_xlsx(xlsx_bytes)
+    has_c2pa, has_ai, findings, notes, _details = inspect_xlsx(xlsx_bytes)
     assert has_c2pa is True
     assert has_ai is True
     assert any("docProps/core.xml" in f for f in findings)
-    assert any("customXml" in f for f in findings)
+    assert "customXml parts: 1" in notes
+    assert "customXml parts: 1" not in findings
     assert any("xl/media/image1.png" in f for f in findings)
     cleaned_bytes, actions = clean_xlsx(xlsx_bytes, also_layer_a_text=True)
-    assert any("scrub docProps/core.xml field dc:creator" in a for a in actions)
-    assert any("drop part customXml/item1.xml" in a for a in actions)
-    assert any("clean embedded media in xl/media/image1.png" in a for a in actions)
-    assert any("layer A text:" in a for a in actions)
-    has_c2pa_after, has_ai_after, findings_after, _ = inspect_xlsx(cleaned_bytes)
+    assert any("scrub docProps/core.xml field dc:creator" in a.text for a in actions)
+    assert any("drop part customXml/item1.xml" in a.text for a in actions)
+    assert any("clean embedded media in xl/media/image1.png" in a.text for a in actions)
+    assert any("layer A text:" in a.text for a in actions)
+    has_c2pa_after, has_ai_after, findings_after, _notes, _ = inspect_xlsx(cleaned_bytes)
     assert has_c2pa_after is False
     assert has_ai_after is False
     assert not any("customXml" in f for f in findings_after)
@@ -227,16 +228,16 @@ def test_xlsx_inspect_and_clean():
 
 def test_pptx_inspect_and_clean():
     pptx_bytes = _create_synthetic_pptx()
-    has_c2pa, has_ai, findings, _details = inspect_pptx(pptx_bytes)
+    has_c2pa, has_ai, findings, _notes, _details = inspect_pptx(pptx_bytes)
     assert has_c2pa is True
     assert has_ai is True
     assert any("docProps/core.xml" in f for f in findings)
     assert any("ppt/media/image1.jpeg" in f for f in findings)
     cleaned_bytes, actions = clean_pptx(pptx_bytes, also_layer_a_text=True)
-    assert any("scrub docProps/core.xml field dc:creator" in a for a in actions)
-    assert any("clean embedded media in ppt/media/image1.jpeg" in a for a in actions)
-    assert any("layer A text:" in a for a in actions)
-    has_c2pa_after, has_ai_after, _, _ = inspect_pptx(cleaned_bytes)
+    assert any("scrub docProps/core.xml field dc:creator" in a.text for a in actions)
+    assert any("clean embedded media in ppt/media/image1.jpeg" in a.text for a in actions)
+    assert any("layer A text:" in a.text for a in actions)
+    has_c2pa_after, has_ai_after, _, _notes, _ = inspect_pptx(cleaned_bytes)
     assert has_c2pa_after is False
     assert has_ai_after is False
     with zipfile.ZipFile(io.BytesIO(cleaned_bytes)) as zf:
@@ -262,12 +263,12 @@ def test_docx_embedded_media_cleaning():
         )
         zf.writestr("word/media/image1.png", _minimal_png_with_text())
     docx_data = buf.getvalue()
-    has_c2pa, _has_ai, findings, _ = inspect_docx(docx_data)
+    has_c2pa, _has_ai, findings, _notes, _ = inspect_docx(docx_data)
     assert has_c2pa is True
     assert any("word/media/image1.png" in f for f in findings)
     cleaned_data, actions = clean_docx(docx_data)
-    assert any("clean embedded media in word/media/image1.png" in a for a in actions)
-    has_c2pa_after, _, _, _ = inspect_docx(cleaned_data)
+    assert any("clean embedded media in word/media/image1.png" in a.text for a in actions)
+    has_c2pa_after, _, _, _notes, _ = inspect_docx(cleaned_data)
     assert has_c2pa_after is False
 
 
@@ -286,14 +287,35 @@ def test_docx_embedded_heic_media_inspected_and_cleaned():
         zf.writestr("word/media/image1.heic", _minimal_heic_with_xmp())
     docx_data = buf.getvalue()
 
-    _has_c2pa, has_ai, findings, _ = inspect_docx(docx_data)
+    _has_c2pa, has_ai, findings, _notes, _ = inspect_docx(docx_data)
     assert has_ai is True
     assert any("word/media/image1.heic" in f for f in findings)
 
     cleaned_data, actions = clean_docx(docx_data)
-    assert any("clean embedded media in word/media/image1.heic" in a for a in actions)
-    _, has_ai_after, _, _ = inspect_docx(cleaned_data)
+    assert any("clean embedded media in word/media/image1.heic" in a.text for a in actions)
+    _, has_ai_after, _, _notes, _ = inspect_docx(cleaned_data)
     assert has_ai_after is False
+
+
+def test_docx_embedded_svg_whose_only_step_is_a_nested_data_uri_is_cleaned():
+    # The embedded-media gate reads each step's effect, not its wording: an
+    # SVG whose only change is a cleaned data URI still counts as cleaned.
+    import base64
+
+    png = base64.b64encode(_minimal_png_with_text()).decode("ascii")
+    svg = (
+        f'<svg xmlns="http://www.w3.org/2000/svg"><image href="data:image/png;base64,{png}"/></svg>'
+    )
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("word/document.xml", "<w:document/>")
+        zf.writestr("word/media/image1.svg", svg)
+    cleaned_data, actions = clean_docx(buf.getvalue())
+    [media] = [a for a in actions if a.params.get("part") == "word/media/image1.svg"]
+    assert media.code.value == "clean_embedded_media"
+    [nested] = media.params["actions"]
+    assert nested.code.value == "clean_data_uri"
+    assert inspect_docx(cleaned_data)[0] is False
 
 
 def test_clean_container_and_inspect_container_xlsx_pptx(tmp_path):

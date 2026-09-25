@@ -14,8 +14,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import pipeline_actions as act
 from common import atomic_write_bytes
 from image_meta import AI_META_HINTS, C2PA_MARKERS, _contains_any
+from pipeline_actions import Action, report_actions
 
 HEIF_BRANDS = {
     b"heic",
@@ -306,13 +308,20 @@ def _neutralize_runs(buf: bytearray, start: int, length: int, pad: int) -> list[
     return sorted(set(hits))
 
 
-def inspect_heif(data: bytes) -> tuple[bool, bool, list[str], dict[str, Any]]:
+def inspect_heif(data: bytes) -> tuple[bool, bool, list[str], list[str], dict[str, Any]]:
+    """``(has_c2pa, has_ai, findings, notes, details)`` for a HEIF/AVIF file.
+
+    Findings are C2PA/AI signals and the malformed or unsupported layouts that
+    leave the verdict unproven.  Notes are context only: the brands, and
+    metadata that is present but carries no AI markers.
+    """
     fmt = detect_heif(data)
     if fmt == "unknown":
-        return False, False, ["not a HEIF/AVIF file"], {}
+        return False, False, ["not a HEIF/AVIF file"], [], {}
     findings: list[str] = []
+    notes: list[str] = []
     brands = sorted(b.decode("ascii", "replace") for b in _ftyp_brands(data) if b.strip())
-    findings.append(f"brands: {', '.join(brands[:6])}")
+    notes.append(f"brands: {', '.join(brands[:6])}")
 
     has_c2pa = False
     has_ai = False
@@ -334,7 +343,7 @@ def inspect_heif(data: bytes) -> tuple[bool, bool, list[str], dict[str, Any]]:
                 has_c2pa = True
             findings.append(f"XMP uuid box @ {box.header_start}: {', '.join(hits[:8])}")
         else:
-            findings.append(f"XMP uuid box @ {box.header_start}")
+            notes.append(f"XMP uuid box @ {box.header_start}")
 
     for box in _iter_boxes(data, 0, len(data)):
         if box.type != b"uuid":
@@ -355,6 +364,7 @@ def inspect_heif(data: bytes) -> tuple[bool, bool, list[str], dict[str, Any]]:
             has_c2pa,
             True,
             findings,
+            notes,
             {
                 "format": fmt,
                 "brands": brands,
@@ -387,23 +397,24 @@ def inspect_heif(data: bytes) -> tuple[bool, bool, list[str], dict[str, Any]]:
                 has_c2pa = True
             findings.append(f"{label} @ {off}: {', '.join(hits[:8])}")
         else:
-            findings.append(f"{label} present ({ln} bytes, no AI markers)")
+            notes.append(f"{label} present ({ln} bytes, no AI markers)")
     if not items:
-        findings.append("no iinf item table (or unsupported version)")
+        notes.append("no iinf item table (or unsupported version)")
 
     if not has_c2pa:
         whole = _contains_any(data, C2PA_MARKERS)
         if whole:
             has_c2pa = True
             findings.append(f"byte-scan C2PA markers: {', '.join(whole[:6])}")
-    return has_c2pa, has_ai or has_c2pa, findings, {"format": fmt, "brands": brands}
+    return has_c2pa, has_ai or has_c2pa, findings, notes, {"format": fmt, "brands": brands}
 
 
-def neutralize_heif(data: bytes, *, strip_all_metadata: bool = True) -> tuple[bytes, list[str]]:
+def neutralize_heif(data: bytes, *, strip_all_metadata: bool = True) -> tuple[bytes, list[Action]]:
     """In-place neutralization on raw bytes. Returns (cleaned, actions)."""
-    if detect_heif(data) == "unknown":
+    fmt = detect_heif(data)
+    if fmt == "unknown":
         raise ValueError("not a HEIF/AVIF file")
-    actions: list[str] = []
+    actions: list[Action] = []
     buf = bytearray(data)
 
     # 1. Neutralize C2PA/JUMBF boxes: retype to 'free', zero payload.
@@ -412,9 +423,7 @@ def neutralize_heif(data: bytes, *, strip_all_metadata: bool = True) -> tuple[by
         buf[box.header_start + 4 : box.header_start + 8] = b"free"
         for i in range(box.payload_start, box.end):
             buf[i] = 0
-        actions.append(
-            f"neutralized '{name}' box -> free (zeroed {box.end - box.payload_start} payload bytes)"
-        )
+        actions.append(act.neutralize_box(name, box.end - box.payload_start))
 
     # 1b. Neutralize XMP `uuid` boxes (XMP_UUID user-type) at top level or inside meta.
     for box in _xmp_uuid_boxes(bytes(buf)):
@@ -422,15 +431,13 @@ def neutralize_heif(data: bytes, *, strip_all_metadata: bool = True) -> tuple[by
             pad = 0x20
             for i in range(box.payload_start + 16, box.end):
                 buf[i] = pad
-            actions.append(
-                f"zeroed XMP uuid box payload ({box.end - box.payload_start - 16} bytes, offsets preserved)"
-            )
+            actions.append(act.zero_uuid_payload(box.end - box.payload_start - 16))
         else:
             hits = _neutralize_runs(
                 buf, box.payload_start + 16, box.end - box.payload_start - 16, 0x20
             )
             if hits:
-                actions.append(f"neutralized AI tokens in XMP uuid box: {', '.join(hits[:8])}")
+                actions.append(act.neutralize_tokens("XMP uuid box", hits[:8]))
 
     # 2. Exif / XMP item extents.
     items, extents = _provenance_items(bytes(buf))
@@ -454,15 +461,15 @@ def neutralize_heif(data: bytes, *, strip_all_metadata: bool = True) -> tuple[by
             pad = 0x20 if _is_xmp_item(itype, content_type) else 0x00
             for i in range(off, off + ln):
                 buf[i] = pad
-            actions.append(f"zeroed entire {label} payload ({ln} bytes, offsets preserved)")
+            actions.append(act.zero_item_payload(label, ln))
         else:
             pad = 0x20 if _is_xmp_item(itype, content_type) else 0x00
             hits = _neutralize_runs(buf, off, ln, pad)
             if hits:
-                actions.append(f"neutralized AI tokens in {label}: {', '.join(hits[:8])}")
+                actions.append(act.neutralize_tokens(label, hits[:8]))
 
     if not actions:
-        actions.append("no HEIF/AVIF provenance metadata found")
+        actions.append(act.nothing_removed(fmt, "no HEIF/AVIF provenance metadata found"))
     return bytes(buf), actions
 
 
@@ -477,12 +484,12 @@ def clean_heif(
     cleaned, actions = neutralize_heif(data, strip_all_metadata=strip_all_metadata)
     atomic_write_bytes(dest, cleaned)
 
-    has_c2pa, has_ai, post_findings, _ = inspect_heif(cleaned)
+    has_c2pa, has_ai, post_findings, _notes, _ = inspect_heif(cleaned)
     return {
         "input": str(path),
         "output": str(dest),
         "format": fmt,
-        "actions": actions,
+        **report_actions(actions),
         "bytes_in": len(data),
         "bytes_out": dest.stat().st_size,
         "still_has_c2pa": has_c2pa,

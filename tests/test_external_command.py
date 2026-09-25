@@ -136,6 +136,40 @@ def test_parent_exit_cannot_leave_inherited_output_pipes_running(tmp_path: Path)
     assert not marker.exists()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX-only")
+def test_a_leader_gone_before_its_group_is_read_still_has_its_group_killed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Under load the leader can spawn its descendant and exit before
+    # run_command looks up the process group; getpgid() of that zombie fails,
+    # which used to skip the group kill.  Hold Popen back until that happens.
+    marker = tmp_path / "descendant-survived"
+    child = (
+        "import sys, time; from pathlib import Path; "
+        "time.sleep(1.5); Path(sys.argv[1]).write_text('survived')"
+    )
+    parent = (
+        "import subprocess, sys; subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]])"
+    )
+    real_popen = subprocess.Popen
+
+    def slow_popen(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        time.sleep(0.4)  # the leader spawns its child and exits meanwhile
+        return process
+
+    monkeypatch.setattr(external_command.subprocess, "Popen", slow_popen)
+    with pytest.raises(ExternalCommandTimeout, match="held by a descendant"):
+        run_command(
+            [sys.executable, "-c", parent, child, str(marker)],
+            timeout=0.5,
+            output_limit=1024,
+        )
+
+    time.sleep(2.0)
+    assert not marker.exists()
+
+
 def test_normal_exit_allows_minimum_pipe_drain_grace(monkeypatch: pytest.MonkeyPatch) -> None:
     command = [
         sys.executable,

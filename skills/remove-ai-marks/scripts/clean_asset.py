@@ -36,6 +36,7 @@ from morphomod import (
 )
 from perturb_text import MODES as PERTURB_MODES
 from perturb_text import perturb_text
+from pipeline_actions import retarget_report
 from rewrite_text import RewritePlan, TokenSink, rewrite
 from text_unicode import clean_text
 
@@ -570,10 +571,7 @@ def _clean_image_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
                 staged_mask_text = str(staged_mask)
                 final_mask_text = str(final_mask_output)
                 visible_report["mask"] = final_mask_text
-                visible_report["actions"] = [
-                    action.replace(staged_mask_text, final_mask_text)
-                    for action in visible_report["actions"]
-                ]
+                retarget_report(visible_report, staged_mask_text, final_mask_text)
 
     report["input"] = str(path)
     if visible_report is not None:

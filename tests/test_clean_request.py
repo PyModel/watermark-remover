@@ -407,3 +407,65 @@ def test_remote_stays_denied_when_nothing_asks_for_it(monkeypatch):
 
     request = _parse(["a.txt", "--in-place", "--rewrite", "humanize"])
     assert build_rewrite_plan(request).allow_remote is False
+
+
+# --- plan_work checks aliasing in linear time -------------------------------
+
+
+def test_alias_key_agrees_with_paths_alias(tmp_path: Path):
+    from common import alias_key, paths_alias
+
+    a = tmp_path / "a.txt"
+    a.write_text("x", encoding="utf-8")
+    hard = tmp_path / "hard.txt"
+    try:
+        hard.hardlink_to(a)
+    except OSError:
+        hard = a
+    other = tmp_path / "b.txt"
+    other.write_text("y", encoding="utf-8")
+    missing = tmp_path / "sub" / ".." / "missing.txt"
+    missing_same = tmp_path / "missing.txt"
+    missing_other = tmp_path / "missing2.txt"
+    paths = [a, hard, other, missing, missing_same, missing_other, tmp_path / "." / "a.txt"]
+    for left in paths:
+        for right in paths:
+            assert (alias_key(left) == alias_key(right)) == paths_alias(left, right), (left, right)
+
+
+def test_plan_work_alias_checks_scale_linearly(tmp_path: Path, monkeypatch):
+    """Every output is checked against every input and earlier output.
+
+    Pairwise ``paths_alias`` made that quadratic: 2000 files spent minutes in
+    filesystem calls before the first write.  Count the calls instead of
+    timing them, so the bound holds on any machine.
+    """
+    from batch_inputs import InputItem
+    from clean_request import plan_work
+
+    count = 300
+    items = []
+    for index in range(count):
+        path = tmp_path / f"f{index}.txt"
+        path.write_text("hello\n", encoding="utf-8")
+        items.append(InputItem(path=path, relative=Path(path.name)))
+    request = _parse([str(tmp_path)])
+
+    calls = 0
+    originals = {name: getattr(Path, name) for name in ("stat", "resolve", "samefile")}
+
+    def counted(name):
+        def wrapper(self, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return originals[name](self, *args, **kwargs)
+
+        return wrapper
+
+    for name in originals:
+        monkeypatch.setattr(Path, name, counted(name))
+    work = plan_work(items, request, batch=True)
+    monkeypatch.undo()
+
+    assert len(work) == count
+    assert calls < 40 * count, f"{calls} filesystem calls for {count} files"

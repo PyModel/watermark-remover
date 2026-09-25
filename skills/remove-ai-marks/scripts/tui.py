@@ -1,25 +1,22 @@
 #!/usr/bin/env python3
-"""wm-tui — interactive terminal UI over the watermark-remover pipeline.
+"""wm-tui: launch the interactive terminal UI over the watermark-remover pipeline.
 
-The loop this exists for is inspect -> clean -> re-inspect, with Layer A's exact
-removal counts sitting next to Layer B's detector scores so "cleanly" is a
-measured before/after rather than a claim.
+The UI itself is a TypeScript program on Bun (``tui/``); every decision about a
+clean is made by the Python bridge it spawns (``tui_bridge.py``, contract in
+``tui/PROTOCOL.md``).  This module only does what must happen before a
+full-screen program takes the terminal:
 
-Design rules this module is held to (see ``tasks/tui-plan.md``):
+* refuse a missing path the way ``wm`` does, instead of opening a UI whose only
+  content is an error;
+* find ``bun`` and say how to get it when it is absent, rather than dying with
+  ``FileNotFoundError``;
+* install the frontend's dependencies once, into a writable copy when the
+  package lives somewhere read-only (a wheel in site-packages);
+* hand the frontend the interpreter it must spawn the bridge with, so the
+  bridge never runs on some other ``python`` from PATH.
 
-* It never builds a ``CleanPlan`` itself.  Every run fills a ``CleanRequest``
-  and goes through ``clean_request.plan_work`` and ``clean_file.run_clean_item``
-  — the same seam, and the same refusals, as the CLI.
-* It never speaks HTTP.  Rewrites go through ``rewrite_text``; model discovery
-  goes through ``layer_b_discovery``, which goes through ``layer_b_http``.  There
-  is no ``urllib`` import in this file, and a test enforces that.
-* It never renders a best-effort result as verified.  Layer A and Layer M are
-  Verifiable, Layer B and Layer V are Best-effort, soft binding is
-  Detection-only, and the badge follows the layer, not the outcome.
-* It never displays or persists an API key.
-
-This module is deliberately one file: ``[tool.setuptools] packages`` is an
-explicit list, so a subpackage would silently not ship in the wheel.
+It imports nothing from the pipeline on purpose: this runs on every start, and
+the bridge pays for the pipeline import once it is actually needed.
 """
 
 from __future__ import annotations
@@ -27,401 +24,27 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
+import stat
+import subprocess
 import sys
-from dataclasses import asdict, dataclass, field, replace
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import get_args, get_type_hints
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from asset_kind import SUPPORTED_EXTENSIONS
-from batch_inputs import select_inputs
-from clean_request import CleanRequest
-from common import atomic_write_text
-from optional_deps import check_optional
-
-TUI_EXTRA = "tui"
-
-#: Result classes from CONTEXT.md.  The badge follows the *layer*, never the
-#: outcome: a Layer B rewrite that "worked" is still best-effort.
-VERIFIABLE = "Verifiable"
-BEST_EFFORT = "Best-effort"
-DETECTION_ONLY = "Detection-only"
-
-LAYER_RESULT_CLASS: dict[str, str] = {
-    "A": VERIFIABLE,
-    "M": VERIFIABLE,
-    "B": BEST_EFFORT,
-    "V": BEST_EFFORT,
-    "soft-binding": DETECTION_ONLY,
-    "synthid": BEST_EFFORT,
-    # Character perturbation adds noise to defeat a detector rather than
-    # removing a carrier that can be counted afterwards. There is nothing to
-    # verify, so it cannot be badged with the layer that strips zero-width.
-    "perturb": BEST_EFFORT,
-}
-
-RESULT_CLASS_STYLE = {
-    VERIFIABLE: "bold green",
-    BEST_EFFORT: "bold yellow",
-    DETECTION_ONLY: "bold cyan",
-}
-
-#: Default Layer B timeout used for the batch cost estimate when none is set.
-DEFAULT_REWRITE_TIMEOUT = 120.0
-
-#: Border title for the Layer B stream pane when no rewrite is running.  An
-#: always-visible box that only fills on one code path reads as broken, so it
-#: says why it is empty rather than hiding.
-IDLE_STREAM_TITLE = "Layer B stream — no live rewrite in this plan"
-
-#: Characters kept in the live Layer B stream view.  A rewrite of a long
-#: document would otherwise grow the widget without bound while it runs.
-STREAM_VIEW_CHARS = 8000
-
-#: Worst-case seconds above which a run is worth stopping to confirm.  A single
-#: file with one candidate sits under this; a batch, or any TSAPA search, does
-#: not.  A gate that fires on every rewrite is a gate nobody reads.
-COST_CONFIRM_SECONDS = 300.0
-
-
-def layer_for_result(request: CleanRequest, kind: str) -> str:
-    """The layer that did the work on one asset. Follows the work, not the outcome.
-
-    ``CleanRequest.visible_requested`` covers mask, box, dilation and the
-    external inpainter, but ``--degrade``, ``--morpho`` and
-    ``--remove-synthid`` are pixel-domain operations too: routing them to the
-    metadata layer badged a frequency-domain perturbation *Verifiable*, which
-    is exactly the claim this project does not make.
-    """
-    if kind == "text":
-        if request.rewrite_strength:
-            return "B"
-        return "perturb" if request.char_perturb else "A"
-    if kind == "image":
-        if request.visible_requested() or request.degrade or request.morpho:
-            return "V"
-        if request.remove_synthid:
-            return "synthid"
-    return "M"
-
-
-def result_class_for(layer: str) -> str:
-    """The honesty label for a layer. Unknown layers are never called verified."""
-    return LAYER_RESULT_CLASS.get(layer, BEST_EFFORT)
-
-
-def format_badge(layer: str) -> str:
-    """Rich markup badge naming the layer's result class."""
-    label = result_class_for(layer)
-    return f"[{RESULT_CLASS_STYLE[label]}]{label}[/]"
-
-
-def estimate_rewrite_seconds(request: CleanRequest, file_count: int) -> float:
-    """Worst-case wall clock for a batch that runs a live rewrite.
-
-    Sequential execution (matching ``clean_file.main``) is what makes this
-    honest: files x candidates x per-call timeout is a real ceiling, not an
-    optimistic one.
-    """
-    if request.rewrite_strength is None or file_count <= 0:
-        return 0.0
-    timeout = request.rewrite_timeout or DEFAULT_REWRITE_TIMEOUT
-    candidates = max(1, request.rewrite_candidates or 1)
-    if request.rewrite_strength == "tsapa":
-        # TSAPA issues roughly population calls per generation, per file.
-        calls = max(1, request.tsapa_generations) * max(2, request.tsapa_population)
-    else:
-        calls = candidates
-    return float(file_count) * calls * timeout
-
-
-def should_confirm_cost(request: CleanRequest, file_count: int) -> bool:
-    """Whether this run is expensive enough to stop and confirm."""
-    return estimate_rewrite_seconds(request, file_count) > COST_CONFIRM_SECONDS
-
-
-def format_duration(seconds: float) -> str:
-    if seconds < 90:
-        return f"{seconds:.0f}s"
-    if seconds < 5400:
-        return f"{seconds / 60:.0f}m"
-    return f"{seconds / 3600:.1f}h"
-
-
-@dataclass
-class HistoryEntry:
-    """One command this session generated, kept in memory only.
-
-    Persisting history would turn it into a preset store and put the
-    secret-serialization question on the table; it stays in memory in v1.
-    """
-
-    when: str
-    summary: str
-    command: str
-    request: CleanRequest = field(repr=False)
-
-
-def discover_files(request: CleanRequest) -> tuple[list[Path], str | None]:
-    """Resolve the request's selection through the CLI's own input selector."""
-    if not request.paths:
-        return [], None
-    try:
-        selection = select_inputs(
-            request.paths,
-            recursive=request.recursive,
-            pattern=request.glob,
-            extensions=request.allowed_extensions(SUPPORTED_EXTENSIONS),
-        )
-    except ValueError as error:
-        return [], str(error)
-    return [item.path for item in selection.items], None
-
-
-# --- presets -----------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class Preset:
-    """One named starting point for a clean.
-
-    A preset is a claim, not just a shortcut.  Choosing "Deep clean" is
-    choosing a best-effort result, so the result class is part of the label
-    the operator reads *before* running — not something they only learn from
-    the results table afterwards.
-    """
-
-    key: str
-    label: str
-    description: str
-    #: The weakest layer this preset turns on.  A preset is only as verifiable
-    #: as its least verifiable step, so this is the honest badge for the whole
-    #: thing: adding a Layer B rewrite to a Layer A clean makes it best-effort.
-    layer: str
-    overrides: dict[str, object]
-    #: True when the preset cannot run without a reachable Layer B endpoint.
-    requires_endpoint: bool = False
-    #: The extra this preset needs installed, if any.
-    requires_extra: str | None = None
-
-    def badge(self) -> str:
-        return format_badge(self.layer)
-
-    def headline(self) -> str:
-        """Label and result class together, for the point of choice."""
-        return f"{self.label} — {result_class_for(self.layer)}"
-
-
-#: Every field a preset is allowed to set.  Each preset assigns all of them, so
-#: switching presets replaces the previous choice instead of layering on top of
-#: it — a half-applied preset runs something nobody selected.
-PRESET_FIELDS: tuple[str, ...] = (
-    "nfkc",
-    "aggressive_homoglyphs",
-    "keep_non_ai_metadata",
-    "rewrite",
-    "char_perturb",
-    "remove_synthid",
-    "degrade",
-    "morpho",
+BUN_INSTALL_HINT = (
+    "wm-tui needs Bun (https://bun.sh) to run its terminal frontend.\n"
+    "Install it with:  curl -fsSL https://bun.sh/install | bash\n"
+    '(Windows: powershell -c "irm bun.sh/install.ps1 | iex"), then run wm-tui again.\n'
+    "The plain CLI (`wm FILE`) works without it."
 )
 
-#: Fields a preset must never set.  Each one either overwrites the operator's
-#: input, changes what the text means, or turns the run into a description
-#: instead of a clean.  They are deliberate, per-run decisions with their own
-#: confirmation gates; a one-click convenience control must not reach for them.
-PRESET_FORBIDDEN_FIELDS: tuple[str, ...] = (
-    "in_place",
-    "strip_semantic_format",
-    "dry_run",
-)
-
-PRESETS: tuple[Preset, ...] = (
-    Preset(
-        key="hidden",
-        label="Hidden marks",
-        description=(
-            "Zero-width carriers, bidi controls and AI metadata. "
-            "Counted before and after — nothing is rephrased. "
-            "Identical to a bare `wm FILE`."
-        ),
-        layer="A",
-        overrides={
-            "nfkc": False,
-            "aggressive_homoglyphs": False,
-            "keep_non_ai_metadata": False,
-            "rewrite": None,
-            "char_perturb": False,
-            "remove_synthid": False,
-            "degrade": None,
-            "morpho": None,
-        },
-    ),
-    Preset(
-        key="hidden-aggressive",
-        label="Hidden marks, aggressive",
-        description=(
-            "Adds NFKC normalisation and homoglyph folding: Cyrillic and Greek "
-            "look-alikes become ASCII. Can change genuinely mixed-script text."
-        ),
-        layer="A",
-        overrides={
-            "nfkc": True,
-            "aggressive_homoglyphs": True,
-            "keep_non_ai_metadata": False,
-            "rewrite": None,
-            "char_perturb": False,
-            "remove_synthid": False,
-            "degrade": None,
-            "morpho": None,
-        },
-    ),
-    Preset(
-        key="rewrite",
-        label="Deep clean (LLM rewrite)",
-        description=(
-            "Hidden marks, then a local model rephrases the text to break "
-            "token-level watermarks. No detector guarantee. Needs an endpoint."
-        ),
-        layer="B",
-        overrides={
-            "nfkc": False,
-            "aggressive_homoglyphs": False,
-            "keep_non_ai_metadata": False,
-            "rewrite": "paraphrase",
-            "char_perturb": False,
-            "remove_synthid": False,
-            "degrade": None,
-            "morpho": None,
-        },
-        requires_endpoint=True,
-    ),
-    Preset(
-        key="image",
-        label="Images: metadata + degrade",
-        description=(
-            "Strips C2PA and AI metadata, then perturbs the frequency domain "
-            "where invisible image marks live. Best-effort; the pixels change."
-        ),
-        layer="V",
-        overrides={
-            "nfkc": False,
-            "aggressive_homoglyphs": False,
-            "keep_non_ai_metadata": False,
-            "rewrite": None,
-            "char_perturb": False,
-            "remove_synthid": False,
-            "degrade": "freq-dct",
-            "morpho": None,
-        },
-    ),
-)
+#: Files copied when the frontend has to be staged into a writable cache.
+#: ``node_modules`` is never copied: it is platform-specific and rebuilt there.
+_COPY_IGNORE = shutil.ignore_patterns("node_modules", ".git", "*.log")
 
 
-def preset_for(key: str | None) -> Preset | None:
-    """The preset with this key, or None. An unknown key is never guessed at."""
-    for preset in PRESETS:
-        if preset.key == key:
-            return preset
-    return None
-
-
-def apply_preset(request: CleanRequest, preset: Preset) -> CleanRequest:
-    """Return ``request`` with the preset's fields — and only those — applied."""
-    return replace(request, **preset.overrides)
-
-
-# --- persisted setup ---------------------------------------------------------
-
-#: Environment override for the settings file, so a test never touches the
-#: real one and an operator can keep per-project setups side by side.
-SETTINGS_ENV = "WATERMARKS_TUI_SETTINGS"
-
-
-@dataclass(frozen=True)
-class TuiSettings:
-    """The setup wm-tui remembers between runs.
-
-    Deliberately not routed through ``configuration``: that module is the
-    shared CLI/server config seam with its own precedence rules, and this is
-    one UI's memory of which endpoint you last pointed it at.  The generated
-    command still carries every value explicitly, so a command copied out of
-    the TUI runs the same way on a machine that has no settings file.
-
-    There is no API key field, and there never will be one.  The key is read
-    from the environment at run time and is never rendered, copied or written
-    to disk — ``rewrite_api_key`` exists on ``CleanRequest`` and is absent
-    here on purpose.
-    """
-
-    preset: str | None = None
-    rewrite_backend: str | None = None
-    rewrite_base_url: str | None = None
-    rewrite_model: str | None = None
-    rewrite_reasoning_effort: str | None = None
-    rewrite_allow_remote: bool | None = None
-
-    def seed(self, request: CleanRequest) -> CleanRequest:
-        """Apply the remembered endpoint to a fresh request."""
-        remembered = {
-            field_name: value
-            for field_name, value in asdict(self).items()
-            if field_name != "preset" and value is not None
-        }
-        return replace(request, **remembered)
-
-
-def settings_path() -> Path:
-    """Where the setup file lives, honouring the usual per-platform roots."""
-    override = os.environ.get(SETTINGS_ENV)
-    if override:
-        return Path(override)
-    base = os.environ.get("XDG_CONFIG_HOME") or os.environ.get("APPDATA")
-    root = Path(base) if base else Path.home() / ".config"
-    return root / "watermark-remover" / "tui.json"
-
-
-def load_settings(path: Path | None = None) -> TuiSettings:
-    """Read the setup file. Anything unreadable means "no saved setup".
-
-    Fail-soft on purpose: a corrupt or hand-edited settings file must not stop
-    the operator from starting the TUI, and every value in it is a convenience
-    with a visible control behind it.
-    """
-    target = path or settings_path()
-    try:
-        raw = json.loads(target.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return TuiSettings()
-    if not isinstance(raw, dict):
-        return TuiSettings()
-    hints = get_type_hints(TuiSettings)
-    allowed = {
-        name: tuple(kind for kind in get_args(hint) if kind is not type(None))
-        for name, hint in hints.items()
-    }
-    # A value of the wrong type is as unusable as an absent key: drop it, or
-    # it reaches CleanRequest and fails late in classify_endpoint instead of
-    # failing soft here.
-    return TuiSettings(
-        **{
-            key: value
-            for key, value in raw.items()
-            if key in allowed and isinstance(value, allowed[key])
-        }
-    )
-
-
-def save_settings(settings: TuiSettings, path: Path | None = None) -> Path:
-    """Write the setup file atomically and return where it went."""
-    target = path or settings_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(target, json.dumps(asdict(settings), indent=2, sort_keys=True) + "\n")
-    return target
-
-
-def _build_parser() -> argparse.ArgumentParser:
+def build_parser() -> argparse.ArgumentParser:
+    """The ``wm-tui`` argument surface. The bridge re-parses ``WM_TUI_ARGV`` with it."""
     parser = argparse.ArgumentParser(
         prog="wm-tui",
         description="Interactive terminal UI for watermark-remover.",
@@ -429,7 +52,6 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "path",
         nargs="*",
-        type=Path,
         help="File(s) or director(ies) to open. Defaults to the current directory.",
     )
     parser.add_argument(
@@ -439,34 +61,193 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--glob", default="*", help="Directory glob for the file list")
     parser.add_argument("--extensions", default=None, help="Comma-separated extension allow-list")
+    setup = parser.add_mutually_exclusive_group()
+    setup.add_argument(
+        "--setup",
+        action="store_true",
+        help="Open the first-run setup screen even though a saved setup exists",
+    )
+    setup.add_argument(
+        "--no-setup",
+        action="store_true",
+        help="Never open the setup screen, even on a first run",
+    )
+    parser.add_argument(
+        "--print-env",
+        action="store_true",
+        help="Debug: print the WM_TUI_* environment the frontend would get, as JSON, and exit",
+    )
     return parser
 
 
+def package_version() -> str:
+    """The installed distribution's version, or ``dev`` from a bare checkout."""
+    try:
+        return version("watermark-remover")
+    except PackageNotFoundError:
+        return "dev"
+
+
+def cache_root() -> Path:
+    """The per-user cache root: ``XDG_CACHE_HOME``, else the platform default."""
+    base = os.environ.get("XDG_CACHE_HOME")
+    if base:
+        return Path(base)
+    if os.name == "nt" and os.environ.get("LOCALAPPDATA"):
+        return Path(os.environ["LOCALAPPDATA"])
+    return Path.home() / ".cache"
+
+
+def frontend_dir() -> Path:
+    """Where the frontend lives: ``WM_TUI_DIR``, else ``tui/`` beside ``scripts/``.
+
+    The fallback resolves in a checkout (``skills/remove-ai-marks/tui``) and in
+    a wheel (``watermark_remover/tui``) alike, because package-data ships the
+    directory at the same place relative to this file.
+    """
+    override = os.environ.get("WM_TUI_DIR")
+    if override:
+        return Path(override).resolve()
+    return Path(__file__).resolve().parent.parent / "tui"
+
+
+def bridge_path() -> Path:
+    return Path(__file__).resolve().parent / "tui_bridge.py"
+
+
+def frontend_env(argv: list[str]) -> dict[str, str]:
+    """The ``WM_TUI_*`` variables the frontend receives (PROTOCOL "Environment").
+
+    ``WM_TUI_CWD`` is the one addition: the frontend must run with its own
+    directory as cwd (Bun reads ``bunfig.toml`` from there), so the bridge needs
+    to be told where the operator's relative paths are relative to.
+    """
+    log = os.environ.get("WM_TUI_LOG") or str(cache_root() / "watermark-remover" / "tui.log")
+    return {
+        "WM_TUI_PYTHON": sys.executable,
+        "WM_TUI_BRIDGE": str(bridge_path()),
+        "WM_TUI_ARGV": json.dumps(argv),
+        "WM_TUI_LOG": log,
+        "WM_TUI_CWD": os.getcwd(),
+    }
+
+
+def _stage_frontend(source: Path) -> Path:
+    """Copy a read-only frontend into the cache so ``bun install`` has somewhere to write.
+
+    Keyed by package version: an upgrade gets a fresh copy instead of running
+    new sources against the previous version's dependency tree.
+    """
+    target = cache_root() / "watermark-remover" / f"tui-{package_version()}"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # copyfile, not copy2: a read-only source (a Nix-style store, 0o444 files)
+    # must not produce a read-only copy that the next launch cannot refresh.
+    shutil.copytree(
+        source,
+        target,
+        ignore=_COPY_IGNORE,
+        dirs_exist_ok=True,
+        copy_function=shutil.copyfile,
+    )
+    # copytree still copies each directory's mode; bun install writes into
+    # the root, and the next refresh writes into every directory.
+    for directory, _subdirs, _files in os.walk(target):
+        mode = os.stat(directory).st_mode
+        os.chmod(directory, mode | stat.S_IWUSR | stat.S_IXUSR)
+    return target
+
+
+def _install(directory: Path, bun: str) -> int:
+    """``bun install --frozen-lockfile``: the lockfile, not the network, decides versions."""
+    print(
+        f"wm-tui: installing frontend dependencies in {directory} (first run only)...",
+        file=sys.stderr,
+    )
+    result = subprocess.run(
+        [bun, "install", "--frozen-lockfile"],
+        cwd=directory,
+        check=False,
+    )
+    if result.returncode != 0:
+        print(
+            f"wm-tui: `bun install --frozen-lockfile` failed in {directory} "
+            f"(exit {result.returncode})",
+            file=sys.stderr,
+        )
+    return result.returncode
+
+
+def prepare_frontend(source: Path, bun: str) -> tuple[Path | None, int]:
+    """Return a directory with installed dependencies to run from, or an exit code."""
+    if not (source / "package.json").is_file() or not (source / "src" / "index.tsx").is_file():
+        print(
+            f"wm-tui: the terminal frontend is missing from {source} "
+            "(expected package.json and src/index.tsx). Set WM_TUI_DIR to its directory.",
+            file=sys.stderr,
+        )
+        return None, 1
+    run_dir = source
+    if not (source / "node_modules").is_dir():
+        if not os.access(source, os.W_OK):
+            try:
+                run_dir = _stage_frontend(source)
+            except OSError as error:
+                print(f"wm-tui: cannot stage the frontend into the cache: {error}", file=sys.stderr)
+                return None, 1
+        if not (run_dir / "node_modules").is_dir():
+            code = _install(run_dir, bun)
+            if code != 0:
+                return None, 1
+    return run_dir, 0
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
-    availability = check_optional(TUI_EXTRA)
-    if not availability.available:
-        print(availability.hint, file=sys.stderr)
+    raw = list(sys.argv[1:] if argv is None else argv)
+    args = build_parser().parse_args(raw)
+
+    # Refuse a typo here, the way ``wm`` does, rather than open a full-screen
+    # UI whose only content is an error in the status bar.
+    missing = [path for path in (args.path or ["."]) if not Path(path).exists()]
+    if missing:
+        for path in missing:
+            print(f"wm-tui: no such file or directory: {path}", file=sys.stderr)
         return 2
 
-    paths = tuple(args.path) if args.path else (Path.cwd(),)
-    settings = load_settings()
-    # The saved setup only seeds the endpoint fields. Anything the operator
-    # typed on the command line stays exactly as typed.
-    request = settings.seed(
-        CleanRequest(
-            paths=paths,
-            recursive=args.recursive,
-            glob=args.glob,
-            extensions=args.extensions,
-        )
-    )
-    # Imported here, not at module scope: the guard above must be able to print
-    # an install hint on a default install where textual is absent.
-    from tui_app import WatermarkTuiApp
+    # The frontend gets the arguments minus the launcher's own debug switch.
+    passed = [item for item in raw if item != "--print-env"]
+    wm_env = frontend_env(passed)
+    if args.print_env:
+        # Only the WM_TUI_* values: the inherited environment can carry the
+        # rewrite API key, and a debug flag must not be how it leaks.
+        print(json.dumps(wm_env, indent=2, sort_keys=True))
+        return 0
 
-    WatermarkTuiApp(request, preset=preset_for(settings.preset)).run()
-    return 0
+    bun = shutil.which("bun")
+    if bun is None:
+        print(BUN_INSTALL_HINT, file=sys.stderr)
+        return 1
+
+    run_dir, code = prepare_frontend(frontend_dir(), bun)
+    if run_dir is None:
+        return code
+
+    log_dir = Path(wm_env["WM_TUI_LOG"]).parent
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        print(f"wm-tui: cannot create the log directory {log_dir}: {error}", file=sys.stderr)
+        return 1
+
+    env = {**os.environ, **wm_env}
+    command = [bun, "run", "src/index.tsx"]
+    if os.name == "nt":
+        # No exec on Windows that keeps the console; wait and pass the code on.
+        return subprocess.run(command, cwd=run_dir, env=env, check=False).returncode
+    os.chdir(run_dir)
+    # Replace this process: the frontend owns the terminal and its signals,
+    # and a Python parent waiting on it would only be one more thing to kill.
+    os.execvpe(bun, command, env)  # noqa: S606 - argv list, no shell
+    return 0  # pragma: no cover - execvpe does not return
 
 
 if __name__ == "__main__":

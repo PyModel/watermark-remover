@@ -76,6 +76,24 @@ def _validate_command(
     return command
 
 
+def _sweep_group(process_group_id: int) -> None:
+    """SIGKILL a process group again until no member is left.
+
+    One ``killpg`` can miss a child that a member was forking while the signal
+    was delivered; that child inherits the group, so repeating the signal
+    reaches it.  Stops once the group is empty or the grace period ends.
+    """
+    deadline = time.monotonic() + _TERMINATION_GRACE
+    while True:
+        try:
+            os.killpg(process_group_id, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            return
+        if time.monotonic() >= deadline:
+            return
+        time.sleep(0.01)
+
+
 def run_command(
     argv: Sequence[str],
     *,
@@ -117,10 +135,11 @@ def run_command(
             start_new_session=os.name == "posix",
         )
         if os.name == "posix":
-            try:
-                process_group_id = os.getpgid(process.pid)
-            except ProcessLookupError:
-                process_group_id = None
+            # start_new_session makes the child a session leader, so its group
+            # id is its pid. Asking getpgid() instead fails once a quick leader
+            # has exited (macOS answers ESRCH for a zombie), which used to skip
+            # the group kill and leave its descendants running.
+            process_group_id = process.pid
         if process.stdout is None or process.stderr is None:
             raise RuntimeError("external command output pipes unavailable")
 
@@ -161,6 +180,9 @@ def run_command(
                     returncode = process.wait(timeout=_TERMINATION_GRACE)
                 except subprocess.TimeoutExpired:
                     timed_out = True
+            if os.name == "posix" and group_cleanup_needed:
+                # Once the leader is reaped, an empty group reads as gone.
+                _sweep_group(process_group_id)
 
             for stream in (process.stdout, process.stderr):
                 if stream is not None:

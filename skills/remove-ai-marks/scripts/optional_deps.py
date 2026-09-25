@@ -65,7 +65,6 @@ def check_optional(extra: str) -> BackendAvailability:
         "quality": "skimage",
         "ai": "torch",
         "provenance": "c2pa",
-        "tui": "textual",
     }
     pkg = _checkers.get(extra)
     if pkg is None:
@@ -106,12 +105,8 @@ def has_provenance() -> bool:
     return check_optional("provenance").available
 
 
-def has_tui() -> bool:
-    return check_optional("tui").available
-
-
 #: Every extra `check_optional` knows about, for capability reporting.
-KNOWN_EXTRAS = ("visible", "quality", "ai", "provenance", "tui")
+KNOWN_EXTRAS = ("visible", "quality", "ai", "provenance")
 
 
 def extras_status() -> dict[str, dict[str, object]]:

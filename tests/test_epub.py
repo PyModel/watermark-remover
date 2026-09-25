@@ -103,7 +103,7 @@ def test_detect_epub_by_extension_and_sniff(tmp_path: Path):
 
 
 def test_inspect_epub_detects_ai_metadata():
-    has_c2pa, has_ai, findings, details = inspect_epub(_build_epub())
+    has_c2pa, has_ai, findings, _notes, details = inspect_epub(_build_epub())
     assert has_ai is True
     assert has_c2pa is True
     assert any("content.opf" in f for f in findings)
@@ -113,7 +113,7 @@ def test_inspect_epub_detects_ai_metadata():
 
 
 def test_inspect_epub_clean_book_has_no_flags():
-    has_c2pa, has_ai, _, _ = inspect_epub(
+    has_c2pa, has_ai, _, _notes, _ = inspect_epub(
         _build_epub(creator="Jane Doe", generator="", with_c2pa_png=False, with_meta_part=False)
     )
     assert has_c2pa is False
@@ -123,10 +123,10 @@ def test_inspect_epub_clean_book_has_no_flags():
 def test_clean_epub_strips_metadata_and_layer_a():
     epub = _build_epub(body_text="Chapter one\u200b with a hidden mark")
     cleaned, actions = clean_epub(epub, also_layer_a_text=True)
-    assert any("creator" in a for a in actions)
-    assert any("OPF meta" in a for a in actions)
-    assert any("layer A text" in a for a in actions)
-    assert any("cover.png" in a for a in actions)
+    assert any("creator" in a.text for a in actions)
+    assert any("OPF meta" in a.text for a in actions)
+    assert any("layer A text" in a.text for a in actions)
+    assert any("cover.png" in a.text for a in actions)
     with zipfile.ZipFile(io.BytesIO(cleaned)) as zf:
         names = zf.namelist()
         opf = zf.read("OEBPS/content.opf").decode("utf-8")
@@ -183,7 +183,7 @@ def test_clean_epub_keeps_plain_creator():
     with zipfile.ZipFile(io.BytesIO(cleaned)) as zf:
         opf = zf.read("OEBPS/content.opf").decode("utf-8")
     assert "Jane Doe" in opf
-    assert not any("creator" in a for a in actions)
+    assert not any("creator" in a.text for a in actions)
 
 
 def test_clean_epub_prunes_opf_manifest_for_dropped_part():
@@ -212,8 +212,8 @@ def test_clean_epub_prunes_opf_manifest_for_dropped_part():
         )
     data = buf.getvalue()
     cleaned, actions = clean_epub(data)
-    assert any("drop part META-INF/custommeta.xml" in a for a in actions)
-    assert any("prune OPF manifest entries" in a for a in actions)
+    assert any("drop part META-INF/custommeta.xml" in a.text for a in actions)
+    assert any("prune OPF manifest entries" in a.text for a in actions)
     with zipfile.ZipFile(io.BytesIO(cleaned)) as zf:
         assert "META-INF/custommeta.xml" not in zf.namelist()
         opf = zf.read("OEBPS/content.opf").decode("utf-8")

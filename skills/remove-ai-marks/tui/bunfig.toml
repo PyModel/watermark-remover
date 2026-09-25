@@ -1,0 +1,6 @@
+# The Solid JSX transform, for `bun run` and `bun test` alike: bun reads
+# the top-level preload for run only, and [test] preload for test only.
+preload = ["@opentui/solid/preload"]
+
+[test]
+preload = ["@opentui/solid/preload"]

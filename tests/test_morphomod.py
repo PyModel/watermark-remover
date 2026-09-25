@@ -668,7 +668,13 @@ def test_clean_file_frictionless_no_mask_artifact_by_default(tmp_path: Path):
     )
     assert r2.returncode == 0, r2.stderr
     assert dest2.with_name("kept.mask.pgm").is_file()
-    assert json.loads(r2.stdout)["visible"]["mask"] is not None
+    visible = json.loads(r2.stdout)["visible"]
+    assert visible["mask"] is not None
+    # The staged mask path is retargeted in the structured steps too, not
+    # only in the human lines, so no step names a deleted temp file.
+    assert [d["text"] for d in visible["action_details"]] == visible["actions"]
+    [mask_step] = [d for d in visible["action_details"] if d["code"] == "effective_mask"]
+    assert mask_step["params"]["published"] == visible["mask"]
 
 
 def test_remove_visible_respects_publish_mask_direct(tmp_path: Path):

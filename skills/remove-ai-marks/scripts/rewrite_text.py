@@ -96,8 +96,13 @@ REWRITE_STRENGTHS = ("paraphrase", "backtranslate", "structural", "humanize", "c
 REASONING_EFFORTS = ("none", "low", "medium", "high", "off")
 #: Hosts that may receive document content without an explicit opt-in.
 LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
-#: Private alias kept for in-module call sites predating the export.
-_LOOPBACK_HOSTS = LOOPBACK_HOSTS
+#: Where Layer B looks for a backend when nothing names one: Ollama's port.
+DEFAULT_BASE_URL = "http://127.0.0.1:11434"
+
+
+def resolve_base_url(explicit: str | None) -> str:
+    """The base URL a run contacts: *explicit*, else the environment, else the default."""
+    return explicit or os.environ.get("WATERMARKS_REWRITE_BASE_URL", DEFAULT_BASE_URL)
 
 
 class RewriteConfigurationError(ValueError):
@@ -246,8 +251,7 @@ class RewritePlan:
         return cls(
             backend=resolved_backend,
             model=resolved_model,
-            base_url=base_url
-            or os.environ.get("WATERMARKS_REWRITE_BASE_URL", "http://127.0.0.1:11434"),
+            base_url=resolve_base_url(base_url),
             api_key=api_key or os.environ.get("WATERMARKS_REWRITE_API_KEY"),
             strength=strength,
             lang=lang if lang is not None else defaults.lang,
@@ -339,7 +343,7 @@ def _check_remote(base_url: str, allow_remote: bool) -> None:
             f"error: rewrite base URL must be http(s), got scheme '{u.scheme}': {base_url}"
         )
     host = u.hostname or ""
-    if host in _LOOPBACK_HOSTS:
+    if host in LOOPBACK_HOSTS:
         return
     if not allow_remote:
         raise SystemExit(
@@ -915,7 +919,7 @@ def main() -> int:
     p.add_argument("--model", default=_env("WATERMARKS_REWRITE_MODEL"))
     p.add_argument(
         "--base-url",
-        default=_env("WATERMARKS_REWRITE_BASE_URL", "http://127.0.0.1:11434"),
+        default=_env("WATERMARKS_REWRITE_BASE_URL", DEFAULT_BASE_URL),
     )
     p.add_argument(
         "--allow-remote",
