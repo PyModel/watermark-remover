@@ -176,7 +176,7 @@ def test_capabilities_exposes_extras_and_layer_b():
     import server
 
     capabilities = server.capabilities()
-    assert set(capabilities["extras"]) >= {"visible", "quality", "ai", "provenance", "tui"}
+    assert set(capabilities["extras"]) >= {"visible", "quality", "ai", "provenance"}
     assert "endpoint_allowed" in capabilities["layer_b"]
     for entry in capabilities["extras"].values():
         assert "available" in entry

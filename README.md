@@ -53,7 +53,7 @@ wm draft.md -o draft.cleaned.md --json --audit
 The install pulls no dependencies — the core is standard library only. Extras
 are opt-in: `watermark-remover[visible]` for image inpainting,
 `[quality]` for scoring, `[ai]` for the torch-backed adapters, `[provenance]`
-for C2PA, `[tui]` for the terminal UI, or `[all]`. Five commands are installed:
+for C2PA, or `[all]`. Five commands are installed:
 `wm`, `wm-tui`, `wm-serve`, `wm-audit-dir`, `wm-audit-site`.
 
 ```bash
@@ -61,10 +61,6 @@ for C2PA, `[tui]` for the terminal UI, or `[all]`. Five commands are installed:
 wm draft.md -o draft.cleaned.md \
   --rewrite humanize --rewrite-backend openai-compatible \
   --rewrite-base-url http://127.0.0.1:8000 --rewrite-model my-local-model
-
-# Or drive the whole loop interactively
-pip install "watermark-remover[tui]"
-wm-tui ./drafts --recursive
 ```
 
 ### From a clone
@@ -116,62 +112,66 @@ python3 "$SCRIPTS/inspect_file.py" ./inputs --recursive --glob "*.md" --json
 ### Terminal UI
 
 ```bash
-pip install "watermark-remover[tui]"     # adds textual; the core stays dependency-free
-wm-tui                                    # opens the current directory
+wm-tui                     # the current directory
 wm-tui ./drafts --recursive --glob "*.md"
 ```
 
-`wm-tui` is a front end over the same seam the CLI uses: it fills a
-`CleanRequest`, runs it through `clean_request.plan_work` and
-`clean_file.run_clean_item`, and inherits every refusal the CLI makes. It never
-speaks HTTP itself and never displays or persists an API key.
+`wm-tui` is a single-screen terminal UI in the style of opencode and pi. It is
+built on [OpenTUI](https://github.com/anomalyco/opentui), so it needs
+[Bun](https://bun.sh) 1.4 or later on the `PATH`. The Python install stays
+dependency-free: on first launch `wm-tui` runs `bun install` for its own
+frontend, and it prints the install hint if Bun is missing. macOS, Linux and
+Windows are supported.
 
-It opens on **Start**, which is the whole job in three steps: add a file or a
-folder, choose a preset, press Clean. Nothing has to be configured first, and
-nothing about a preset is hidden — every option it sets is a visible control on
-the Plan tab and appears in the equivalent `wm …` command.
+The screen has four parts:
 
-| Preset | What it turns on | Result class |
-| --- | --- | --- |
-| Hidden marks | zero-width carriers, bidi controls, AI metadata — identical to a bare `wm FILE` | Verifiable |
-| Hidden marks, aggressive | adds NFKC normalisation and homoglyph folding | Verifiable |
-| Deep clean (LLM rewrite) | adds a local-model paraphrase; needs a Layer B endpoint | Best-effort |
-| Images: metadata + degrade | strips C2PA/AI metadata, then perturbs the frequency domain | Best-effort |
+- **The file list** on the left, which also shows progress and results.
+- **The selected file** on the right: what was found, what was removed, and a
+  before/after diff.
+- **One prompt** at the bottom:
+  - a path adds files;
+  - a `--flag` adds a `wm` option (any flag `wm` accepts, checked by the
+    CLI's own parser; type a bare flag again to turn it off);
+  - a `/command` runs a command.
+- **The footer**, which always shows the exact `wm …` command a clean would
+  run.
 
-No preset can set `--in-place`, `--strip-semantic-format` or `--dry-run`: those
-overwrite the input, change what the text means, or replace the run with a
-description, and each is a deliberate choice with its own confirmation.
+| Key | Does |
+| --- | --- |
+| `ctrl+e` | inspect, which writes nothing |
+| `ctrl+r` | clean; each file gets a `NAME.cleaned.EXT` beside it and originals stay untouched |
+| `tab` | next preset: Hidden marks, Hidden marks aggressive, Deep clean (LLM rewrite), Images |
+| `ctrl+p` | every command: model, history, doctor, setup, help |
+| `esc` | stop after the current file |
 
-The rest of Start is setup. The **Layer B endpoint** block sets the backend,
-base URL and model and probes them; **Save setup** writes them to
-`~/.config/watermark-remover/tui.json` (`$XDG_CONFIG_HOME` or `%APPDATA%` when
-set, or `WATERMARKS_TUI_SETTINGS` to point somewhere else) so the next run
-starts configured. The API key is never in that file — it is read from
-`WATERMARKS_REWRITE_API_KEY` at run time and has no field to be written to.
-**Installed capabilities** lists every optional extra and hands you the exact
-`pip install` line for the missing ones.
+**First run** opens a three-step setup:
 
-The other panes: **Files** (select, rescan, glob and extension filters),
-**Inspect** (Layer A carriers, metadata, stylometry, soft binding), **Plan**
-(every option, plus the equivalent `wm …` command), **Run** (sequential batch,
-per-file result table, live Layer B token stream, before/after diff),
-**History** (every command this session generated, copyable and re-loadable).
+1. What the result classes mean.
+2. A scan for a local model server. The scan only contacts `127.0.0.1`: it
+   checks Ollama, LM Studio, llama.cpp and vLLM for their model lists, and
+   never sends a document.
+3. The default preset.
 
-The command-line arguments are `path`, `--recursive`, `--glob`, and
-`--extensions` — the initial file selection; more paths can be added from
-Start once it is running. Everything else is configured in the UI, and the
-exact `wm` command it corresponds to is shown and copyable so a run can be
-reproduced outside it.
+`esc` skips the setup, and it does not come back unless you run `/setup` or
+`wm-tui --setup`. `--no-setup` never shows it.
 
-Results are labeled by *layer*, never by outcome: Layer A and Layer M are
-Verifiable, Layer B and Layer V are Best-effort, soft binding is
-Detection-only. A run that stops to confirm — remote egress, `--in-place`,
-`--strip-semantic-format`, or an expensive batch — does so before the first
-write, not after.
+The choices are saved to `~/.config/watermark-remover/tui.json`. The API key is
+never in that file: it is read from `WATERMARKS_REWRITE_API_KEY` at run time
+and never displayed.
 
-Clipboard copy uses OSC 52, which some terminals (including macOS Terminal.app)
-ignore without acknowledging. Every copy button is therefore paired with a
-read-only, selectable text box holding the same string.
+Results are labelled by layer, never by outcome: Verifiable, Best-effort or
+Detection-only. A clean that needs confirmation stops and asks before the
+first write. That covers a remote endpoint, `--in-place`,
+`--strip-semantic-format`, and a long LLM batch.
+
+The UI is two processes:
+
+- A Bun frontend (`skills/remove-ai-marks/tui/`) that only renders.
+- A Python bridge (`scripts/tui_bridge.py`) that owns every decision. It builds
+  the request through `wm`'s own parser, `plan_work` and `run_clean_item`, so
+  it hits every refusal the CLI makes.
+
+`tui/PROTOCOL.md` documents the protocol between them.
 
 ---
 

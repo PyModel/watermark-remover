@@ -102,7 +102,7 @@ def test_no_structural_cleaner_copies_pdf_byte_exact(tmp_path: Path, monkeypatch
     actions, meta = container_meta.clean_pdf_pypdf(src, dest)
     assert meta == {"mode": "copy", "degraded": True}
     assert dest.read_bytes() == original
-    assert any("copied unchanged" in action for action in actions)
+    assert any("copied unchanged" in action.text for action in actions)
     # Still parseable with the already imported reader.
     assert len(PdfReader(str(dest)).pages) == 2
 

@@ -51,6 +51,8 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import Any
 
+from rewrite_text import DEFAULT_BASE_URL
+
 
 class ConfigSource(Enum):
     """Where a setting value came from."""
@@ -188,7 +190,7 @@ _SETTINGS_DEF: list[tuple[str, Any, str, ConfigSource]] = [
     ),
     (
         "rewrite_base_url",
-        "http://127.0.0.1:11434",
+        DEFAULT_BASE_URL,
         "Layer B backend base URL",
         ConfigSource.DEFAULT,
     ),

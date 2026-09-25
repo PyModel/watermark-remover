@@ -210,24 +210,25 @@ def test_format_dispatch_bmp_gif_tiff():
 
 def test_bmp_clean_has_no_flags():
     data = _minimal_bmp()
-    has_c2pa, has_ai, findings = inspect_bmp(data)
+    has_c2pa, has_ai, findings, notes = inspect_bmp(data)
     assert has_c2pa is False
     assert has_ai is False
-    assert any("no metadata" in f.lower() for f in findings)
+    assert findings == []
+    assert any("no metadata" in note.lower() for note in notes)
     cleaned, actions = strip_bmp(data)
     assert cleaned == data
-    assert any("no BMP trailing" in a for a in actions)
+    assert any("no BMP trailing" in a.text for a in actions)
 
 
 def test_bmp_trailing_metadata_detected_and_stripped():
     xmp = b'<x:xmpmeta><rdf:Description digitalSourceType="trainedAlgorithmicMedia"/></x:xmpmeta>'
     data = _minimal_bmp(trailing=xmp)
-    _has_c2pa, has_ai, findings = inspect_bmp(data)
+    _has_c2pa, has_ai, findings, _notes = inspect_bmp(data)
     assert has_ai is True
     assert any("trailing" in f.lower() for f in findings)
 
     cleaned, actions = strip_bmp(data)
-    assert any("drop" in a for a in actions)
+    assert any("drop" in a.text for a in actions)
     assert xmp not in cleaned
     assert cleaned == _minimal_bmp()
     assert struct.unpack("<I", cleaned[2:6])[0] == len(cleaned)
@@ -238,7 +239,7 @@ def test_bmp_keep_non_ai_metadata():
     data = _minimal_bmp(trailing=xmp)
     kept, actions = strip_bmp(data, strip_all_metadata=False)
     assert kept == data
-    assert any("keep" in a.lower() for a in actions)
+    assert any("keep" in a.text.lower() for a in actions)
 
 
 def test_bmp_roundtrip(tmp_path: Path):
@@ -253,7 +254,7 @@ def test_bmp_roundtrip(tmp_path: Path):
 
 def test_gif_inspect_detects_comment_and_xmp():
     data = _minimal_gif((0xFE, b"made with c2pa tools"), (0xFF, GIF_XMP))
-    has_c2pa, has_ai, findings = inspect_gif(data)
+    has_c2pa, has_ai, findings, _notes = inspect_gif(data)
     assert has_ai is True
     assert has_c2pa is True
     assert any("comment" in f.lower() for f in findings)
@@ -277,14 +278,14 @@ def test_gif_strip_removes_metadata_keeps_pixels_and_loop(tmp_path: Path):
         image=image,
     )
     cleaned, actions = strip_gif(data)
-    assert any("drop GIF comment" in a for a in actions)
-    assert any("drop GIF XMP application" in a for a in actions)
+    assert any("drop GIF comment" in a.text for a in actions)
+    assert any("drop GIF XMP application" in a.text for a in actions)
     assert b"c2pa tools" not in cleaned
     assert b"XMP DataXMP" not in cleaned
     assert loop in cleaned
     assert b"\x21\xf9\x04" in cleaned
     assert image in cleaned
-    has_c2pa, has_ai, _findings = inspect_gif(cleaned)
+    has_c2pa, has_ai, _findings, _notes = inspect_gif(cleaned)
     assert has_c2pa is False
     assert has_ai is False
 
@@ -292,10 +293,10 @@ def test_gif_strip_removes_metadata_keeps_pixels_and_loop(tmp_path: Path):
 def test_gif_keep_non_ai_metadata():
     plain = _minimal_gif((0xFE, b"just a comment"))
     _stripped, actions = strip_gif(plain)
-    assert any("drop GIF comment" in a for a in actions)
+    assert any("drop GIF comment" in a.text for a in actions)
     kept, actions2 = strip_gif(plain, strip_all_metadata=False)
     assert b"just a comment" in kept
-    assert not any("drop GIF" in a for a in actions2)
+    assert not any("drop GIF" in a.text for a in actions2)
 
 
 def test_gif_global_color_table_preserved():
@@ -312,7 +313,7 @@ def test_gif_global_color_table_preserved():
     )
     data = header + lsd + gct + _gif_extension(0xFE, b"hello") + image + b"\x3b"
     cleaned, actions = strip_gif(data)
-    assert any("drop GIF comment" in a for a in actions)
+    assert any("drop GIF comment" in a.text for a in actions)
     assert gct in cleaned
     assert image in cleaned
     assert b"hello" not in cleaned
@@ -334,27 +335,29 @@ def test_gif_roundtrip(tmp_path: Path):
 
 def test_tiff_inspect_detects_metadata():
     data, _off, _strip = _minimal_tiff()
-    _has_c2pa, has_ai, findings = inspect_tiff(data)
+    _has_c2pa, has_ai, findings, notes = inspect_tiff(data)
     assert has_ai is True
-    assert any("XMP" in f for f in findings)
-    assert any("ExifIFD" in f for f in findings)
-    assert any("MakerNote" in f for f in findings)
+    # Standard metadata tags are context; the AI markers inside them are findings.
+    assert any("XMP" in note for note in notes)
+    assert any("ExifIFD" in note for note in notes)
+    assert any("MakerNote" in note for note in notes)
+    assert not any(f.endswith(" present") for f in findings)
     assert any("trainedAlgorithmicMedia" in f for f in findings)
 
 
 def test_tiff_strip_removes_metadata_preserves_strip():
     data, strip_off, strip_data = _minimal_tiff()
     cleaned, actions = strip_tiff(data)
-    assert any("drop TIFF tag 700" in a for a in actions)
-    assert any("drop TIFF tag 34665" in a for a in actions)
-    assert any("drop TIFF tag 271" in a for a in actions)
+    assert any("drop TIFF tag 700" in a.text for a in actions)
+    assert any("drop TIFF tag 34665" in a.text for a in actions)
+    assert any("drop TIFF tag 271" in a.text for a in actions)
     assert b"Acme Corp" not in cleaned
     assert b"trainedAlgorithmicMedia" not in cleaned
     assert b"AIGC" not in cleaned
     assert b"2024:01:01" not in cleaned
     assert cleaned[strip_off : strip_off + len(strip_data)] == strip_data
     assert detect_format(cleaned) == "tiff"
-    has_c2pa, has_ai, _findings = inspect_tiff(cleaned)
+    has_c2pa, has_ai, _findings, _notes = inspect_tiff(cleaned)
     assert has_c2pa is False
     assert has_ai is False
 
@@ -363,12 +366,12 @@ def test_tiff_bigtiff_strip():
     for kwargs in ({"big": True}, {"big": True, "big_endian": True}):
         data, strip_off, strip_data = _minimal_tiff(**kwargs)
         cleaned, actions = strip_tiff(data)
-        assert any("drop TIFF tag 700" in a for a in actions)
+        assert any("drop TIFF tag 700" in a.text for a in actions)
         assert b"Acme Corp" not in cleaned
         assert b"trainedAlgorithmicMedia" not in cleaned
         assert cleaned[strip_off : strip_off + len(strip_data)] == strip_data
         assert detect_format(cleaned) == "tiff"
-        has_c2pa, has_ai, _findings = inspect_tiff(cleaned)
+        has_c2pa, has_ai, _findings, _notes = inspect_tiff(cleaned)
         assert has_c2pa is False
         assert has_ai is False
 
@@ -377,15 +380,15 @@ def test_tiff_clean_roundtrip_byte_identical():
     data, _off, _strip = _minimal_tiff(with_meta=False)
     cleaned, actions = strip_tiff(data)
     assert cleaned == data
-    assert any("no TIFF metadata tags removed" in a for a in actions)
+    assert any("no TIFF metadata tags removed" in a.text for a in actions)
 
 
 def test_tiff_keep_non_ai_metadata():
     data, _off, _strip = _minimal_tiff()
     cleaned, actions = strip_tiff(data, strip_all_metadata=False)
-    assert any("drop TIFF tag 700" in a for a in actions)
-    assert any("drop TIFF tag 34665" in a for a in actions)
-    assert not any("drop TIFF tag 271" in a for a in actions)
+    assert any("drop TIFF tag 700" in a.text for a in actions)
+    assert any("drop TIFF tag 34665" in a.text for a in actions)
+    assert not any("drop TIFF tag 271" in a.text for a in actions)
     assert b"Acme Corp" in cleaned
     assert b"AIGC" not in cleaned
 

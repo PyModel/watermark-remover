@@ -120,3 +120,13 @@ def test_cli_json_and_error(tmp_path: Path) -> None:
     )
     assert bad.returncode != 0
     assert "not a regular file" in bad.stderr
+
+
+def test_context_notes_do_not_raise_image_risk(tmp_path: Path) -> None:
+    # Brands and a missing iinf table are notes, not residual marks.
+    from test_heif_meta import make_heif
+
+    photo = tmp_path / "photo.heic"
+    photo.write_bytes(make_heif(with_jumb=False, item_payload=b"Exif\x00\x00MM Canon EOS R5"))
+    report = assess_claude_risk(photo)
+    assert not any(s["signal"] == "visible_mark_findings" for s in report["signals"])

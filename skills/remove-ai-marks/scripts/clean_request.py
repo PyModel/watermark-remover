@@ -32,8 +32,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from asset_kind import AssetKind, classify_asset
-from batch_inputs import InputItem, safe_output_path
+from asset_kind import SUPPORTED_EXTENSIONS, AssetKind, classify_asset
+from batch_inputs import InputItem, InputSelection, safe_output_path, select_inputs
 from clean_asset import (
     CleanPlan,
     ImageDegradePlan,
@@ -42,10 +42,10 @@ from clean_asset import (
 from common import (
     MAX_INPUT_BYTES,
     ROUTER_ADVICE,
+    alias_key,
     backup_path,
     cleaned_path,
     guard_binary,
-    paths_alias,
     validate_output_path,
 )
 from morphomod import DEFAULT_DILATION_RADIUS, VisiblePlan
@@ -566,6 +566,34 @@ def resolve_kind(path: Path, request: CleanRequest) -> AssetKind:
     return kind
 
 
+def select_request_inputs(request: CleanRequest) -> InputSelection:
+    """The files a clean of *request* touches, and whether it is a batch.
+
+    A batch output directory that sits under an input is excluded, so a
+    rerun never cleans its own outputs.  Raises ``ValueError`` with the
+    selector's message, or when a single-file option meets a batch.
+    """
+    excluded_roots = (
+        (request.output,)
+        if request.output
+        and not request.in_place
+        and any(source.is_dir() for source in request.paths)
+        else ()
+    )
+    selection = select_inputs(
+        request.paths,
+        recursive=request.recursive,
+        pattern=request.glob,
+        extensions=request.allowed_extensions(SUPPORTED_EXTENSIONS),
+        excluded_roots=excluded_roots,
+    )
+    if selection.batch and (request.visible_mask or request.visible_box):
+        raise ValueError(
+            "--visible-mask/--visible-box are single-file options; use --detect-command for batch"
+        )
+    return selection
+
+
 def plan_work(
     items: Sequence[InputItem],
     request: CleanRequest,
@@ -577,8 +605,8 @@ def plan_work(
     for ancillary in ancillary_inputs:
         if not ancillary.is_file() or ancillary.is_symlink():
             raise ValueError(f"not a regular mask file: {ancillary}")
-    all_inputs = [*inputs, *ancillary_inputs]
-    destinations: list[Path] = []
+    input_keys = {alias_key(path) for path in (*inputs, *ancillary_inputs)}
+    destination_keys: set[tuple[object, ...]] = set()
     work: list[tuple[InputItem, Path | None, CleanPlan]] = []
 
     for item in items:
@@ -597,13 +625,12 @@ def plan_work(
                 output = request.output
 
             validate_output_path(item.path, output)
-            for source in all_inputs:
-                if paths_alias(output, source):
-                    raise ValueError(f"output aliases an input: {output}")
-            for existing in destinations:
-                if paths_alias(output, existing):
-                    raise ValueError(f"batch output collision: {output}")
-            destinations.append(output)
+            key = alias_key(output)
+            if key in input_keys:
+                raise ValueError(f"output aliases an input: {output}")
+            if key in destination_keys:
+                raise ValueError(f"batch output collision: {output}")
+            destination_keys.add(key)
             dest = output
 
         if item.path.stat().st_size > MAX_INPUT_BYTES:
@@ -620,11 +647,12 @@ def plan_work(
                 raise ValueError("visible plan is missing a mask output path")
             if mask_output.is_symlink():
                 raise ValueError(f"mask output is a symlink: {mask_output}")
-            if any(paths_alias(mask_output, source) for source in all_inputs):
+            mask_key = alias_key(mask_output)
+            if mask_key in input_keys:
                 raise ValueError(f"mask output aliases an input: {mask_output}")
-            if any(paths_alias(mask_output, existing) for existing in destinations):
+            if mask_key in destination_keys:
                 raise ValueError(f"mask/output collision: {mask_output}")
-            destinations.append(mask_output)
+            destination_keys.add(mask_key)
 
         work.append((item, output, plan))
     return work

@@ -16,10 +16,13 @@ from pathlib import Path
 from typing import Any
 
 import external_command
+import pipeline_actions as act
 from common import atomic_write_bytes, atomic_write_text, classify_finding_confidence, which
 from image_meta import (
     AI_META_HINTS,
     C2PA_MARKERS,
+    MetadataScan,
+    _contains_any,
     detect_format,
     inspect_avif,
     inspect_bmp,
@@ -39,8 +42,15 @@ from image_meta import (
     strip_tiff,
     strip_webp,
 )
+from pipeline_actions import Action, any_change, report_actions
 
 run_command = external_command.run_command
+
+#: One container scanner's verdict: ``(has_c2pa, has_ai_metadata, findings,
+#: notes, details)``.  As with ``image_meta.MetadataScan``, findings are the
+#: AI/provenance signals (and scan problems); notes are context that is
+#: neither, and are never counted as marks.
+ContainerScan = tuple[bool, bool, list[str], list[str], dict[str, Any]]
 
 # Frontmatter / meta keys that often carry AI provenance
 AI_FRONTMATTER_KEYS = frozenset(
@@ -168,21 +178,12 @@ def detect_container_format(path: Path, data: bytes | None = None) -> str:
 
 
 def _blob_hits(blob: bytes) -> tuple[bool, bool, list[str]]:
-    lower = blob.lower()
-    findings: list[str] = []
-    has_c2pa = False
-    has_ai = False
-    for n in C2PA_MARKERS:
-        if n.lower() in lower:
-            has_c2pa = True
-            findings.append(f"marker:{n.decode('ascii', errors='replace')}")
-    for n in AI_META_HINTS:
-        if n.lower() in lower:
-            has_ai = True
-            label = n.decode("ascii", errors="replace")
-            if label not in {f.split(":", 1)[-1] for f in findings}:
-                findings.append(f"ai:{label}")
-    return has_c2pa, has_ai or has_c2pa, findings[:30]
+    c2pa_hits = _contains_any(blob, C2PA_MARKERS)
+    seen = {h.lower() for h in c2pa_hits}
+    ai_hits = [h for h in _contains_any(blob, AI_META_HINTS) if h.lower() not in seen]
+    findings = [f"marker:{h}" for h in c2pa_hits] + [f"ai:{h}" for h in ai_hits]
+    has_c2pa = bool(c2pa_hits)
+    return has_c2pa, has_c2pa or bool(ai_hits), findings[:30]
 
 
 # ---------------------------------------------------------------------------
@@ -198,23 +199,22 @@ RE_DATA_IMAGE_URI = re.compile(
 )
 
 
-def _media_strip_succeeded(sub_actions: list[str], cleaned: bytes, raw: bytes) -> bool:
+def _media_strip_succeeded(sub_actions: list[Action], cleaned: bytes, raw: bytes) -> bool:
     """True when a media stripper changed bytes while reporting a removal.
 
-    Most raster strippers "drop" chunks/segments; heif_meta neutralizes in
-    place ("neutralized"/"zeroed") to preserve offsets, so accept both
-    vocabularies. The no-op case always returns the input bytes unchanged.
+    A step's ``effect`` says whether it changed the output, whatever its
+    wording: raster strippers drop chunks, heif_meta zeroes in place, and an
+    SVG may only have cleaned a nested data URI.  The no-op case always
+    returns the input bytes unchanged.
     """
-    if cleaned == raw:
-        return False
-    verbs = ("drop", "neutraliz", "zero")
-    return any(verb in action.lower() for action in sub_actions for verb in verbs)
+    return cleaned != raw and any_change(sub_actions)
 
 
-def _inspect_embedded_data_uris(text: str) -> tuple[bool, bool, list[str]]:
+def _inspect_embedded_data_uris(text: str) -> MetadataScan:
     has_c2pa = False
     has_ai = False
     findings: list[str] = []
+    notes: list[str] = []
 
     import base64
     import urllib.parse
@@ -241,18 +241,19 @@ def _inspect_embedded_data_uris(text: str) -> tuple[bool, bool, list[str]]:
             continue
 
         fmt = detect_format(data)
+        sub_notes: list[str] = []
         if fmt == "png":
-            sub_c2pa, sub_ai, sub_findings = inspect_png(data)
+            sub_c2pa, sub_ai, sub_findings, sub_notes = inspect_png(data)
         elif fmt == "jpeg":
-            sub_c2pa, sub_ai, sub_findings = inspect_jpeg(data)
+            sub_c2pa, sub_ai, sub_findings, sub_notes = inspect_jpeg(data)
         elif fmt == "webp":
-            sub_c2pa, sub_ai, sub_findings = inspect_webp(data)
+            sub_c2pa, sub_ai, sub_findings, sub_notes = inspect_webp(data)
         elif fmt == "avif":
-            sub_c2pa, sub_ai, sub_findings = inspect_avif(data)
+            sub_c2pa, sub_ai, sub_findings, sub_notes = inspect_avif(data)
         elif fmt == "heif":
-            sub_c2pa, sub_ai, sub_findings = inspect_heic(data)
+            sub_c2pa, sub_ai, sub_findings, sub_notes = inspect_heic(data)
         elif "svg" in mime or data.lstrip().startswith(b"<"):
-            sub_c2pa, sub_ai, sub_findings, _ = inspect_svg(data)
+            sub_c2pa, sub_ai, sub_findings, sub_notes, _ = inspect_svg(data)
         else:
             sub_c2pa, sub_ai, sub_findings = _blob_hits(data)
 
@@ -260,19 +261,19 @@ def _inspect_embedded_data_uris(text: str) -> tuple[bool, bool, list[str]]:
             has_c2pa = True
         if sub_ai or sub_c2pa:
             has_ai = True
-        for f in sub_findings:
-            findings.append(f"embedded data:image/{mime}: {f}")
+        findings.extend(f"embedded data:image/{mime}: {f}" for f in sub_findings)
+        notes.extend(f"embedded data:image/{mime}: {n}" for n in sub_notes)
 
-    return has_c2pa, has_ai, findings
+    return has_c2pa, has_ai, findings, notes
 
 
 def _clean_embedded_data_uris(
     text: str, *, strip_all_metadata: bool = True
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[Action]]:
     import base64
     import urllib.parse
 
-    actions: list[str] = []
+    actions: list[Action] = []
 
     def _replace_uri(m: re.Match[str]) -> str:
         full_match = m.group(0)
@@ -297,7 +298,7 @@ def _clean_embedded_data_uris(
             return full_match
 
         fmt = detect_format(data)
-        sub_actions: list[str] = []
+        sub_actions: list[Action] = []
         cleaned_bytes = data
 
         try:
@@ -319,7 +320,7 @@ def _clean_embedded_data_uris(
         if not _media_strip_succeeded(sub_actions, cleaned_bytes, data):
             return full_match
 
-        actions.append(f"cleaned embedded data:image/{mime} ({', '.join(sub_actions[:2])})")
+        actions.append(act.clean_data_uri(mime, sub_actions))
 
         if is_b64:
             new_b64 = base64.b64encode(cleaned_bytes).decode("ascii")
@@ -340,7 +341,7 @@ _GENERATOR_AI_RE = re.compile(
     re.I,
 )
 _META_ATTR_RE = re.compile(
-    r"""(name|property|content|generator)s*=s*["']([^"']*)["']""",
+    r"""(name|property|content|generator)\s*=\s*["']([^"']*)["']""",
     re.I,
 )
 
@@ -364,6 +365,7 @@ def _is_cms_generator_meta(tag: str) -> bool:
 # Markdown frontmatter
 # ---------------------------------------------------------------------------
 
+_C2PA_KEY_RE = re.compile(r"c2pa|content.?credential", re.I)
 _FM_RE = re.compile(r"\A---\r?\n(.*?)\r?\n---\r?\n?", re.DOTALL)
 
 
@@ -381,7 +383,7 @@ def _parse_simple_yaml_keys(block: str) -> list[tuple[str, str, int]]:
     return rows
 
 
-def inspect_markdown(text: str) -> tuple[bool, bool, list[str], dict]:
+def inspect_markdown(text: str) -> ContainerScan:
     findings: list[str] = []
     has_ai = False
     has_fm = False
@@ -390,30 +392,34 @@ def inspect_markdown(text: str) -> tuple[bool, bool, list[str], dict]:
     if m:
         has_fm = True
         block = m.group(1)
-        for key, _line, _i in _parse_simple_yaml_keys(block):
+        for key, line, _i in _parse_simple_yaml_keys(block):
             keys.append(key)
+            val = line.split(":", 1)[1]
             if key.lower() in AI_FRONTMATTER_KEYS or AI_META_NAME_RE.search(key):
                 has_ai = True
                 findings.append(f"frontmatter key: {key}")
-            # also check value
-            val = _line.split(":", 1)[1] if ":" in _line else ""
-            if AI_META_NAME_RE.search(val):
+            elif AI_META_NAME_RE.search(val):
                 has_ai = True
                 findings.append(f"frontmatter value hit on {key}")
 
-    uri_c2pa, uri_ai, uri_findings = _inspect_embedded_data_uris(text)
+    uri_c2pa, uri_ai, uri_findings, uri_notes = _inspect_embedded_data_uris(text)
     if uri_c2pa:
         has_ai = True
     if uri_ai:
         has_ai = True
     findings.extend(uri_findings)
 
-    c2pa = uri_c2pa or any("c2pa" in f.lower() or "content" in f.lower() for f in findings)
-    return c2pa, has_ai, findings, {"has_frontmatter": has_fm, "keys": keys}
+    c2pa = uri_c2pa or any(_C2PA_KEY_RE.search(f) for f in findings)
+    return c2pa, has_ai, findings, uri_notes, {"has_frontmatter": has_fm, "keys": keys}
 
 
-def clean_markdown(text: str) -> tuple[str, list[str]]:
-    actions: list[str] = []
+_NOTHING_IN_MARKDOWN = act.nothing_removed(
+    "markdown", "no AI frontmatter keys or embedded data URIs removed"
+)
+
+
+def clean_markdown(text: str) -> tuple[str, list[Action]]:
+    actions: list[Action] = []
     m = _FM_RE.match(text)
     if not m:
         # no frontmatter: still scrub embedded data URIs in the body
@@ -421,7 +427,7 @@ def clean_markdown(text: str) -> tuple[str, list[str]]:
         if uri_actions:
             actions.extend(uri_actions)
         if not actions:
-            actions.append("no AI frontmatter keys or embedded data URIs removed")
+            actions.append(_NOTHING_IN_MARKDOWN)
         return out, actions
     block = m.group(1)
     body = text[m.end() :]
@@ -448,30 +454,30 @@ def clean_markdown(text: str) -> tuple[str, list[str]]:
         key = km.group(1)
         val = line.split(":", 1)[1] if ":" in line else ""
         if key.lower() in AI_FRONTMATTER_KEYS or AI_META_NAME_RE.search(key):
-            actions.append(f"drop frontmatter key: {key}")
+            actions.append(act.drop_frontmatter_key(key))
             dropping_parent = True
             continue
         if AI_META_NAME_RE.search(val):
-            actions.append(f"drop frontmatter key (value hit): {key}")
+            actions.append(act.drop_frontmatter_key(key, value_hit=True))
             dropping_parent = True
             continue
         kept.append(line)
     if not actions:
-        actions.append("no AI frontmatter keys removed")
+        actions.append(act.nothing_removed("markdown", "no AI frontmatter keys removed"))
     # strip trailing empty nested orphans already handled
     new_block = "\n".join(kept).strip("\n")
     if new_block:
         out = f"---\n{new_block}\n---\n{body}"
     else:
         out = body.lstrip("\n")
-        actions.append("removed empty frontmatter block")
+        actions.append(act.drop_empty_frontmatter())
 
     out, uri_actions = _clean_embedded_data_uris(out)
     if uri_actions:
         actions.extend(uri_actions)
 
     if not actions:
-        actions.append("no AI frontmatter keys or embedded data URIs removed")
+        actions.append(_NOTHING_IN_MARKDOWN)
     return out, actions
 
 
@@ -489,15 +495,16 @@ _JSONLD_RE = re.compile(
 )
 
 
-def inspect_html(text: str) -> tuple[bool, bool, list[str], dict]:
+def inspect_html(text: str) -> ContainerScan:
     findings: list[str] = []
+    notes: list[str] = []
     has_ai = False
     has_c2pa = False
     for tag in _META_TAG_RE.findall(text):
         if re.search(r"c2pa|content.?credential", tag, re.I):
             has_c2pa = True
         if _is_cms_generator_meta(tag):
-            findings.append(f"info: cms generator: {tag[:120]}")
+            notes.append(f"info: cms generator: {tag[:120]}")
             continue
         if AI_META_NAME_RE.search(tag) or any(
             h.decode("ascii", "ignore").lower() in tag.lower() for h in AI_META_HINTS[:12]
@@ -518,18 +525,19 @@ def inspect_html(text: str) -> tuple[bool, bool, list[str], dict]:
         has_ai = True
         findings.append(f"attr: {m.group(0)[:80]}")
 
-    uri_c2pa, uri_ai, uri_findings = _inspect_embedded_data_uris(text)
+    uri_c2pa, uri_ai, uri_findings, uri_notes = _inspect_embedded_data_uris(text)
     if uri_c2pa:
         has_c2pa = True
     if uri_ai:
         has_ai = True
     findings.extend(uri_findings)
+    notes.extend(uri_notes)
 
-    return has_c2pa, has_ai, findings, {}
+    return has_c2pa, has_ai, findings, notes, {}
 
 
-def clean_html(text: str) -> tuple[str, list[str]]:
-    actions: list[str] = []
+def clean_html(text: str) -> tuple[str, list[Action]]:
+    actions: list[Action] = []
 
     def _meta_sub(m: re.Match[str]) -> str:
         tag = m.group(0)
@@ -538,7 +546,7 @@ def clean_html(text: str) -> tuple[str, list[str]]:
         if AI_META_NAME_RE.search(tag) or re.search(
             r"generator|claude|anthropic|openai|gemini|synthid|c2pa|aigc", tag, re.I
         ):
-            actions.append(f"drop meta: {tag[:80]}")
+            actions.append(act.drop_html_meta(tag))
             return ""
         return tag
 
@@ -549,19 +557,19 @@ def clean_html(text: str) -> tuple[str, list[str]]:
         if AI_META_NAME_RE.search(blob) or re.search(
             r"DigitalSourceType|trainedAlgorithmicMedia|SoftwareAgent", blob, re.I
         ):
-            actions.append("drop json-ld provenance-like script")
+            actions.append(act.drop_json_ld())
             return ""
         return blob
 
     out = _JSONLD_RE.sub(_jsonld_sub, out)
     out2, n = re.subn(r"\sdata-ai[\w-]*\s*=\s*[\"'][^\"']*[\"']", "", out, flags=re.I)
     if n:
-        actions.append(f"drop data-ai* attributes x{n}")
+        actions.append(act.drop_data_ai_attributes(n))
         out = out2
     out, uri_actions = _clean_embedded_data_uris(out)
     actions.extend(uri_actions)
     if not actions:
-        actions.append("no HTML AI meta removed")
+        actions.append(act.nothing_removed("html", "no HTML AI meta removed"))
     return out, actions
 
 
@@ -570,8 +578,9 @@ def clean_html(text: str) -> tuple[str, list[str]]:
 # ---------------------------------------------------------------------------
 
 
-def inspect_svg(data: bytes) -> tuple[bool, bool, list[str], dict]:
+def inspect_svg(data: bytes) -> ContainerScan:
     findings: list[str] = []
+    notes: list[str] = []
     has_c2pa, has_ai, hits = _blob_hits(data)
     findings.extend(hits)
     try:
@@ -585,19 +594,20 @@ def inspect_svg(data: bytes) -> tuple[bool, bool, list[str], dict]:
         if re.search(r"c2pa|jumbf", text, re.I):
             has_c2pa = True
 
-        uri_c2pa, uri_ai, uri_findings = _inspect_embedded_data_uris(text)
+        uri_c2pa, uri_ai, uri_findings, uri_notes = _inspect_embedded_data_uris(text)
         if uri_c2pa:
             has_c2pa = True
         if uri_ai:
             has_ai = True
         findings.extend(uri_findings)
+        notes.extend(uri_notes)
     except Exception as e:
         findings.append(f"svg decode note: {e}")
-    return has_c2pa, has_ai or has_c2pa, findings, {}
+    return has_c2pa, has_ai or has_c2pa, findings, notes, {}
 
 
-def clean_svg(data: bytes) -> tuple[bytes, list[str]]:
-    actions: list[str] = []
+def clean_svg(data: bytes) -> tuple[bytes, list[Action]]:
+    actions: list[Action] = []
     text = data.decode("utf-8", errors="surrogateescape")
     # Drop metadata blocks
     new, n = re.subn(
@@ -607,7 +617,7 @@ def clean_svg(data: bytes) -> tuple[bytes, list[str]]:
         flags=re.I | re.DOTALL,
     )
     if n:
-        actions.append(f"drop <metadata> x{n}")
+        actions.append(act.drop_svg_metadata(n))
         text = new
     # Drop adobe xmp packets
     new, n = re.subn(
@@ -617,14 +627,14 @@ def clean_svg(data: bytes) -> tuple[bytes, list[str]]:
         flags=re.I | re.DOTALL,
     )
     if n:
-        actions.append(f"drop xmpmeta x{n}")
+        actions.append(act.drop_svg_xmp(n))
         text = new
 
     # Drop comments that look like provenance
     def _cmt(m: re.Match[str]) -> str:
         body = m.group(0)
         if AI_META_NAME_RE.search(body):
-            actions.append("drop SVG comment with AI markers")
+            actions.append(act.drop_svg_comment())
             return ""
         return body
 
@@ -644,10 +654,10 @@ def clean_svg(data: bytes) -> tuple[bytes, list[str]]:
             flags=re.I,
         )
         if n:
-            actions.append(f"drop generator-like attrs x{n}")
+            actions.append(act.drop_svg_generator_attributes(n))
             text = new
     if not actions:
-        actions.append("no SVG metadata removed")
+        actions.append(act.nothing_removed("svg", "no SVG metadata removed"))
     return text.encode("utf-8", errors="surrogateescape"), actions
 
 
@@ -791,8 +801,9 @@ def _is_docx_meta_part(name: str) -> bool:
     return name.startswith(("docProps/", "customXml/"))
 
 
-def _inspect_ooxml_zip(data: bytes, fmt: str) -> tuple[bool, bool, list[str], dict]:
+def _inspect_ooxml_zip(data: bytes, fmt: str) -> ContainerScan:
     findings: list[str] = []
+    notes: list[str] = []
     has_c2pa = False
     has_ai = False
     parts: list[str] = []
@@ -824,31 +835,32 @@ def _inspect_ooxml_zip(data: bytes, fmt: str) -> tuple[bool, bool, list[str], di
                 ):
                     raw = _read_zip_member(zf, info, budget)
                     img_fmt = detect_format(raw)
-                    sub_c2pa, sub_ai, sub_findings = False, False, []
+                    scan: MetadataScan = (False, False, [], [])
                     if img_fmt == "png":
-                        sub_c2pa, sub_ai, sub_findings = inspect_png(raw)
+                        scan = inspect_png(raw)
                     elif img_fmt == "jpeg":
-                        sub_c2pa, sub_ai, sub_findings = inspect_jpeg(raw)
+                        scan = inspect_jpeg(raw)
                     elif img_fmt == "webp":
-                        sub_c2pa, sub_ai, sub_findings = inspect_webp(raw)
+                        scan = inspect_webp(raw)
                     elif img_fmt == "avif":
-                        sub_c2pa, sub_ai, sub_findings = inspect_avif(raw)
+                        scan = inspect_avif(raw)
                     elif img_fmt == "heif":
-                        sub_c2pa, sub_ai, sub_findings = inspect_heic(raw)
+                        scan = inspect_heic(raw)
                     elif img_fmt == "gif":
-                        sub_c2pa, sub_ai, sub_findings = inspect_gif(raw)
+                        scan = inspect_gif(raw)
                     elif img_fmt == "tiff":
-                        sub_c2pa, sub_ai, sub_findings = inspect_tiff(raw)
+                        scan = inspect_tiff(raw)
                     elif img_fmt == "bmp":
-                        sub_c2pa, sub_ai, sub_findings = inspect_bmp(raw)
+                        scan = inspect_bmp(raw)
                     elif name.lower().endswith(".svg") or raw.lstrip().startswith(b"<"):
-                        sub_c2pa, sub_ai, sub_findings, _ = inspect_svg(raw)
+                        scan = inspect_svg(raw)[:4]
+                    sub_c2pa, sub_ai, sub_findings, sub_notes = scan
                     if sub_c2pa:
                         has_c2pa = True
                     if sub_ai or sub_c2pa:
                         has_ai = True
-                    for sf in sub_findings:
-                        findings.append(f"{name}: {sf}")
+                    findings.extend(f"{name}: {sf}" for sf in sub_findings)
+                    notes.extend(f"{name}: {sn}" for sn in sub_notes)
                     continue
 
                 # Only metadata/provenance parts carry AI markers. The visible
@@ -867,21 +879,21 @@ def _inspect_ooxml_zip(data: bytes, fmt: str) -> tuple[bool, bool, list[str], di
             # always flag customXml presence lightly
             custom = [n for n in parts if n.startswith("customXml/")]
             if custom:
-                findings.append(f"customXml parts: {len(custom)}")
+                notes.append(f"customXml parts: {len(custom)}")
     except _ZIP_PARSE_ERRORS:
-        return False, False, [f"not a valid {fmt.upper()} zip"], {}
-    return has_c2pa, has_ai or has_c2pa, findings, {"parts": len(parts)}
+        return False, False, [f"not a valid {fmt.upper()} zip"], [], {}
+    return has_c2pa, has_ai or has_c2pa, findings, notes, {"parts": len(parts)}
 
 
-def inspect_docx(data: bytes) -> tuple[bool, bool, list[str], dict]:
+def inspect_docx(data: bytes) -> ContainerScan:
     return _inspect_ooxml_zip(data, "docx")
 
 
-def inspect_xlsx(data: bytes) -> tuple[bool, bool, list[str], dict]:
+def inspect_xlsx(data: bytes) -> ContainerScan:
     return _inspect_ooxml_zip(data, "xlsx")
 
 
-def inspect_pptx(data: bytes) -> tuple[bool, bool, list[str], dict]:
+def inspect_pptx(data: bytes) -> ContainerScan:
     return _inspect_ooxml_zip(data, "pptx")
 
 
@@ -1007,8 +1019,8 @@ def _prune_dangling_relationships(
 
 def _scrub_ooxml_zip(
     data: bytes, fmt: str, *, also_layer_a_text: bool = True
-) -> tuple[bytes, list[str]]:
-    actions: list[str] = []
+) -> tuple[bytes, list[Action]]:
+    actions: list[Action] = []
     budget = [0]
     layer_removed = 0
     layer_replaced = 0
@@ -1027,7 +1039,7 @@ def _scrub_ooxml_zip(
                 re.I,
             ):
                 img_fmt = detect_format(raw)
-                sub_actions: list[str] = []
+                sub_actions: list[Action] = []
                 cleaned_bytes = raw
                 try:
                     if img_fmt == "png":
@@ -1051,20 +1063,20 @@ def _scrub_ooxml_zip(
                 except Exception:  # noqa: S110
                     pass
                 if _media_strip_succeeded(sub_actions, cleaned_bytes, raw):
-                    actions.append(f"clean embedded media in {name} ({', '.join(sub_actions[:2])})")
+                    actions.append(act.clean_embedded_media(name, sub_actions))
                     raw = cleaned_bytes
                 kept.append((info, raw))
                 continue
 
             # 2. Drop customXml trees
             if name.startswith("customXml/"):
-                actions.append(f"drop part {name}")
+                actions.append(act.drop_part(name))
                 continue
 
             # 3. docProps/ provenance
             if name in DOCX_META_PARTS or name.startswith("docProps/"):
                 if name.endswith("custom.xml"):
-                    actions.append(f"drop part {name}")
+                    actions.append(act.drop_part(name))
                     continue
                 text = raw.decode("utf-8", errors="replace")
                 new = text
@@ -1073,7 +1085,7 @@ def _scrub_ooxml_zip(
 
                     def _empty(m: re.Match[str], _label=label, _name=name) -> str:
                         if m.group(2):
-                            actions.append(f"scrub {_name} field {_label}")
+                            actions.append(act.scrub_field(_name, _label))
                         return m.group(1) + m.group(3)
 
                     new = re.sub(pat, _empty, new, flags=re.I | re.DOTALL)
@@ -1087,7 +1099,7 @@ def _scrub_ooxml_zip(
                     text,
                 )
                 if n:
-                    actions.append(f"drop Content_Types customXml overrides x{n}")
+                    actions.append(act.drop_content_type_overrides("customXml", n))
                     raw = new.encode("utf-8")
                 new, n = re.subn(
                     r"<Override\b[^>]*PartName=\"/docProps/custom\.xml\"[^>]*/>",
@@ -1095,7 +1107,7 @@ def _scrub_ooxml_zip(
                     raw.decode("utf-8", errors="replace"),
                 )
                 if n:
-                    actions.append(f"drop Content_Types custom.xml override x{n}")
+                    actions.append(act.drop_content_type_overrides("custom.xml", n))
                     raw = new.encode("utf-8")
 
             # 5. Layer A text runs
@@ -1131,7 +1143,7 @@ def _scrub_ooxml_zip(
         if info.filename.endswith(".rels"):
             part_raw, n = _prune_dangling_relationships(info.filename, raw, kept_names)
             if n:
-                actions.append(f"prune dangling relationships x{n} in {info.filename}")
+                actions.append(act.prune_relationships(info.filename, n))
         final.append((info, part_raw))
 
     out_buf = io.BytesIO()
@@ -1139,21 +1151,21 @@ def _scrub_ooxml_zip(
         for info, raw in final:
             zout.writestr(info, raw)
     if layer_removed or layer_replaced:
-        actions.append(f"layer A text: removed={layer_removed} replaced={layer_replaced}")
+        actions.append(act.layer_a_text(layer_removed, layer_replaced))
     if not actions:
-        actions.append(f"no {fmt.upper()} metadata parts removed")
+        actions.append(act.nothing_removed(fmt, f"no {fmt.upper()} metadata parts removed"))
     return out_buf.getvalue(), actions
 
 
-def clean_docx(data: bytes, *, also_layer_a_text: bool = True) -> tuple[bytes, list[str]]:
+def clean_docx(data: bytes, *, also_layer_a_text: bool = True) -> tuple[bytes, list[Action]]:
     return _scrub_ooxml_zip(data, "docx", also_layer_a_text=also_layer_a_text)
 
 
-def clean_xlsx(data: bytes, *, also_layer_a_text: bool = True) -> tuple[bytes, list[str]]:
+def clean_xlsx(data: bytes, *, also_layer_a_text: bool = True) -> tuple[bytes, list[Action]]:
     return _scrub_ooxml_zip(data, "xlsx", also_layer_a_text=also_layer_a_text)
 
 
-def clean_pptx(data: bytes, *, also_layer_a_text: bool = True) -> tuple[bytes, list[str]]:
+def clean_pptx(data: bytes, *, also_layer_a_text: bool = True) -> tuple[bytes, list[Action]]:
     return _scrub_ooxml_zip(data, "pptx", also_layer_a_text=also_layer_a_text)
 
 
@@ -1180,7 +1192,7 @@ def _prune_odt_manifest_entries(raw: bytes, dropped: set[str]) -> tuple[bytes, i
     return new.encode("utf-8"), removed[0]
 
 
-def inspect_odt(data: bytes) -> tuple[bool, bool, list[str], dict]:
+def inspect_odt(data: bytes) -> ContainerScan:
     findings: list[str] = []
     has_c2pa = False
     has_ai = False
@@ -1206,11 +1218,11 @@ def inspect_odt(data: bytes) -> tuple[bool, bool, list[str], dict]:
                     has_ai = True
                     findings.append("meta.xml generator-like fields")
     except _ZIP_PARSE_ERRORS:
-        return False, False, ["not a valid ODT zip"], {}
-    return has_c2pa, has_ai or has_c2pa, findings, {}
+        return False, False, ["not a valid ODT zip"], [], {}
+    return has_c2pa, has_ai or has_c2pa, findings, [], {}
 
 
-def clean_odt(data: bytes, *, also_layer_a_text: bool = True) -> tuple[bytes, list[str]]:
+def clean_odt(data: bytes, *, also_layer_a_text: bool = True) -> tuple[bytes, list[Action]]:
     actions: list[str] = []
     budget = [0]
     layer_removed = 0
@@ -1232,13 +1244,13 @@ def clean_odt(data: bytes, *, also_layer_a_text: bool = True) -> tuple[bytes, li
                     flags=re.I | re.DOTALL,
                 )
                 if n:
-                    actions.append("drop meta:generator")
+                    actions.append(act.drop_generator_meta())
                     text = new
 
                 # scrub creator-like if AI
                 def _creator(m: re.Match[str]) -> str:
                     if AI_META_NAME_RE.search(m.group(0)):
-                        actions.append("scrub creator-like meta")
+                        actions.append(act.scrub_creator())
                         return ""
                     return m.group(0)
 
@@ -1257,7 +1269,7 @@ def clean_odt(data: bytes, *, also_layer_a_text: bool = True) -> tuple[bytes, li
                     "mimetype",
                     "META-INF/manifest.xml",
                 ):
-                    actions.append(f"drop part {name} (AI/C2PA markers)")
+                    actions.append(act.drop_part(name, markers=True))
                     dropped.add(name)
                     continue
             # Layer A over the visible paragraph text of the body part.
@@ -1280,7 +1292,7 @@ def clean_odt(data: bytes, *, also_layer_a_text: bool = True) -> tuple[bytes, li
             if info.filename == "META-INF/manifest.xml":
                 pruned, n = _prune_odt_manifest_entries(part_raw, dropped)
                 if n:
-                    actions.append(f"drop manifest entries x{n}")
+                    actions.append(act.prune_odf_manifest(n))
                     out_raw = pruned
             rewritten.append((info, out_raw))
         kept = rewritten
@@ -1290,9 +1302,9 @@ def clean_odt(data: bytes, *, also_layer_a_text: bool = True) -> tuple[bytes, li
         for info, raw in kept:
             zout.writestr(info, raw)
     if layer_removed or layer_replaced:
-        actions.append(f"layer A text: removed={layer_removed} replaced={layer_replaced}")
+        actions.append(act.layer_a_text(layer_removed, layer_replaced))
     if not actions:
-        actions.append("no ODT metadata removed")
+        actions.append(act.nothing_removed("odt", "no ODT metadata removed"))
     return out_buf.getvalue(), actions
 
 
@@ -1344,8 +1356,9 @@ def _epub_encrypted_parts(data: bytes) -> set[str]:
     return names
 
 
-def inspect_epub(data: bytes) -> tuple[bool, bool, list[str], dict]:
+def inspect_epub(data: bytes) -> ContainerScan:
     findings: list[str] = []
+    notes: list[str] = []
     has_c2pa = False
     has_ai = False
     budget = [0]
@@ -1369,13 +1382,13 @@ def inspect_epub(data: bytes) -> tuple[bool, bool, list[str], dict]:
                 raw = _read_zip_member(zf, info, budget)
                 if name.lower().endswith((".xhtml", ".html", ".htm")):
                     text = raw.decode("utf-8", errors="surrogateescape")
-                    c2, ai, sub, _ = inspect_html(text)
+                    c2, ai, sub, sub_notes, _ = inspect_html(text)
                     if c2:
                         has_c2pa = True
                     if ai:
                         has_ai = True
-                    for f in sub:
-                        findings.append(f"{name}: {f}")
+                    findings.extend(f"{name}: {f}" for f in sub)
+                    notes.extend(f"{name}: {n}" for n in sub_notes)
                     continue
                 if name.lower().endswith(".opf"):
                     text = raw.decode("utf-8", errors="surrogateescape")
@@ -1394,8 +1407,8 @@ def inspect_epub(data: bytes) -> tuple[bool, bool, list[str], dict]:
                     has_ai = has_ai or ai
                     findings.append(f"{name}: {', '.join(hits[:6])}")
     except zipfile.BadZipFile:
-        return False, False, ["not a valid EPUB zip"], {}
-    return has_c2pa, has_ai or has_c2pa, findings, {"parts": len(names)}
+        return False, False, ["not a valid EPUB zip"], [], {}
+    return has_c2pa, has_ai or has_c2pa, findings, notes, {"parts": len(names)}
 
 
 def _prune_opf_manifest(raw: bytes, opf_name: str, dropped: set[str]) -> tuple[bytes, int]:
@@ -1438,14 +1451,14 @@ def _prune_opf_manifest(raw: bytes, opf_name: str, dropped: set[str]) -> tuple[b
     return new.encode("utf-8"), removed[0]
 
 
-def _scrub_epub_opf(text: str) -> tuple[str, list[str]]:
+def _scrub_epub_opf(text: str) -> tuple[str, list[Action]]:
     """Scrub AI-ish metadata from the EPUB package document (OPF)."""
-    actions: list[str] = []
+    actions: list[Action] = []
 
     def _meta(m: re.Match[str]) -> str:
         tag = m.group(0)
         if AI_META_NAME_RE.search(tag):
-            actions.append("drop OPF meta tag")
+            actions.append(act.drop_opf_meta())
             return ""
         return tag
 
@@ -1454,7 +1467,7 @@ def _scrub_epub_opf(text: str) -> tuple[str, list[str]]:
 
     def _dc(m: re.Match[str]) -> str:
         if AI_META_NAME_RE.search(m.group(0)):
-            actions.append(f"scrub {m.group(1)} (AI vendor name)")
+            actions.append(act.scrub_opf_field(m.group(1)))
             return f"<{m.group(1)}/>"
         return m.group(0)
 
@@ -1466,15 +1479,15 @@ def _scrub_epub_opf(text: str) -> tuple[str, list[str]]:
     )
 
     if not actions:
-        actions.append("no OPF metadata removed")
+        actions.append(act.nothing_removed("opf", "no OPF metadata removed"))
     return new, actions
 
 
-def clean_epub(data: bytes, *, also_layer_a_text: bool = True) -> tuple[bytes, list[str]]:
+def clean_epub(data: bytes, *, also_layer_a_text: bool = True) -> tuple[bytes, list[Action]]:
     """Rewrite the EPUB: scrub OPF metadata, XHTML meta/JSON-LD, and Layer A."""
     from text_unicode import clean_text  # local import to avoid cycles
 
-    actions: list[str] = []
+    actions: list[Action] = []
     budget = [0]
     layer_removed = 0
     layer_replaced = 0
@@ -1496,7 +1509,7 @@ def clean_epub(data: bytes, *, also_layer_a_text: bool = True) -> tuple[bytes, l
             # 1. Embedded raster / vector media: strip metadata
             if _EPUB_MEDIA_RE.search(low):
                 img_fmt = detect_format(raw)
-                sub_actions: list[str] = []
+                sub_actions: list[Action] = []
                 cleaned = raw
                 try:
                     if img_fmt == "png":
@@ -1520,7 +1533,7 @@ def clean_epub(data: bytes, *, also_layer_a_text: bool = True) -> tuple[bytes, l
                 except Exception:  # noqa: S110
                     pass
                 if _media_strip_succeeded(sub_actions, cleaned, raw):
-                    actions.append(f"clean embedded media in {name} ({', '.join(sub_actions[:2])})")
+                    actions.append(act.clean_embedded_media(name, sub_actions))
                     raw = cleaned
                 kept.append((info, raw))
                 continue
@@ -1528,9 +1541,9 @@ def clean_epub(data: bytes, *, also_layer_a_text: bool = True) -> tuple[bytes, l
             # 2. XHTML content: strip AI meta/JSON-LD, then Layer A
             if low.endswith((".xhtml", ".html", ".htm")):
                 text = raw.decode("utf-8", errors="surrogateescape")
-                text, sub_actions = clean_html(text)
-                if sub_actions and sub_actions != ["no HTML AI meta removed"]:
-                    actions.append(f"{name}: {', '.join(sub_actions[:2])}")
+                text, html_actions = clean_html(text)
+                if any_change(html_actions):
+                    actions.append(act.clean_part(name, html_actions))
                 if also_layer_a_text:
                     text2, stats = clean_text(text)
                     if stats["removed_count"] or stats["replaced_count"]:
@@ -1544,9 +1557,9 @@ def clean_epub(data: bytes, *, also_layer_a_text: bool = True) -> tuple[bytes, l
             # 3. Package document (OPF): scrub AI-ish metadata
             if low.endswith(".opf"):
                 text = raw.decode("utf-8", errors="surrogateescape")
-                new_text, sub_actions = _scrub_epub_opf(text)
-                if sub_actions and sub_actions != ["no OPF metadata removed"]:
-                    actions.extend(f"{name}: {a}" for a in sub_actions)
+                new_text, opf_actions = _scrub_epub_opf(text)
+                if any_change(opf_actions):
+                    actions.extend(act.clean_part(name, [action]) for action in opf_actions)
                 raw = new_text.encode("utf-8", errors="surrogateescape")
                 kept.append((info, raw))
                 continue
@@ -1554,7 +1567,7 @@ def clean_epub(data: bytes, *, also_layer_a_text: bool = True) -> tuple[bytes, l
             # 4. Other parts: drop non-content parts carrying AI/C2PA markers
             c2, ai, _hits = _blob_hits(raw)
             if (c2 or ai) and not _epub_content_part(name):
-                actions.append(f"drop part {name} (AI/C2PA markers)")
+                actions.append(act.drop_part(name, markers=True))
                 dropped.add(name)
                 continue
 
@@ -1572,7 +1585,7 @@ def clean_epub(data: bytes, *, also_layer_a_text: bool = True) -> tuple[bytes, l
             if info.filename.lower().endswith(".opf"):
                 pruned, n = _prune_opf_manifest(part_raw, info.filename, dropped)
                 if n:
-                    actions.append(f"prune OPF manifest entries x{n}")
+                    actions.append(act.prune_opf_manifest(n))
                     out_raw = pruned
             rewritten.append((info, out_raw))
         kept = rewritten
@@ -1583,9 +1596,9 @@ def clean_epub(data: bytes, *, also_layer_a_text: bool = True) -> tuple[bytes, l
             zout.writestr(info, raw)
 
     if layer_removed or layer_replaced:
-        actions.append(f"layer A text: removed={layer_removed} replaced={layer_replaced}")
+        actions.append(act.layer_a_text(layer_removed, layer_replaced))
     if not actions:
-        actions.append("no EPUB metadata removed")
+        actions.append(act.nothing_removed("epub", "no EPUB metadata removed"))
     return out_buf.getvalue(), actions
 
 
@@ -1612,13 +1625,14 @@ def _pdf_structured_blob(data: bytes) -> bytes:
     return no_streams + b"\n" + xmp
 
 
-def inspect_pdf(path: Path, data: bytes) -> tuple[bool, bool, list[str], dict]:
+def inspect_pdf(path: Path, data: bytes) -> ContainerScan:
     findings: list[str] = []
+    notes: list[str] = []
     has_c2pa, has_ai, hits = _blob_hits(_pdf_structured_blob(data))
     findings.extend(f"pdf-structured:{h}" for h in hits)
     xmp_blob = b"\n".join(_XMP_PACKET_RE.findall(data))
     if xmp_blob:
-        findings.append("XMP packet present")
+        notes.append("XMP packet present")
         has_ai = has_ai or bool(
             re.search(
                 rb"digitalSourceType|trainedAlgorithmicMedia|SoftwareAgent|c2pa",
@@ -1631,18 +1645,18 @@ def inspect_pdf(path: Path, data: bytes) -> tuple[bool, bool, list[str], dict]:
     if ct.get("has_manifest"):
         has_c2pa = True
         findings.append("c2patool reports C2PA-related manifest")
-    return has_c2pa, has_ai or has_c2pa, findings, {"tools": tools}
+    return has_c2pa, has_ai or has_c2pa, findings, notes, {"tools": tools}
 
 
 def clean_pdf_pypdf(
     path: Path, dest: Path, *, skip_exiftool: bool = False
-) -> tuple[list[str], dict]:
+) -> tuple[list[Action], dict]:
     """Clean PDF metadata. exiftool > full-document pypdf clone > unchanged copy.
 
     *skip_exiftool* is used by clean_pdf when exiftool already ran and failed,
     so the fallback does not invoke the same failing command a second time.
     """
-    actions: list[str] = []
+    actions: list[Action] = []
     data = path.read_bytes()
     dest.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1657,15 +1671,36 @@ def clean_pdf_pypdf(
                 timeout=60,
                 output_limit=2 * 1024 * 1024,
             )
-            actions.append(f"exiftool -all= (rc={result.returncode})")
+            actions.append(act.exiftool_run(result.returncode))
             if result.returncode == 0 and not (result.stdout_truncated or result.stderr_truncated):
                 return actions, {"mode": "exiftool", "degraded": False}
             if result.stdout_truncated or result.stderr_truncated:
-                actions.append("exiftool output exceeded safety limit; trying pypdf")
+                actions.append(
+                    act.tool_failed(
+                        "exiftool",
+                        "exiftool output exceeded safety limit; trying pypdf",
+                        detail="output exceeded safety limit",
+                        fallback="pypdf",
+                    )
+                )
             else:
-                actions.append(f"exiftool degraded (rc={result.returncode}); trying pypdf")
+                actions.append(
+                    act.tool_failed(
+                        "exiftool",
+                        f"exiftool degraded (rc={result.returncode}); trying pypdf",
+                        returncode=result.returncode,
+                        fallback="pypdf",
+                    )
+                )
         except Exception as error:
-            actions.append(f"exiftool failed: {error}; trying pypdf")
+            actions.append(
+                act.tool_failed(
+                    "exiftool",
+                    f"exiftool failed: {error}; trying pypdf",
+                    detail=str(error),
+                    fallback="pypdf",
+                )
+            )
 
     # Strategy 2: clone the complete document graph, then remove only metadata.
     # Copying pages alone loses outlines, forms, attachments, labels, and viewer state.
@@ -1678,10 +1713,10 @@ def clean_pdf_pypdf(
             reader = PdfReader(str(path))
             if reader.is_encrypted:
                 if reader.decrypt("") == 0:
-                    actions.append("encrypted PDF (password required); copied as-is")
+                    actions.append(act.pdf_encrypted())
                     dest.write_bytes(data)
                     return actions, {"mode": "copy-encrypted", "degraded": True}
-                actions.append("decrypted with empty password")
+                actions.append(act.pdf_decrypted())
             writer = PdfWriter()
             writer.clone_document_from_reader(reader)
             page_metadata = 0
@@ -1690,11 +1725,11 @@ def clean_pdf_pypdf(
                     del page["/Metadata"]
                     page_metadata += 1
             if page_metadata:
-                actions.append(f"pypdf: drop per-page /Metadata x{page_metadata}")
+                actions.append(act.drop_pdf_page_metadata(page_metadata))
             if reader.metadata:
-                actions.append("pypdf: drop document info dictionary")
+                actions.append(act.drop_pdf_docinfo())
             if reader.xmp_metadata is not None or "/Metadata" in writer.root_object:
-                actions.append("pypdf: drop catalog XMP packet")
+                actions.append(act.drop_pdf_catalog_xmp())
             writer.metadata = None
             writer.xmp_metadata = None
             if "/Metadata" in writer.root_object:
@@ -1703,26 +1738,31 @@ def clean_pdf_pypdf(
             writer.write(buf)
             # Publish only after a complete in-memory rewrite.
             atomic_write_bytes(dest, buf.getvalue())
-            actions.append("pypdf: cloned full document graph; removed docinfo/XMP")
+            actions.append(act.pdf_rewritten_pypdf())
             return actions, {"mode": "pypdf", "degraded": False}
         except Exception as e:
-            actions.append(f"pypdf failed: {e}; copied unchanged")
+            actions.append(
+                act.tool_failed("pypdf", f"pypdf failed: {e}; copied unchanged", detail=str(e))
+            )
     else:
-        actions.append("pypdf not installed; copied unchanged")
+        actions.append(act.tool_missing("pypdf", "pypdf not installed; copied unchanged"))
 
     # Never delete bytes from a PDF without rebuilding xref/object offsets.
     atomic_write_bytes(dest, data)
-    actions.append("no structural PDF cleaner succeeded; copied unchanged")
+    actions.append(act.pdf_copied_unchanged())
     return actions, {"mode": "copy", "degraded": True}
 
 
-def _pdf_structural_rewrite(dest: Path, actions: list[str]) -> bool:
+def _pdf_structural_rewrite(dest: Path, actions: list[Action]) -> bool:
     """Rebuild a PDF so unreferenced objects are dropped (qpdf --linearize)."""
     qpdf = which("qpdf")
     if not qpdf:
         actions.append(
-            "warning: exiftool PDF edits are incremental — the original metadata "
-            "bytes remain recoverable; install qpdf for a structural rewrite"
+            act.pdf_rewrite_failed(
+                "warning: exiftool PDF edits are incremental — the original metadata "
+                "bytes remain recoverable; install qpdf for a structural rewrite",
+                detail="qpdf not installed",
+            )
         )
         return False
 
@@ -1735,24 +1775,31 @@ def _pdf_structural_rewrite(dest: Path, actions: list[str]) -> bool:
         )
     except Exception as e:
         tmp.unlink(missing_ok=True)
-        actions.append(f"qpdf rewrite failed: {e}; metadata bytes may remain recoverable")
+        actions.append(
+            act.pdf_rewrite_failed(
+                f"qpdf rewrite failed: {e}; metadata bytes may remain recoverable", detail=str(e)
+            )
+        )
         return False
 
     if r.returncode in (0, 3) and tmp.is_file() and tmp.stat().st_size > 0:
         tmp.replace(dest)
-        actions.append(f"qpdf --linearize structural rewrite (rc={r.returncode})")
+        actions.append(act.pdf_rewritten_qpdf(r.returncode))
         return True
 
     tmp.unlink(missing_ok=True)
     actions.append(
-        f"qpdf rewrite skipped (rc={r.returncode}); metadata bytes may remain recoverable"
+        act.pdf_rewrite_failed(
+            f"qpdf rewrite skipped (rc={r.returncode}); metadata bytes may remain recoverable",
+            returncode=r.returncode,
+        )
     )
     return False
 
 
-def clean_pdf(path: Path, dest: Path) -> tuple[list[str], dict]:
+def clean_pdf(path: Path, dest: Path) -> tuple[list[Action], dict]:
     """Best-effort PDF clean. Prefers exiftool + qpdf; falls back to pypdf."""
-    actions: list[str] = []
+    actions: list[Action] = []
     data = path.read_bytes()
     dest.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1766,28 +1813,40 @@ def clean_pdf(path: Path, dest: Path) -> tuple[list[str], dict]:
                 timeout=60,
                 output_limit=2 * 1024 * 1024,
             )
-            actions.append(f"exiftool -all= (rc={r.returncode})")
+            actions.append(act.exiftool_run(r.returncode))
             truncated = bool(
                 getattr(r, "stdout_truncated", False) or getattr(r, "stderr_truncated", False)
             )
             exiftool_ok = r.returncode == 0 and not truncated
             if r.returncode != 0:
-                actions.append(f"exiftool degraded (rc={r.returncode})")
+                actions.append(
+                    act.tool_failed(
+                        "exiftool",
+                        f"exiftool degraded (rc={r.returncode})",
+                        returncode=r.returncode,
+                    )
+                )
             elif truncated:
-                actions.append("exiftool output exceeded safety limit")
+                actions.append(
+                    act.tool_failed(
+                        "exiftool",
+                        "exiftool output exceeded safety limit",
+                        detail="output exceeded safety limit",
+                    )
+                )
         except Exception as e:
-            actions.append(f"exiftool failed: {e}")
+            actions.append(act.tool_failed("exiftool", f"exiftool failed: {e}", detail=str(e)))
         if not exiftool_ok:
             # exiftool ran but did not strip; dest still holds the original
             # bytes. Hand off to the pypdf path rather than publishing
             # unstripped output under mode "exiftool" with no degraded flag.
-            actions.append("trying pypdf fallback")
+            actions.append(act.try_fallback("pypdf"))
             fallback_actions, fallback_meta = clean_pdf_pypdf(path, dest, skip_exiftool=True)
             return actions + fallback_actions, fallback_meta
         rewritten = _pdf_structural_rewrite(dest, actions)
         c2patool = which("c2patool")
         if c2patool:
-            actions.append("c2patool available for inspect; strip via exiftool/re-export")
+            actions.append(act.c2patool_hint())
         return actions, {"mode": "exiftool", "structural_rewrite": rewritten}
 
     return clean_pdf_pypdf(path, dest)
@@ -1806,24 +1865,25 @@ def inspect_container(path: Path) -> ContainerInspectReport:
     layer_a_total = 0
     layer_a_hits: list[dict] = []
 
+    notes: list[str] = []
     if fmt == "svg":
-        has_c2pa, has_ai, findings, details = inspect_svg(data)
+        has_c2pa, has_ai, findings, notes, details = inspect_svg(data)
     elif fmt == "pdf":
-        has_c2pa, has_ai, findings, details = inspect_pdf(path, data)
+        has_c2pa, has_ai, findings, notes, details = inspect_pdf(path, data)
         tools = details.pop("tools", {})
     elif fmt == "docx":
-        has_c2pa, has_ai, findings, details = inspect_docx(data)
+        has_c2pa, has_ai, findings, notes, details = inspect_docx(data)
     elif fmt == "xlsx":
-        has_c2pa, has_ai, findings, details = inspect_xlsx(data)
+        has_c2pa, has_ai, findings, notes, details = inspect_xlsx(data)
     elif fmt == "pptx":
-        has_c2pa, has_ai, findings, details = inspect_pptx(data)
+        has_c2pa, has_ai, findings, notes, details = inspect_pptx(data)
     elif fmt == "odt":
-        has_c2pa, has_ai, findings, details = inspect_odt(data)
+        has_c2pa, has_ai, findings, notes, details = inspect_odt(data)
     elif fmt == "epub":
-        has_c2pa, has_ai, findings, details = inspect_epub(data)
+        has_c2pa, has_ai, findings, notes, details = inspect_epub(data)
     elif fmt == "html":
         body = data.decode("utf-8", errors="surrogateescape")
-        has_c2pa, has_ai, findings, details = inspect_html(body)
+        has_c2pa, has_ai, findings, notes, details = inspect_html(body)
         from text_unicode import inspect_text  # local import to avoid cycles
 
         ta = inspect_text(body).to_dict()
@@ -1833,7 +1893,7 @@ def inspect_container(path: Path) -> ContainerInspectReport:
             findings.append(f"layer-a: {h['codepoint']} {h['label']} x{h['count']} ({h['kind']})")
     elif fmt == "markdown":
         body = data.decode("utf-8", errors="surrogateescape")
-        has_c2pa, has_ai, findings, details = inspect_markdown(body)
+        has_c2pa, has_ai, findings, notes, details = inspect_markdown(body)
         from text_unicode import inspect_text  # local import to avoid cycles
 
         ta = inspect_text(body).to_dict()
@@ -1870,7 +1930,6 @@ def inspect_container(path: Path) -> ContainerInspectReport:
         except zipfile.BadZipFile:
             pass
 
-    notes: list[str] = []
     if fmt == "pdf":
         notes.append(
             "PDF inspection is best-effort; exiftool/c2patool give more reliable metadata detection"
@@ -1918,7 +1977,7 @@ def clean_container(
 
     data = path.read_bytes()
     fmt = fmt or detect_container_format(path, data)
-    actions: list[str] = []
+    actions: list[Action] = []
     dest.parent.mkdir(parents=True, exist_ok=True)
     meta: dict[str, Any] = {"format": fmt}
 
@@ -1949,9 +2008,7 @@ def clean_container(
         if also_layer_a_text:
             text2, stats = clean_text(text)
             if stats["removed_count"] or stats["replaced_count"]:
-                actions.append(
-                    f"layer A text: removed={stats['removed_count']} replaced={stats['replaced_count']}"
-                )
+                actions.append(act.layer_a_text(stats["removed_count"], stats["replaced_count"]))
                 text = text2
         atomic_write_text(dest, text)
     elif fmt == "markdown":
@@ -1960,9 +2017,7 @@ def clean_container(
         if also_layer_a_text:
             text2, stats = clean_text(text)
             if stats["removed_count"] or stats["replaced_count"]:
-                actions.append(
-                    f"layer A text: removed={stats['removed_count']} replaced={stats['replaced_count']}"
-                )
+                actions.append(act.layer_a_text(stats["removed_count"], stats["replaced_count"]))
                 text = text2
         atomic_write_text(dest, text)
     else:
@@ -1973,7 +2028,7 @@ def clean_container(
         "input": str(path),
         "output": str(dest),
         "format": fmt,
-        "actions": actions,
+        **report_actions(actions),
         "bytes_in": len(data),
         "bytes_out": dest.stat().st_size,
         "still_has_c2pa": after.has_c2pa,

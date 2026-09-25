@@ -57,19 +57,11 @@ ai = [
 provenance = [
     "c2pa-python",
 ]
-# Interactive terminal UI (wm-tui). Textual brings rich; both are pure Python.
-# Deliberately not in the core: `pip install watermark-remover` still pulls
-# nothing. stdlib curses was rejected — it is absent on Windows, which this
-# project supports, so "no dependency" would have cost windows-curses anyway.
-tui = [
-    "textual>=0.80",
-]
 all = [
     "watermark-remover[visible]",
     "watermark-remover[quality]",
     "watermark-remover[ai]",
     "watermark-remover[provenance]",
-    "watermark-remover[tui]",
 ]
 
 [project.scripts]
@@ -89,7 +81,18 @@ packages = ["watermark_remover", "watermark_remover.scripts"]
 [tool.setuptools.package-data]
 # Ship the skill documentation and bootstrap assets so a wheel install is
 # self-sufficient for the CLI surfaces that read them at runtime.
-"watermark_remover" = ["SKILL.md", "references/*.md"]
+# The wm-tui frontend ships as source; the launcher runs `bun install` on
+# first start (into a cache copy when site-packages is read-only).
+"watermark_remover" = [
+    "SKILL.md",
+    "references/*.md",
+    "tui/package.json",
+    "tui/bun.lock",
+    "tui/bunfig.toml",
+    "tui/tsconfig.json",
+    "tui/src/**/*",
+    "tui/PROTOCOL.md",
+]
 "watermark_remover.scripts" = ["*.txt", "setup_*.sh", "setup_*.ps1"]
 
 [tool.ruff]

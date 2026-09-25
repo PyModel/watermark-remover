@@ -34,6 +34,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import external_command
+import pipeline_actions as act
 from common import (
     atomic_write_bytes,
     eprint,
@@ -42,6 +43,7 @@ from common import (
     validate_output_path,
 )
 from image_meta import detect_format
+from pipeline_actions import Action, report_actions
 from png_chunks import iter_png_chunks
 
 DEFAULT_DILATION_RADIUS = 3
@@ -930,7 +932,7 @@ def remove_visible(
     _validate_visible_paths(path, dest, plan.mask_path, plan.mask_output)
     data = _read_bounded(path)
     fmt = detect_format(data)
-    actions: list[str] = []
+    actions: list[Action] = []
 
     has_source = any(
         source is not None for source in (plan.mask_path, plan.box, plan.detect_command)
@@ -942,10 +944,7 @@ def remove_visible(
             "output": None,
             "format": fmt,
             "backend": plan.backend,
-            "actions": [
-                "supply --mask, --box, or --detect-command",
-                "then refine/fill holes, dilate d=3, inpaint, restore original outside mask",
-            ],
+            **report_actions([act.visible_needs_source(), act.visible_plan()]),
             "note": "No blind segmenter is bundled; no image bytes were changed.",
         }
     raster = decode_to_raster(data, fmt)
@@ -1008,17 +1007,16 @@ def remove_visible(
         mask_label = None  # frictionless: effective mask kept in memory only
     actions.extend(
         [
-            f"mask source: {source}",
-            f"fill holes + dilate radius={plan.dilation_radius}: {initial.marked}->{refined.marked} pixels",
-            f"effective mask: {initial.marked}->{refined.marked} pixels"
-            + (f" (published {mask_label})" if mask_label else " (not published)"),
+            act.mask_source(source),
+            act.refine_mask(plan.dilation_radius, initial.marked, refined.marked),
+            act.effective_mask(initial.marked, refined.marked, mask_label),
         ]
     )
 
     if plan.backend == "print-plan":
         status = "mask-ready"
         output = None
-        actions.append("no inpainting run (print-plan backend)")
+        actions.append(act.inpaint_skipped())
     elif plan.backend == "texture":
         assert raster is not None
         assert dest is not None
@@ -1026,7 +1024,7 @@ def remove_visible(
         atomic_write_bytes(dest, encode_png(restored))
         status, output = "completed", str(dest)
         actions.append(
-            f"texture-patch inpaint source=({match.x},{match.y},{match.width},{match.height}) edge_mse={match.score:.2f}"
+            act.inpaint_texture(match.x, match.y, match.width, match.height, match.score)
         )
     elif plan.backend == "simple":
         assert raster is not None
@@ -1035,7 +1033,7 @@ def remove_visible(
         restored = composite(raster, filled, refined)
         atomic_write_bytes(dest, encode_png(restored))
         status, output = "completed", str(dest)
-        actions.append("nearest-boundary inpaint + restore (uniform-background fallback)")
+        actions.append(act.inpaint_simple())
     else:
         assert plan.backend == "external"
         assert plan.command is not None
@@ -1066,7 +1064,7 @@ def remove_visible(
                     f"does not match source {(raster.width, raster.height, raster.channels)}"
                 )
             atomic_write_bytes(dest, encode_png(composite(raster, inpainted, refined)))
-            actions.append("external inpaint + stdlib restore outside mask")
+            actions.append(act.inpaint_external())
         status, output = "completed", str(dest)
 
     return {
@@ -1079,7 +1077,7 @@ def remove_visible(
         "initial_mask_pixels": initial.marked,
         "refined_mask_pixels": refined.marked,
         "dilation_radius": plan.dilation_radius,
-        "actions": actions,
+        **report_actions(actions),
         "note": (
             "MorphoMod-inspired pipeline; CVPR paper metrics are not this run's metrics. Inspect output fidelity and residual marks manually."
         ),

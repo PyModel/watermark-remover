@@ -77,8 +77,8 @@ def test_without_qpdf_the_incremental_leak_is_reported(monkeypatch, tmp_path: Pa
     _fake_tools(monkeypatch, qpdf=False)
     actions, meta = clean_pdf(src, dest)
     assert meta["structural_rewrite"] is False
-    assert any("incremental" in a for a in actions), actions
-    assert any("qpdf" in a for a in actions), actions
+    assert any("incremental" in a.text for a in actions), actions
+    assert any("qpdf" in a.text for a in actions), actions
 
 
 def test_with_qpdf_the_document_is_rebuilt(monkeypatch, tmp_path: Path):
@@ -102,7 +102,7 @@ def test_qpdf_warning_exit_code_still_counts(monkeypatch, tmp_path: Path):
     _fake_tools(monkeypatch, qpdf=True, qpdf_rc=3)
     actions, meta = clean_pdf(src, dest)
     assert meta["structural_rewrite"] is True
-    assert any("rc=3" in a for a in actions), actions
+    assert any("rc=3" in a.text for a in actions), actions
 
 
 def test_qpdf_failure_keeps_exiftool_output_and_warns(monkeypatch, tmp_path: Path):
@@ -113,7 +113,7 @@ def test_qpdf_failure_keeps_exiftool_output_and_warns(monkeypatch, tmp_path: Pat
     actions, meta = clean_pdf(src, dest)
     assert meta["structural_rewrite"] is False
     assert dest.is_file()
-    assert any("recoverable" in a for a in actions), actions
+    assert any("recoverable" in a.text for a in actions), actions
     assert not list(tmp_path.glob("*.qpdf-tmp"))
 
 
@@ -128,8 +128,8 @@ def test_exiftool_failure_falls_back_to_pypdf(monkeypatch, tmp_path: Path):
     actions, meta = clean_pdf(src, dest)
 
     assert meta == {"mode": "pypdf", "degraded": False}
-    assert any("exiftool degraded (rc=1)" in a for a in actions), actions
-    assert any("pypdf" in a for a in actions), actions
+    assert any("exiftool degraded (rc=1)" in a.text for a in actions), actions
+    assert any("pypdf" in a.text for a in actions), actions
     assert dest.read_bytes().startswith(b"%PDF")
     # The qpdf structural rewrite belongs to the exiftool path only.
     assert not any(c[0].endswith("qpdf") for c in seen)
@@ -154,7 +154,7 @@ def test_exiftool_failure_without_pypdf_copies_degraded(monkeypatch, tmp_path: P
 
     assert meta == {"mode": "copy", "degraded": True}
     assert dest.read_bytes() == original
-    assert any("copied unchanged" in a for a in actions), actions
+    assert any("copied unchanged" in a.text for a in actions), actions
 
 
 @pytest.mark.skipif(

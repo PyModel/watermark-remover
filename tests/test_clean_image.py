@@ -66,7 +66,7 @@ def test_strip_png_removes_text_c2pa(tmp_path: Path):
     data = _minimal_png_with_text()
     cleaned, actions = strip_png(data)
     assert b"c2pa" not in cleaned.lower() or b"tEXt" not in cleaned
-    assert any("drop" in a for a in actions)
+    assert any("drop" in a.text for a in actions)
     # structural: still starts with PNG sig and has IEND
     assert cleaned.startswith(b"\x89PNG")
     assert b"IEND" in cleaned
@@ -98,7 +98,7 @@ def test_strip_jpeg_removes_app11():
     data = _minimal_jpeg_with_app11()
     cleaned, actions = strip_jpeg(data)
     assert b"c2pa-manifest-fake" not in cleaned
-    assert any("APP11" in a or "drop" in a for a in actions)
+    assert any("APP11" in a.text or "drop" in a.text for a in actions)
     assert cleaned.startswith(b"\xff\xd8")
 
 
@@ -106,7 +106,7 @@ def test_benign_app11_is_not_reported_as_c2pa_and_is_preserved_selectively():
     payload = b"vendor-private-data"
     segment = b"\xff\xeb" + struct.pack(">H", len(payload) + 2) + payload
     data = b"\xff\xd8" + segment + b"\xff\xd9"
-    has_c2pa, has_ai, findings = inspect_jpeg(data)
+    has_c2pa, has_ai, findings, _notes = inspect_jpeg(data)
     assert not has_c2pa and not has_ai
     assert not findings
     cleaned, _ = strip_jpeg(data, strip_all_app=False)
@@ -181,6 +181,13 @@ def test_exiftool_nonzero_is_logged_as_failure(tmp_path: Path, monkeypatch):
     report = clean_image(src, dest)
     assert any("exiftool failed (rc=7)" in action for action in report["actions"])
     assert not any(action == "exiftool -all= pass" for action in report["actions"])
+    failure = report["action_details"][-1]
+    assert failure == {
+        "code": "tool_failed",
+        "effect": "warning",
+        "text": report["actions"][-1],
+        "params": {"tool": "exiftool", "returncode": 7, "detail": "denied"},
+    }
 
 
 def test_clean_image_preserves_preexisting_backup_on_rejection(tmp_path: Path):
@@ -264,13 +271,13 @@ def test_webp_c2pa_and_xmp_are_detected_and_removed(tmp_path: Path):
         (b"C2PA", b"jumb c2pa manifest"),
     )
     assert detect_format(data) == "webp"
-    has_c2pa, has_ai, findings = inspect_webp(data)
+    has_c2pa, has_ai, findings, _notes = inspect_webp(data)
     assert has_c2pa and has_ai
     assert "WebP C2PA chunk" in findings
 
     cleaned, actions = strip_webp(data)
-    assert any("C2PA" in action for action in actions)
-    assert any("XMP" in action for action in actions)
+    assert any("C2PA" in action.text for action in actions)
+    assert any("XMP" in action.text for action in actions)
     assert struct.unpack("<I", cleaned[4:8])[0] == len(cleaned) - 8
     assert cleaned[20] & 0x04 == 0
     assert inspect_webp(cleaned)[0:2] == (False, False)
@@ -286,7 +293,7 @@ def test_webp_c2pa_and_xmp_are_detected_and_removed(tmp_path: Path):
 
 def test_webp_image_payload_text_is_not_a_metadata_false_positive():
     data = _minimal_webp((b"VP8 ", b"ordinary pixels mentioning c2pa"))
-    has_c2pa, has_ai, findings = inspect_webp(data)
+    has_c2pa, has_ai, findings, _notes = inspect_webp(data)
     assert not has_c2pa
     assert not has_ai
     assert findings == []
@@ -294,7 +301,7 @@ def test_webp_image_payload_text_is_not_a_metadata_false_positive():
 
 def test_truncated_webp_is_reported_and_not_rewritten():
     data = b"RIFF\x10\x00\x00\x00WEBPC2PA\x10\x00\x00\x00short"
-    has_c2pa, has_ai, findings = inspect_webp(data)
+    has_c2pa, has_ai, findings, _notes = inspect_webp(data)
     assert not has_c2pa
     assert not has_ai
     assert any("truncated" in finding for finding in findings)

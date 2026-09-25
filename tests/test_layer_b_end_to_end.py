@@ -8,7 +8,6 @@ watermark" works, rather than merely that the plumbing type-checks.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import subprocess
 import sys
@@ -207,80 +206,6 @@ def test_cli_audit_records_the_rewrite_without_the_document_body(chat_server, tm
     report = json.loads(audit.read_text(encoding="utf-8"))
     # The audit says a rewrite happened; it must not contain the rewritten body.
     assert "plainly worded replacement" not in json.dumps(report)
-
-
-# --- the TUI path ------------------------------------------------------------
-
-
-def test_tui_run_performs_a_live_rewrite(chat_server, tmp_path: Path):
-    pytest.importorskip("textual")
-    from textual.widgets import DataTable, Input, Select
-    from tui_app import WatermarkTuiApp
-
-    source = tmp_path / "draft.txt"
-    source.write_text(SOURCE, encoding="utf-8")
-    destination = tmp_path / "cleaned.txt"
-    app = WatermarkTuiApp(CleanRequest(paths=(source,)))
-
-    async def scenario():
-        async with app.run_test() as pilot:
-            await pilot.pause()
-            app.query_one("#in-output", Input).value = str(destination)
-            app.query_one("#sel-rewrite", Select).value = "humanize"
-            app.query_one("#sel-backend", Select).value = "openai-compatible"
-            app.query_one("#in-base-url", Input).value = chat_server
-            app.query_one("#in-model", Input).value = "stub-model"
-            app.query_one("#in-rewrite-timeout", Input).value = "10"
-            await pilot.pause()
-
-            request = app.collect_request()
-            assert request.rewrite_strength == "humanize"
-            # A loopback endpoint needs no confirmation, so the run proceeds.
-            app.action_run()
-            for _ in range(200):
-                await pilot.pause()
-                if app.query_one("#run-table", DataTable).row_count:
-                    break
-            assert destination.is_file()
-            written = destination.read_text(encoding="utf-8")
-            assert "plainly worded replacement" in written
-            assert ZWSP not in written
-
-    asyncio.run(scenario())
-
-
-def test_tui_records_the_run_in_history_without_a_secret(chat_server, tmp_path: Path):
-    pytest.importorskip("textual")
-    from textual.widgets import DataTable, Input, Select
-    from tui_app import WatermarkTuiApp
-
-    source = tmp_path / "draft.txt"
-    source.write_text(SOURCE, encoding="utf-8")
-    app = WatermarkTuiApp(CleanRequest(paths=(source,)))
-
-    async def scenario():
-        async with app.run_test() as pilot:
-            await pilot.pause()
-            app.query_one("#in-output", Input).value = str(tmp_path / "out.txt")
-            app.query_one("#sel-rewrite", Select).value = "humanize"
-            app.query_one("#sel-backend", Select).value = "openai-compatible"
-            app.query_one("#in-base-url", Input).value = chat_server
-            app.query_one("#in-model", Input).value = "stub-model"
-            await pilot.pause()
-            app.action_run()
-            for _ in range(200):
-                await pilot.pause()
-                if app.query_one("#run-table", DataTable).row_count:
-                    break
-            for _ in range(10):
-                await pilot.pause()
-            assert app.history
-            entry = app.history[0]
-            assert "--rewrite humanize" in entry.command
-            assert "B(humanize)" in entry.summary
-            assert "api-key" not in entry.command
-
-    asyncio.run(scenario())
 
 
 # --- streaming ---------------------------------------------------------------

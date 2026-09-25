@@ -140,3 +140,27 @@ def test_inspect_asset_never_raises_systemexit_on_binary(tmp_path: Path) -> None
     report = inspect_asset(blob)
     assert report["kind"] == "refused"
     assert report["unscanned"] is True
+
+
+def test_hidden_characters_in_a_container_are_suspicious(tmp_path: Path) -> None:
+    """A Markdown file routes to the container inspector, which counts Layer A
+    carriers in ``suspicious_total``.  Those counts must also set
+    ``suspicious`` and exit 1, as they do for plain text."""
+    doc = tmp_path / "note.md"
+    doc.write_text("Hello​ world‮.\n", encoding="utf-8")
+    result = _run("--json", str(doc))
+    payload = json.loads(result.stdout)
+    assert payload["kind"] == "container"
+    assert payload["suspicious_total"] > 0
+    assert payload["suspicious"] is True
+    assert result.returncode == 1
+
+
+def test_human_report_lists_notes_apart_from_findings() -> None:
+    result = _run(str(ROOT / "tests" / "fixtures" / "sample_c2pa.heic"))
+    findings = [line for line in result.stdout.splitlines() if line.startswith("  - ")]
+    notes = [line for line in result.stdout.splitlines() if line.startswith("  note: ")]
+    assert findings == [
+        "  - XMP uuid box @ 83: digitalSourceType, trainedAlgorithmicMedia, algorithmicMedia"
+    ]
+    assert "  note: no iinf item table (or unsupported version)" in notes

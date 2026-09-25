@@ -44,10 +44,8 @@ def _configure_stdio() -> None:
     ):
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is not None:
-            try:
+            with suppress(OSError, ValueError):
                 reconfigure(encoding="utf-8", errors=errors)
-            except (OSError, ValueError):
-                pass
 
 
 _configure_stdio()

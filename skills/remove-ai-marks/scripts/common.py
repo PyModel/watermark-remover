@@ -271,6 +271,22 @@ def paths_alias(left: Path, right: Path) -> bool:
         return left.resolve(strict=False) == right.resolve(strict=False)
 
 
+def alias_key(path: Path) -> tuple[object, ...]:
+    """A hashable identity with the same equality as :func:`paths_alias`.
+
+    An existing file is its ``(st_dev, st_ino)``, so hard links match; a path
+    that does not exist yet is its resolved form.  An existing and a missing
+    path never alias, which is also what ``paths_alias`` answers for them.
+    Checking N paths against each other through a set of keys is linear,
+    where pairwise ``paths_alias`` calls are quadratic.
+    """
+    try:
+        info = path.stat()
+    except FileNotFoundError:
+        return ("path", path.resolve(strict=False))
+    return ("inode", info.st_dev, info.st_ino)
+
+
 def validate_output_path(source: Path, dest: Path) -> None:
     """Reject implicit in-place writes and destination symlinks."""
     if dest.is_symlink():
@@ -430,8 +446,8 @@ def classify_finding_confidence(finding: str) -> str:
       parsed field such as digitalSourceType / trainedAlgorithmicMedia).
     - probable: an AI/vendor marker found inside a recognized metadata
       structure, but not a fully parsed provenance claim.
-    - informational: context-only notes (CMS generators, presence of an XMP
-      packet or customXml parts, unsupported/partial inspection).
+    - informational: problems with the scan itself (unsupported or malformed
+      input) and markers that alone say nothing about AI provenance.
     - likely_false_positive: raw whole-file byte scans that can collide with
       compressed image/stream data.
 
@@ -459,18 +475,12 @@ def classify_finding_confidence(finding: str) -> str:
     ):
         return "confirmed"
 
-    if t.startswith("info:") or any(
+    if any(
         s in t
         for s in (
-            "cms generator",
-            "customxml parts",
-            "xmp packet present",
             "unsupported",
-            "not fully inspected",
-            "format not",
             "svg <metadata> present",
             "not a valid",
-            "truncated chunk",
             "bad segment length",
             "svg decode note",
         )

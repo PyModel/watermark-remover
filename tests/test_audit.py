@@ -27,9 +27,9 @@ def test_classify_finding_confidence_buckets():
         "pdf-structured:ai:AIGC": "probable",
         "PNG tEXt: c2pa, contentcredentials": "probable",
         "frontmatter key: generator": "probable",
-        'info: cms generator: <meta name="generator" content="WordPress">': "informational",
-        "customXml parts: 1": "informational",
         "unsupported container: woff2": "informational",
+        "not a valid TIFF": "informational",
+        "bad segment length at marker 0xE1": "informational",
         "svg <metadata> present": "informational",
         "byte-scan C2PA markers: c2pa": "likely_false_positive",
     }
@@ -51,8 +51,25 @@ def test_container_report_findings_confidence(tmp_path: Path):
         '<html><head><meta name="generator" content="WordPress 6.0"></head></html>',
         encoding="utf-8",
     )
-    report = inspect_container(src)
-    assert report.to_dict()["findings_confidence"] == ["informational"]
+    report = inspect_container(src).to_dict()
+    # A CMS generator is context, not an AI mark: a note, never a finding.
+    assert report["findings"] == []
+    assert report["findings_confidence"] == []
+    assert any("cms generator" in note for note in report["notes"])
+
+
+def test_plain_camera_metadata_is_not_actionable(tmp_path: Path):
+    # A HEIC whose only metadata is a camera Exif item carries no AI marks.
+    # Its "present" line is a note; it used to be a "probable" finding
+    # (it mentions Exif), which made the audit exit 1 on an ordinary photo.
+    from test_heif_meta import make_heif
+
+    photo = tmp_path / "photo.heic"
+    photo.write_bytes(make_heif(with_jumb=False, item_payload=b"Exif\x00\x00MM Canon EOS R5"))
+    item = scan_file(photo)
+    assert item["findings"] == []
+    assert not is_actionable(item)
+    assert any("no AI markers" in note for note in item["notes"])
 
 
 def _png_chunk(ctype: bytes, payload: bytes) -> bytes:

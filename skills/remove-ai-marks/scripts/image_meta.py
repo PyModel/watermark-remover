@@ -21,7 +21,9 @@ from typing import Any
 from urllib.parse import urlparse
 
 import external_command
+import pipeline_actions as act
 from common import atomic_write_bytes, classify_finding_confidence, which
+from pipeline_actions import Action, report_actions
 from png_chunks import iter_png_chunks
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -127,6 +129,13 @@ AI_GENERATOR_PRODUCTS = (
 # ...) are free text and are never scanned for product names.
 _GENERATOR_TEXT_KEYS = ("software", "creator", "parameters")
 
+#: One format scanner's verdict: ``(has_c2pa, has_ai_metadata, findings, notes)``.
+#: ``findings`` are AI/provenance signals, plus scan problems (a truncated or
+#: malformed structure) that leave the verdict unproven.  ``notes`` are context
+#: that is neither: container brands, metadata that is present but carries no
+#: AI markers.  Only findings may be counted or shown as marks.
+MetadataScan = tuple[bool, bool, list[str], list[str]]
+
 
 @dataclass
 class ImageInspectReport:
@@ -172,15 +181,14 @@ def detect_format(data: bytes) -> str:
 
 
 def _contains_any(blob: bytes, needles: tuple[bytes, ...]) -> list[str]:
-    found = []
+    """Return the needles found in ``blob``, matched and listed once regardless of case."""
+    found: dict[bytes, str] = {}
     lower = blob.lower()
     for n in needles:
-        if n.lower() in lower:
-            try:
-                found.append(n.decode("ascii", errors="replace"))
-            except Exception:
-                found.append(repr(n))
-    return found
+        key = n.lower()
+        if key not in found and key in lower:
+            found[key] = n.decode("ascii", errors="replace")
+    return list(found.values())
 
 
 def _zlib_decompress_bounded(data: bytes, max_bytes: int = MAX_PNG_TEXT_BYTES) -> bytes | None:
@@ -297,12 +305,12 @@ def _text_chunk_is_ai(payload: bytes, ctype: bytes) -> bool:
     return bool(_generator_product_hits(_png_text_entries(payload, ctype)))
 
 
-def inspect_png(data: bytes) -> tuple[bool, bool, list[str]]:
+def inspect_png(data: bytes) -> MetadataScan:
     findings: list[str] = []
     has_c2pa = False
     has_ai = False
     if not data.startswith(PNG_SIG):
-        return False, False, ["not a PNG"]
+        return False, False, ["not a PNG"], []
     try:
         for chunk in iter_png_chunks(data):
             ctype = chunk.kind
@@ -332,45 +340,45 @@ def inspect_png(data: bytes) -> tuple[bool, bool, list[str]]:
     if whole and not has_c2pa:
         has_c2pa = True
         findings.append(f"byte-scan C2PA markers: {', '.join(whole[:6])}")
-    return has_c2pa, has_ai or has_c2pa, findings
+    return has_c2pa, has_ai or has_c2pa, findings, []
 
 
-def inspect_avif(data: bytes) -> tuple[bool, bool, list[str]]:
+def inspect_avif(data: bytes) -> MetadataScan:
     """Inspect AVIF (ISO-BMFF) for C2PA/JUMBF boxes and AI-marked Exif/XMP items."""
     from heif_meta import inspect_heif
 
-    has_c2pa, has_ai, findings, _ = inspect_heif(data)
-    return has_c2pa, has_ai, findings
+    has_c2pa, has_ai, findings, notes, _ = inspect_heif(data)
+    return has_c2pa, has_ai, findings, notes
 
 
-def inspect_heic(data: bytes) -> tuple[bool, bool, list[str]]:
+def inspect_heic(data: bytes) -> MetadataScan:
     """Inspect HEIC/HEIF (ISO-BMFF) for C2PA/JUMBF boxes and AI-marked Exif/XMP items."""
     from heif_meta import inspect_heif
 
-    has_c2pa, has_ai, findings, _ = inspect_heif(data)
-    return has_c2pa, has_ai, findings
+    has_c2pa, has_ai, findings, notes, _ = inspect_heif(data)
+    return has_c2pa, has_ai, findings, notes
 
 
-def strip_avif(data: bytes, *, strip_all: bool = True) -> tuple[bytes, list[str]]:
+def strip_avif(data: bytes, *, strip_all: bool = True) -> tuple[bytes, list[Action]]:
     """Neutralize C2PA/AI metadata in AVIF in place (offsets preserved; pixels untouched)."""
     from heif_meta import neutralize_heif
 
     return neutralize_heif(data, strip_all_metadata=strip_all)
 
 
-def strip_heic(data: bytes, *, strip_all: bool = True) -> tuple[bytes, list[str]]:
+def strip_heic(data: bytes, *, strip_all: bool = True) -> tuple[bytes, list[Action]]:
     """Neutralize C2PA/AI metadata in HEIC/HEIF in place (offsets preserved; pixels untouched)."""
     from heif_meta import neutralize_heif
 
     return neutralize_heif(data, strip_all_metadata=strip_all)
 
 
-def inspect_jpeg(data: bytes) -> tuple[bool, bool, list[str]]:
+def inspect_jpeg(data: bytes) -> MetadataScan:
     findings: list[str] = []
     has_c2pa = False
     has_ai = False
     if not data.startswith(JPEG_SOI):
-        return False, False, ["not a JPEG"]
+        return False, False, ["not a JPEG"], []
     i = 2
     n = len(data)
     while i + 4 <= n:
@@ -415,7 +423,7 @@ def inspect_jpeg(data: bytes) -> tuple[bool, bool, list[str]]:
     if whole and not has_c2pa:
         has_c2pa = True
         findings.append(f"byte-scan C2PA markers: {', '.join(whole[:6])}")
-    return has_c2pa, has_ai or has_c2pa, findings
+    return has_c2pa, has_ai or has_c2pa, findings, []
 
 
 def run_optional_tools(path: Path) -> dict[str, Any]:
@@ -582,24 +590,23 @@ def inspect_image(
 ) -> ImageInspectReport:
     data = path.read_bytes()
     fmt = detect_format(data)
-    notes: list[str] = []
     if fmt in ("heif", "avif"):
-        has_c2pa, has_ai, findings = inspect_heic(data)
+        has_c2pa, has_ai, findings, notes = inspect_heic(data)
     elif fmt == "png":
-        has_c2pa, has_ai, findings = inspect_png(data)
+        has_c2pa, has_ai, findings, notes = inspect_png(data)
     elif fmt == "jpeg":
-        has_c2pa, has_ai, findings = inspect_jpeg(data)
+        has_c2pa, has_ai, findings, notes = inspect_jpeg(data)
     elif fmt == "webp":
-        has_c2pa, has_ai, findings = inspect_webp(data)
+        has_c2pa, has_ai, findings, notes = inspect_webp(data)
     elif fmt == "bmp":
-        has_c2pa, has_ai, findings = inspect_bmp(data)
+        has_c2pa, has_ai, findings, notes = inspect_bmp(data)
     elif fmt == "gif":
-        has_c2pa, has_ai, findings = inspect_gif(data)
+        has_c2pa, has_ai, findings, notes = inspect_gif(data)
     elif fmt == "tiff":
-        has_c2pa, has_ai, findings = inspect_tiff(data)
+        has_c2pa, has_ai, findings, notes = inspect_tiff(data)
     else:
         has_c2pa, has_ai, findings = False, False, ["unsupported format"]
-        notes.append(f"format '{fmt}' is not inspected")
+        notes = [f"format '{fmt}' is not inspected"]
 
     tools = run_optional_tools(path)
     # Elevate flags from tools
@@ -620,8 +627,8 @@ def inspect_image(
     )
 
 
-def strip_png(data: bytes, *, strip_all_text: bool = True) -> tuple[bytes, list[str]]:
-    actions: list[str] = []
+def strip_png(data: bytes, *, strip_all_text: bool = True) -> tuple[bytes, list[Action]]:
+    actions: list[Action] = []
     out = bytearray(PNG_SIG)
     for chunk in iter_png_chunks(data, allow_trailing_data=True):
         ctype = chunk.kind
@@ -631,11 +638,11 @@ def strip_png(data: bytes, *, strip_all_text: bool = True) -> tuple[bytes, list[
         drop = False
         if ctype == b"caBX" or ctype.startswith(b"c2"):
             drop = True
-            actions.append(f"drop chunk {name}")
+            actions.append(act.drop_png_chunk(name))
         elif ctype == b"eXIf" or ctype in (b"tEXt", b"zTXt", b"iTXt"):
             if strip_all_text or _text_chunk_is_ai(bytes(payload), ctype):
                 drop = True
-                actions.append(f"drop chunk {name}")
+                actions.append(act.drop_png_chunk(name))
         elif _contains_any(ctype + bytes(payload), C2PA_MARKERS) and ctype not in (
             b"IHDR",
             b"IDAT",
@@ -649,12 +656,16 @@ def strip_png(data: bytes, *, strip_all_text: bool = True) -> tuple[bytes, list[
             b"iCCP",
         ):
             drop = True
-            actions.append(f"drop chunk {name} (C2PA marker in payload)")
+            actions.append(act.drop_png_chunk(name, c2pa_in_payload=True))
 
         if not drop:
             out.extend(chunk.raw)
     if not actions:
-        actions.append("no PNG metadata chunks removed (already clean or none matched)")
+        actions.append(
+            act.nothing_removed(
+                "png", "no PNG metadata chunks removed (already clean or none matched)"
+            )
+        )
     return bytes(out), actions
 
 
@@ -711,10 +722,10 @@ def _find_jpeg_eoi(data: bytes, start: int) -> int | None:
     return None
 
 
-def strip_jpeg(data: bytes, *, strip_all_app: bool = True) -> tuple[bytes, list[str]]:
+def strip_jpeg(data: bytes, *, strip_all_app: bool = True) -> tuple[bytes, list[Action]]:
     if not data.startswith(JPEG_SOI):
         raise ValueError("not JPEG")
-    actions: list[str] = []
+    actions: list[Action] = []
     out = bytearray(JPEG_SOI)
     i = 2
     n = len(data)
@@ -753,7 +764,7 @@ def strip_jpeg(data: bytes, *, strip_all_app: bool = True) -> tuple[bytes, list[
                 raise ValueError("JPEG scan has no complete EOI marker")
             out.extend(b"\xff\xda")
             out.extend(data[i : eoi + 2])
-            actions.append("preserved entropy-coded scan through EOI")
+            actions.append(act.preserve_jpeg_scan())
             saw_eoi = True
             break
 
@@ -775,20 +786,22 @@ def strip_jpeg(data: bytes, *, strip_all_app: bool = True) -> tuple[bytes, list[
             )
             if app11_is_c2pa:
                 drop = True
-                actions.append("drop APP11 (C2PA/JUMBF)")
+                actions.append(act.drop_jpeg_segment("APP11", reason="C2PA/JUMBF"))
             elif strip_all_app and marker != 0xE0:
                 # keep APP0 (JFIF) by default
                 drop = True
-                actions.append(f"drop APP{marker - 0xE0}")
+                actions.append(act.drop_jpeg_segment(f"APP{marker - 0xE0}"))
             elif hits:
                 drop = True
-                actions.append(f"drop APP{marker - 0xE0} (AI/C2PA markers)")
+                actions.append(
+                    act.drop_jpeg_segment(f"APP{marker - 0xE0}", reason="AI/C2PA markers")
+                )
             else:
                 keep = True
         elif marker == 0xFE:  # COM
             if strip_all_app or _contains_any(payload, AI_META_HINTS + C2PA_MARKERS):
                 drop = True
-                actions.append("drop COM comment")
+                actions.append(act.drop_jpeg_segment("COM"))
             else:
                 keep = True
         else:
@@ -802,7 +815,7 @@ def strip_jpeg(data: bytes, *, strip_all_app: bool = True) -> tuple[bytes, list[
     if not saw_eoi:
         raise ValueError("JPEG has no complete EOI marker")
     if not actions:
-        actions.append("no JPEG APP segments removed")
+        actions.append(act.nothing_removed("jpeg", "no JPEG APP segments removed"))
     return bytes(out), actions
 
 
@@ -839,10 +852,10 @@ def _webp_chunks(data: bytes) -> tuple[list[tuple[bytes, bytes, bytes]], list[st
     return chunks, notes
 
 
-def inspect_webp(data: bytes) -> tuple[bool, bool, list[str]]:
+def inspect_webp(data: bytes) -> MetadataScan:
     chunks, findings = _webp_chunks(data)
     if not chunks and findings == ["not a WebP"]:
-        return False, False, findings
+        return False, False, findings, []
 
     has_c2pa = False
     has_ai = False
@@ -863,17 +876,17 @@ def inspect_webp(data: bytes) -> tuple[bool, bool, list[str]]:
                 ):
                     has_c2pa = True
                 findings.append(f"WebP {name}: {', '.join(hits[:8])}")
-    return has_c2pa, has_ai or has_c2pa, findings
+    return has_c2pa, has_ai or has_c2pa, findings, []
 
 
-def strip_webp(data: bytes, *, strip_all_metadata: bool = True) -> tuple[bytes, list[str]]:
+def strip_webp(data: bytes, *, strip_all_metadata: bool = True) -> tuple[bytes, list[Action]]:
     chunks, notes = _webp_chunks(data)
     if not chunks and notes == ["not a WebP"]:
         raise ValueError("not WebP")
     if notes:
         raise ValueError("malformed WebP: " + "; ".join(notes))
 
-    actions: list[str] = []
+    actions: list[Action] = []
     kept: list[tuple[bytes, bytes, bytes]] = []
     removed_flags = 0
     metadata_flags = {b"ICCP": 0x20, b"EXIF": 0x08, b"XMP ": 0x04}
@@ -884,7 +897,7 @@ def strip_webp(data: bytes, *, strip_all_metadata: bool = True) -> tuple[bytes, 
             drop = strip_all_metadata or bool(_contains_any(payload, AI_META_HINTS + C2PA_MARKERS))
         if drop:
             name = fourcc.decode("latin-1", errors="replace")
-            actions.append(f"drop WebP chunk {name}")
+            actions.append(act.drop_webp_chunk(name))
             removed_flags |= metadata_flags.get(fourcc, 0)
         else:
             kept.append((fourcc, payload, padding))
@@ -900,7 +913,11 @@ def strip_webp(data: bytes, *, strip_all_metadata: bool = True) -> tuple[bytes, 
         body.extend(padding if len(chunk) & 1 else b"")
 
     if not actions:
-        actions.append("no WebP metadata chunks removed (already clean or none matched)")
+        actions.append(
+            act.nothing_removed(
+                "webp", "no WebP metadata chunks removed (already clean or none matched)"
+            )
+        )
     return WEBP_RIFF + struct.pack("<I", len(body)) + bytes(body), actions
 
 
@@ -944,11 +961,12 @@ def _bmp_trailing(data: bytes) -> bytes:
     return data[end:] if end < len(data) else b""
 
 
-def inspect_bmp(data: bytes) -> tuple[bool, bool, list[str]]:
+def inspect_bmp(data: bytes) -> MetadataScan:
     """Inspect a BMP for trailing (non-standard) metadata."""
     findings: list[str] = []
+    notes: list[str] = []
     if len(data) < 14 or data[:2] != BMP_SIG:
-        return False, False, ["not a BMP"]
+        return False, False, ["not a BMP"], []
     trailing = _bmp_trailing(data)
     has_c2pa = False
     has_ai = False
@@ -962,31 +980,30 @@ def inspect_bmp(data: bytes) -> tuple[bool, bool, list[str]]:
                 has_c2pa = True
             findings.append(f"BMP trailing metadata: {', '.join(hits[:6])}")
         else:
-            findings.append(f"BMP has {len(trailing)} unrecognized trailing byte(s)")
+            notes.append(f"BMP has {len(trailing)} unrecognized trailing byte(s)")
     else:
-        findings.append("BMP has no metadata (header-only raster format)")
-    return has_c2pa, has_ai or has_c2pa, findings
+        notes.append("BMP has no metadata (header-only raster format)")
+    return has_c2pa, has_ai or has_c2pa, findings, notes
 
 
-def strip_bmp(data: bytes, *, strip_all_metadata: bool = True) -> tuple[bytes, list[str]]:
+def strip_bmp(data: bytes, *, strip_all_metadata: bool = True) -> tuple[bytes, list[Action]]:
     """Strip trailing non-image bytes from a BMP and fix the file-size field."""
     if len(data) < 14 or data[:2] != BMP_SIG:
         raise ValueError("not BMP")
     extent = _bmp_payload_extent(data)
     if extent is None:
-        return data, ["BMP header not fully parsed; left unchanged"]
+        return data, [act.bmp_unparsed()]
     pixel_offset, size = extent
     end = pixel_offset + size
     if end >= len(data):
-        return data, ["no BMP trailing metadata to strip"]
+        return data, [act.nothing_removed("bmp", "no BMP trailing metadata to strip")]
     trailing = data[end:]
     hits = _contains_any(trailing, AI_META_HINTS + C2PA_MARKERS)
     if not strip_all_metadata and not hits:
-        return data, ["BMP trailing bytes kept (keep-non-ai-metadata)"]
+        return data, [act.keep_bmp_trailer()]
     out = bytearray(data[:end])
     out[2:6] = struct.pack("<I", end)
-    reason = f" ({', '.join(hits[:4])})" if hits else ""
-    return bytes(out), [f"drop {len(trailing)} BMP trailing byte(s){reason}"]
+    return bytes(out), [act.drop_bmp_trailer(len(trailing), hits[:4])]
 
 
 # ---------------------------------------------------------------------------
@@ -1038,11 +1055,11 @@ def _gif_image_end(data: bytes, start: int, n: int) -> int | None:
     return None
 
 
-def inspect_gif(data: bytes) -> tuple[bool, bool, list[str]]:
+def inspect_gif(data: bytes) -> MetadataScan:
     """Inspect GIF comment/application extensions for AI/C2PA markers."""
     findings: list[str] = []
     if data[:6] not in GIF_SIGS:
-        return False, False, ["not a GIF"]
+        return False, False, ["not a GIF"], []
     n = len(data)
     has_c2pa = False
     has_ai = False
@@ -1095,16 +1112,16 @@ def inspect_gif(data: bytes) -> tuple[bool, bool, list[str]]:
     if whole and not has_c2pa:
         has_c2pa = True
         findings.append(f"byte-scan C2PA markers: {', '.join(whole[:6])}")
-    return has_c2pa, has_ai or has_c2pa, findings
+    return has_c2pa, has_ai or has_c2pa, findings, []
 
 
-def strip_gif(data: bytes, *, strip_all_metadata: bool = True) -> tuple[bytes, list[str]]:
+def strip_gif(data: bytes, *, strip_all_metadata: bool = True) -> tuple[bytes, list[Action]]:
     """Strip GIF comment + XMP/unknown application extensions (in-place, offsets preserved)."""
     if data[:6] not in GIF_SIGS:
         raise ValueError("not GIF")
     n = len(data)
     out = bytearray(data[:6])
-    actions: list[str] = []
+    actions: list[Action] = []
     pos = 6
     while pos + 1 <= n:
         block = data[pos]
@@ -1131,7 +1148,7 @@ def strip_gif(data: bytes, *, strip_all_metadata: bool = True) -> tuple[bytes, l
                     name = "application"
                     drop = strip_all_metadata or marker_hit
             if drop:
-                actions.append(f"drop GIF {name} extension")
+                actions.append(act.drop_gif_extension(name))
             else:
                 out.extend(data[pos:end])
             pos = end
@@ -1147,7 +1164,11 @@ def strip_gif(data: bytes, *, strip_all_metadata: bool = True) -> tuple[bytes, l
             pos += 1
 
     if not actions:
-        actions.append("no GIF metadata blocks removed (already clean or none matched)")
+        actions.append(
+            act.nothing_removed(
+                "gif", "no GIF metadata blocks removed (already clean or none matched)"
+            )
+        )
     return bytes(out), actions
 
 
@@ -1374,17 +1395,18 @@ def _tiff_entry_payload(data: bytes, ent: dict[str, Any]) -> bytes | None:
     return data[vo : vo + ent["byte_size"]]
 
 
-def inspect_tiff(data: bytes) -> tuple[bool, bool, list[str]]:
+def inspect_tiff(data: bytes) -> MetadataScan:
     """Walk the IFD chains (classic or BigTIFF) and report metadata tags."""
     findings: list[str] = []
+    notes: list[str] = []
     has_c2pa = False
     has_ai = False
     try:
         _bo, _big, ifds = _parse_tiff_ifds(data)
     except Exception:
-        return False, False, ["not a valid TIFF"]
+        return False, False, ["not a valid TIFF"], []
     if not ifds:
-        return False, False, ["TIFF with no image file directories"]
+        return False, False, ["TIFF with no image file directories"], []
     for _off, ifd in sorted(ifds.items()):
         for ent in ifd["entries"]:
             tag = ent["tag"]
@@ -1400,14 +1422,14 @@ def inspect_tiff(data: bytes) -> tuple[bool, bool, list[str]]:
             name = _TIFF_META_TAG_NAMES.get(tag)
             if name:
                 label = "sub-IFD" if tag in (34665, 34853, 40965) else "tag"
-                findings.append(f"TIFF {label} {tag} ({name}) present")
+                notes.append(f"TIFF {label} {tag} ({name}) present")
     whole = _contains_any(data, C2PA_MARKERS)
     if whole and not has_c2pa:
         has_c2pa = True
         findings.append(f"byte-scan C2PA markers: {', '.join(whole[:6])}")
-    if not findings:
-        findings.append("no TIFF metadata tags found")
-    return has_c2pa, has_ai or has_c2pa, findings
+    if not findings and not notes:
+        notes.append("no TIFF metadata tags found")
+    return has_c2pa, has_ai or has_c2pa, findings, notes
 
 
 def _collect_tiff_sub_ifd_drops(
@@ -1433,7 +1455,7 @@ def _collect_tiff_sub_ifd_drops(
                 drop_ranges.append((vo, vo + vs))
 
 
-def strip_tiff(data: bytes, *, strip_all_metadata: bool = True) -> tuple[bytes, list[str]]:
+def strip_tiff(data: bytes, *, strip_all_metadata: bool = True) -> tuple[bytes, list[Action]]:
     """Drop TIFF metadata tags (classic or BigTIFF) without moving referenced data."""
     bo, bigtiff, ifds = _parse_tiff_ifds(data)
     if not ifds:
@@ -1443,7 +1465,7 @@ def strip_tiff(data: bytes, *, strip_all_metadata: bool = True) -> tuple[bytes, 
     off_fmt = bo + ("Q" if bigtiff else "I")
     count_len = 8 if bigtiff else 2
     entry_size = 20 if bigtiff else 12
-    actions: list[str] = []
+    actions: list[Action] = []
     kept: dict[int, list[dict[str, Any]]] = {}
     drop_ranges: list[tuple[int, int]] = []
     drop_ifd_ranges: list[tuple[int, int]] = []
@@ -1476,9 +1498,7 @@ def strip_tiff(data: bytes, *, strip_all_metadata: bool = True) -> tuple[bytes, 
                 keep_here.append(ent)
                 continue
             name = _TIFF_META_TAG_NAMES.get(tag)
-            actions.append(
-                f"drop TIFF tag {tag} ({name})" if name else f"drop TIFF tag {tag} (AI markers)"
-            )
+            actions.append(act.drop_tiff_tag(tag, name))
             if tag in (34665, 34853):
                 ptr = struct.unpack(off_fmt, ent["value"][:off_len])[0]
                 _collect_tiff_sub_ifd_drops(
@@ -1575,7 +1595,11 @@ def strip_tiff(data: bytes, *, strip_all_metadata: bool = True) -> tuple[bytes, 
         )
 
     if not actions:
-        actions.append("no TIFF metadata tags removed (already clean or none matched)")
+        actions.append(
+            act.nothing_removed(
+                "tiff", "no TIFF metadata tags removed (already clean or none matched)"
+            )
+        )
     return bytes(out), actions
 
 
@@ -1627,14 +1651,14 @@ def clean_image(
                 output_limit=OPTIONAL_TOOL_OUTPUT_LIMIT,
             )
             if result.returncode == 0 and not (result.stdout_truncated or result.stderr_truncated):
-                actions.append("exiftool -all= pass")
+                actions.append(act.exiftool_strip())
             else:
                 detail = (result.stderr_text or result.stdout_text).strip()[:300]
                 if result.stdout_truncated or result.stderr_truncated:
                     detail = "output exceeded safety limit"
-                actions.append(f"exiftool failed (rc={result.returncode}): {detail}")
+                actions.append(act.exiftool_failed(result.returncode, detail))
         except Exception as error:
-            actions.append(f"exiftool failed: {error}")
+            actions.append(act.exiftool_failed(None, str(error)))
 
     synthid_removal: dict[str, Any] | None = None
     if remove_synthid:
@@ -1662,21 +1686,17 @@ def clean_image(
             "bytes_out": dest.stat().st_size,
             "note": "seed-independent mid-frequency band suppression (best-effort)",
         }
-        actions.append(
-            f"SynthID band removal: strength={synthid_strength} (seed-independent DCT suppression)"
-        )
+        actions.append(act.synthid_band_removal(synthid_strength))
 
     if wmct_marker:
         if fmt != "png":
-            actions.append("wmCt replacement marker skipped: PNG output only")
+            actions.append(act.wmct_marker_skipped("PNG output only"))
         else:
             # Read dest (post-strip/exiftool/synthid), inject the marker, and
             # write back so the truthful marker survives every prior pass.
             marked = add_wmct_marker(dest.read_bytes())
             atomic_write_bytes(dest, marked)
-            actions.append(
-                "wmCt replacement marker written (strip-without-replacement remains the default)"
-            )
+            actions.append(act.wmct_marker_written())
         wmct_marker_present = fmt == "png"
     else:
         wmct_marker_present = False
@@ -1686,7 +1706,7 @@ def clean_image(
         "input": str(path),
         "output": str(dest),
         "format": fmt,
-        "actions": actions,
+        **report_actions(actions),
         "bytes_in": len(data),
         "bytes_out": dest.stat().st_size,
         "still_has_c2pa": after.has_c2pa,
