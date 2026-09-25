@@ -20,6 +20,8 @@ export class FakeBridge implements BridgeLike {
   calls: { method: string; params: any }[] = []
   onboard = false
   confirm: { kind: string; message: string }[] = []
+  /** When set, a confirmed clean waits on it, so a test can look mid-run. */
+  cleanGate: Promise<void> | null = null
   private exit: ((reason: string) => void)[] = []
 
   async request<T>(method: string, params: any = {}, onEvent?: (e: BridgeEvent) => void): Promise<T> {
@@ -81,6 +83,7 @@ export class FakeBridge implements BridgeLike {
         if (this.confirm.length && !(params.confirmed ?? []).length) {
           throw new BridgeError("needs_confirm", "confirm", this.confirm)
         }
+        if (this.cleanGate) await this.cleanGate
         const list = files()
         list.forEach((f, index) => {
           onEvent?.({ event: "file_start", data: { index, total: list.length, display: f.display } })

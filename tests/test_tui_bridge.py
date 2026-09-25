@@ -1602,9 +1602,9 @@ def test_history_is_newest_first(tmp_path):
     call(bridge, sink, "clean", {"state": state([source])}, rid=1)
     call(bridge, sink, "clean", {"state": state([source], preset="hidden-aggressive")}, rid=2)
     entries = response(call(bridge, sink, "history", rid=3))["result"]["entries"]
-    assert [entry["command"].split()[-1] for entry in entries] == [
+    assert [shlex.split(entry["command"])[-1] for entry in entries] == [
         "--aggressive-homoglyphs",
-        shlex.quote(str(source)),
+        str(source),
     ]
     assert entries[0]["summary"] == "1 file, 0 errors. Verifiable."
     assert set(entries[0]) == {"time", "command", "summary"}

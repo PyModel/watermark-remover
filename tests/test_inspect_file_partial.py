@@ -160,7 +160,10 @@ def test_human_report_lists_notes_apart_from_findings() -> None:
     result = _run(str(ROOT / "tests" / "fixtures" / "sample_c2pa.heic"))
     findings = [line for line in result.stdout.splitlines() if line.startswith("  - ")]
     notes = [line for line in result.stdout.splitlines() if line.startswith("  note: ")]
-    assert findings == [
+    # c2patool on PATH may add its own finding, so check membership, not equality.
+    assert (
         "  - XMP uuid box @ 83: digitalSourceType, trainedAlgorithmicMedia, algorithmicMedia"
-    ]
+        in findings
+    )
     assert "  note: no iinf item table (or unsupported version)" in notes
+    assert not any("iinf" in line for line in findings)

@@ -178,6 +178,26 @@ describe("wm-tui", () => {
     expect(bridge.calls.filter((c) => c.method === "clean").length).toBe(1)
   })
 
+  test("an accepted confirmation keeps the retried clean stoppable", async () => {
+    let release = () => {}
+    const { bridge, ctl } = await mount(120, 40, (b) => {
+      b.confirm = [{ kind: "remote", message: "Text will be sent to 10.0.0.5" }]
+      b.cleanGate = new Promise((resolve) => (release = resolve))
+    })
+    await type("drafts")
+    setup!.mockInput.pressKey("r", { ctrl: true })
+    await settle()
+    const dialog = ctl.app.dialogs.at(-1)
+    if (dialog?.type !== "confirm") throw new Error("expected the confirm dialog")
+    dialog.resolve(true)
+    await settle()
+    expect(ctl.app.run).not.toBeNull()
+    release()
+    await settle()
+    expect(ctl.app.run).toBeNull()
+    expect(bridge.calls.filter((c) => c.method === "clean").length).toBe(2)
+  })
+
   test("the bridge dying shows an error screen instead of hanging", async () => {
     const { bridge } = await mount()
     bridge.die("bridge exited with code 1")
@@ -231,10 +251,10 @@ describe("wm-tui", () => {
     saveFrame("history-120x40", setup!.captureSpans())
   })
 
-  test("an unknown /command says so instead of doing nothing", async () => {
-    await mount()
-    await type("/frobnicate")
-    expect(frame()).toContain("No command /frobnicate")
+  test("a /word that is no command is a path, so /tmp can be added", async () => {
+    const { ctl } = await mount()
+    await type("/tmp")
+    expect(ctl.app.state.paths).toContain("/tmp")
   })
 
   test("a server entered by hand saves exactly backend, base URL and model", async () => {

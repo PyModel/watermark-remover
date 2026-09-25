@@ -6,6 +6,9 @@
  * the CLI's own parser.
  */
 
+import { homedir } from "node:os"
+import { COMMANDS } from "./commands"
+
 export type Parsed =
   | { kind: "empty" }
   | { kind: "command"; name: string; arg: string }
@@ -48,9 +51,11 @@ export function splitArgs(text: string): string[] {
 export function parsePrompt(text: string): Parsed {
   const trimmed = text.trim()
   if (!trimmed) return { kind: "empty" }
-  if (trimmed.startsWith("/") && /^\/[a-z-]+(\s|$)/i.test(trimmed)) {
-    const [name, ...rest] = trimmed.slice(1).split(/\s+/)
-    return { kind: "command", name: name!.toLowerCase(), arg: rest.join(" ") }
+  if (/^\/[a-z-]+(\s|$)/i.test(trimmed)) {
+    const [word, ...rest] = trimmed.slice(1).split(/\s+/)
+    const name = word!.toLowerCase()
+    // `/tmp` is a folder, not a command: only a known name runs.
+    if (COMMANDS.some((command) => command.name === name)) return { kind: "command", name, arg: rest.join(" ") }
   }
   const tokens = splitArgs(trimmed)
   if (tokens[0]?.startsWith("-")) return { kind: "flags", tokens }
@@ -96,7 +101,7 @@ export function removeFlag(current: string[], name: string): string[] {
     .flat()
 }
 
-export function expandHome(path: string, home = process.env.HOME ?? ""): string {
+export function expandHome(path: string, home = homedir()): string {
   if (path === "~") return home
   if (path.startsWith("~/")) return home + path.slice(1)
   return path

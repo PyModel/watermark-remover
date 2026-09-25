@@ -21,6 +21,7 @@ describe("prompt", () => {
     expect(parsePrompt("drafts notes.md")).toEqual({ kind: "paths", tokens: ["drafts", "notes.md"] })
     // An absolute path is a path, not a command.
     expect(parsePrompt("/Users/me/draft.md").kind).toBe("paths")
+    expect(parsePrompt("/tmp")).toEqual({ kind: "paths", tokens: ["/tmp"] })
   })
 
   test("groups valued flags with their values", () => {

@@ -294,7 +294,7 @@ export function createApp(bridge: BridgeLike, onQuit: () => void) {
       if (error instanceof BridgeError && error.code === "needs_confirm") {
         set("run", null)
         const items = error.confirm
-        if (await confirm(items)) return clean(items.map((item) => item.kind))
+        if (await confirm(items)) return await clean(items.map((item) => item.kind))
         return toast("Nothing was written.")
       }
       fail(error)
