@@ -20,6 +20,7 @@ import io
 import json
 import os
 import queue
+import shlex
 import subprocess
 import sys
 import threading
@@ -1477,7 +1478,7 @@ def test_a_failed_file_reports_no_output(tmp_path, monkeypatch):
 
 
 def test_a_bridge_dry_run_reads_as_sentences_not_key_value_dumps(tmp_path):
-    from PIL import Image
+    Image = pytest.importorskip("PIL.Image")
 
     source = tmp_path / "a.png"
     Image.new("RGB", (8, 8), (10, 20, 30)).save(source)
@@ -1494,7 +1495,7 @@ def test_a_bridge_dry_run_reads_as_sentences_not_key_value_dumps(tmp_path):
 
 
 def test_a_visible_clean_says_what_it_did_to_the_pixels(tmp_path):
-    from PIL import Image
+    Image = pytest.importorskip("PIL.Image")
 
     source = tmp_path / "a.png"
     Image.new("RGB", (8, 8), (10, 20, 30)).save(source)
@@ -1603,7 +1604,7 @@ def test_history_is_newest_first(tmp_path):
     entries = response(call(bridge, sink, "history", rid=3))["result"]["entries"]
     assert [entry["command"].split()[-1] for entry in entries] == [
         "--aggressive-homoglyphs",
-        str(source),
+        shlex.quote(str(source)),
     ]
     assert entries[0]["summary"] == "1 file, 0 errors. Verifiable."
     assert set(entries[0]) == {"time", "command", "summary"}
@@ -1807,7 +1808,7 @@ def test_a_missing_bun_prints_the_install_hint(monkeypatch, capsys):
     monkeypatch.setattr(launcher.shutil, "which", lambda name: None)
     assert launcher.main(["."]) == 1
     err = capsys.readouterr().err
-    assert "https://bun.sh" in err
+    assert launcher.BUN_INSTALL_HINT in err
 
 
 def test_a_missing_frontend_is_a_clear_error(monkeypatch, capsys, tmp_path):
