@@ -21,35 +21,23 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import pipeline_actions as act
-from clean_asset import (
-    DEGRADE_CLI_CHOICES,
-    MORPHO_CLI_CHOICES,
-    CleanPlan,
-    CleanResult,
-    clean_asset,
-)
+DEGRADE_CLI_CHOICES = ("freq-dct", "blur", "median", "jpeg", "rotate", "two-stage")
+MORPHO_CLI_CHOICES = ("grid", "diagonal", "noise", "quantize")
+from clean_pipeline import execute
 from clean_request import (
     DEFAULT_TIMEOUT,
     DEFAULT_VISIBLE_PROMPT,
     REWRITE_CLI_CHOICES,
     CleanPlanPreflightError,
     CleanRequest,
-    describe_dropped_text_transforms,
-    dropped_text_transforms,
     plan_work,
     select_request_inputs,
 )
-from common import (
-    atomic_write_text,
-    cleaned_path,
-    eprint,
-)
+from common import atomic_write_text, cleaned_path, eprint
 from morphomod import VISIBLE_CLEAN_BACKENDS
-from operation import ExitCode, OperationStatus, status_to_exit_code
+from operation import ExitCode
 from perturb_text import MODES as PERTURB_MODES
-from pipeline_actions import report_actions
-from rewrite_text import LIVE_REWRITE_BACKENDS, REASONING_EFFORTS, TokenSink, remote_warning
+from rewrite_text import LIVE_REWRITE_BACKENDS, REASONING_EFFORTS
 
 # Preserved under the old private name: external callers are not expected, but
 # the rename should not be the thing that breaks an in-tree import.
@@ -239,118 +227,75 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     return p
 
+def request_from_cli(args) -> CleanRequest:
+    """Adapt parser output into the argparse-independent canonical request."""
+    values = vars(args).copy()
+    values["paths"] = tuple(values.pop("path", ()) or ())
+    return CleanRequest(**values)
+
 
 def main() -> int:
     args = _build_parser().parse_args()
     try:
-        request = CleanRequest.from_args(args)
+        request = request_from_cli(args)
     except ValueError as error:
         eprint(f"invalid options: {error}")
         return ExitCode.USAGE_ERROR.value
-    try:
-        selection = select_request_inputs(request)
-    except ValueError as error:
-        eprint(f"invalid input selection: {error}")
-        return ExitCode.USAGE_ERROR.value
-    items = selection.items
-    batch = selection.batch
     if request.in_place and request.output:
         eprint("warning: -o ignored with --in-place")
     try:
-        work = plan_work(items, request, batch)
+        run = execute(request)
     except CleanPlanPreflightError as error:
-        result = _error_payload(error.path, error.output, error)
+        result = {
+            "kind": "unknown",
+            "input": str(error.path),
+            "output": str(error.output),
+            "actions": [f"error: {error}"],
+            "action_details": [{"code": "failed", "effect": "error", "text": f"error: {error}"}],
+            "error": str(error),
+            "exit_code": ExitCode.RESIDUAL_OR_ERROR.value,
+        }
         if request.json:
-            payload = {"total": 1, "results": [result]} if batch else result
+            payload = {"total": 1, "results": [result]} if len(request.paths) > 1 else result
             print(json.dumps(payload, indent=2, ensure_ascii=False))
         else:
             eprint(f"error on {error.path}: {error}")
         return ExitCode.RESIDUAL_OR_ERROR.value
     except ValueError as error:
-        # Preflight refusals (unrecognized format, binary-as-text, oversized
-        # input, output collisions) must not vanish as a bare exit code when
-        # --json is requested: emit the same structured shape a batch consumer
-        # can parse, while keeping the human message and the usage-error exit.
         if request.json:
-            entry = {"error": str(error), "exit_code": ExitCode.USAGE_ERROR.value}
-            payload = {"total": 1, "results": [entry]} if batch else entry
-            print(json.dumps(payload, indent=2, ensure_ascii=False))
-        eprint(f"invalid output selection: {error}")
+            print(json.dumps({"error": str(error), "exit_code": ExitCode.USAGE_ERROR.value}, indent=2))
+        label = "invalid input selection" if "glob" in str(error) else "invalid output selection"
+        eprint(f"{label}: {error}")
         return ExitCode.USAGE_ERROR.value
-    if request.dry_run:
-        results = [
-            dry_run_payload(item.path, output, plan, request.in_place)
-            for item, output, plan in work
-        ]
-        payload = {"total": len(results), "results": results} if batch else results[0]
-        _write_audit(request, payload)
-        if request.json:
-            print(json.dumps(payload, indent=2, ensure_ascii=False))
-        elif not request.quiet:
-            for result in results:
-                print(f"dry-run: {result['input']} -> {result['output']}")
-                for action in result["actions"]:
-                    print(f"  - {action}")
-        return ExitCode.SUCCESS.value
 
-    if batch and request.output and not request.in_place:
-        request.output.mkdir(parents=True, exist_ok=True)
-
-    results = [run_clean_item(item.path, output, request, plan) for item, output, plan in work]
-
-    payload: dict | list = {"total": len(results), "results": results} if batch else results[0]
+    results = [item.payload for item in run.results]
+    payload: dict | list = {"total": len(results), "results": results} if run.batch else results[0]
     _write_audit(request, payload)
-    if request.json:
+    if request.dry_run and not request.json and not request.quiet:
+        for result in results:
+            print(f"dry-run: {result['input']} -> {result['output']}")
+            for action in result["actions"]:
+                print(f"  - {action}")
+    elif request.json:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
-    elif batch and not request.quiet:
-        errors = sum(r.get("exit_code", 0) != 0 for r in results)
-        eprint(f"done: {len(results)} file(s), {errors} with warnings/errors")
+    elif not request.quiet:
+        for result in results:
+            if result.get("residual") or result.get("exit_code") != 0:
+                eprint("warning: residual C2PA/AI/soft-binding signals may remain")
+            if result.get("skipped_text_transforms"):
+                eprint(
+                    f"note: {Path(result['input']).name} skipped "
+                    f"{', '.join(result['skipped_text_transforms'])}"
+                )
+        if run.batch:
+            errors = sum(r.get("exit_code", 0) != 0 for r in results)
+            eprint(f"done: {len(results)} file(s), {errors} with warnings/errors")
     if all(r.get("exit_code", 0) == 0 for r in results):
         return ExitCode.SUCCESS.value
     return ExitCode.RESIDUAL_OR_ERROR.value
 
 
-def dry_run_payload(
-    path: Path,
-    output: Path | None,
-    plan: CleanPlan,
-    in_place: bool,
-) -> dict:
-    """Describe what a visible-mark clean would do, without touching a file.
 
-    Shared with the TUI so its preview is the CLI's preview, not a second
-    description that can drift from what actually runs.
-    """
-    visible = plan.visible
-    if visible is None:
-        raise ValueError("dry-run requires a visible cleaning plan")
-    destination = path if in_place else output or cleaned_path(path)
-    if visible.mask_path is not None:
-        localization = f"mask:{visible.mask_path}"
-    elif visible.box is not None:
-        localization = f"box:{','.join(map(str, visible.box))}"
-    else:
-        localization = "external-detector"
-    actions = [
-        act.plan_localize(localization),
-        act.plan_refine_mask(visible.dilation_radius),
-        act.plan_inpaint(visible.backend),
-        act.plan_strip_metadata(),
-    ]
-    if plan.degrade is not None:
-        actions.append(act.plan_degrade(plan.degrade.strategy))
-    actions.append(act.plan_publish(str(visible.mask_output), str(destination)))
-    return {
-        "kind": "image",
-        "status": "dry-run",
-        "input": str(path),
-        "output": str(destination),
-        "mask": str(visible.mask_output),
-        "backend": visible.backend,
-        "timeout": visible.timeout,
-        **report_actions(actions),
-        "exit_code": ExitCode.SUCCESS.value,
-    }
 
 
 def _write_audit(request: CleanRequest, payload: dict | list) -> None:
@@ -382,18 +327,9 @@ def _write_audit(request: CleanRequest, payload: dict | list) -> None:
     )
 
 
-def _error_payload(path: Path, output: Path, error: Exception) -> dict:
-    return {
-        "kind": "unknown",
-        "input": str(path),
-        "output": str(output),
-        **report_actions([act.failed(error)]),
-        "error": str(error),
-        "exit_code": status_to_exit_code(OperationStatus.FAILED),
-    }
 
 
-def _present_result(result: CleanResult, payload: dict, *, quiet: bool = False) -> None:
+def _present_result(result, payload: dict, *, quiet: bool = False) -> None:
     if quiet:
         return
     if result.kind == "text":
@@ -420,44 +356,6 @@ def _present_result(result: CleanResult, payload: dict, *, quiet: bool = False) 
             eprint(f"  ! {finding}")
 
 
-def run_clean_item(
-    path: Path,
-    output_path: Path | None,
-    request: CleanRequest,
-    plan: CleanPlan,
-    *,
-    on_token: TokenSink | None = None,
-) -> dict:
-    """Clean one asset and return its JSON payload.
-
-    Shared with the TUI, which passes a request with ``json=True`` so this
-    stays silent and the caller renders the payload itself, plus an *on_token*
-    sink so a Layer B rewrite is visible while it runs.
-    """
-    dest = path if request.in_place else output_path or cleaned_path(path)
-    try:
-        rewrite_plan = plan.text.rewrite_plan
-        if rewrite_plan is not None and (warning := remote_warning(rewrite_plan.base_url)):
-            eprint(warning)
-        result = clean_asset(path, dest, plan, on_token=on_token)
-    except Exception as error:
-        if not request.json:
-            eprint(f"error on {path}: {error}")
-        return _error_payload(path, dest, error)
-
-    payload = result.to_dict()
-    status = OperationStatus.VERIFIED if not result.residual else OperationStatus.RESIDUAL_RISK
-    payload["exit_code"] = status_to_exit_code(status)
-    # Text-only options are deliberate no-ops off the text path; say so rather
-    # than let the caller assume the body was rewritten.
-    dropped = dropped_text_transforms(request, result.kind)
-    if dropped:
-        payload["skipped_text_transforms"] = list(dropped)
-    if not request.json:
-        _present_result(result, payload, quiet=request.quiet)
-        if dropped and not request.quiet:
-            eprint(describe_dropped_text_transforms(request, result.kind, path))
-    return payload
 
 
 if __name__ == "__main__":

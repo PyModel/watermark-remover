@@ -19,11 +19,25 @@ def _imports(module: str) -> set[str]:
     return found
 
 
+def _defines_or_imports_dispatcher(module: str) -> bool:
+    tree = ast.parse((SCRIPTS / module).read_text(encoding="utf-8"))
+    return any(
+        (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "run_clean_item"
+        )
+        or (
+            isinstance(node, ast.ImportFrom)
+            and any(alias.name == "run_clean_item" for alias in node.names)
+        )
+        for node in ast.walk(tree)
+    )
+
+
 def test_cli_adapter_does_not_import_concrete_cleaners_or_dispatcher():
     imports = _imports("clean_file.py")
     assert not {"clean_asset", "image_meta", "container_meta", "text_unicode"} & imports
-    source = (SCRIPTS / "clean_file.py").read_text(encoding="utf-8")
-    assert "run_clean_item" not in source
+    assert not _defines_or_imports_dispatcher("clean_file.py")
 
 
 def test_execution_dispatcher_is_owned_only_by_clean_pipeline():
@@ -33,5 +47,4 @@ def test_execution_dispatcher_is_owned_only_by_clean_pipeline():
     for path in SCRIPTS.glob("*.py"):
         if path.name in {"clean_pipeline.py", "clean_asset.py"}:
             continue
-        source = path.read_text(encoding="utf-8")
-        assert "run_clean_item" not in source, path.name
+        assert not _defines_or_imports_dispatcher(path.name), path.name

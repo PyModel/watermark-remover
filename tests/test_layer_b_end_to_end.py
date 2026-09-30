@@ -7,6 +7,7 @@ watermark" works, rather than merely that the plumbing type-checks.
 """
 
 from __future__ import annotations
+from dataclasses import replace
 
 import json
 import subprocess
@@ -22,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+from clean_pipeline import execute
 from clean_request import CleanRequest, build_rewrite_plan
 from rewrite_text import generate_candidates, rewrite
 
@@ -368,19 +370,18 @@ def test_a_stream_survives_keepalives_and_garbage_lines(stream_server):
 
 def test_the_clean_pipeline_streams_when_given_a_sink(stream_server, tmp_path):
     """The Run pane's stream box is fed by the same seam the CLI cleans through."""
-    from clean_file import run_clean_item
     from clean_request import build_clean_plan, resolve_kind
 
     _StreamHandler.mode = "openai"
     source = tmp_path / "note.txt"
     source.write_text(SOURCE, encoding="utf-8")
     request = _request(stream_server, paths=(source,))
-    plan = build_clean_plan(request, tmp_path / "note.clean.txt", resolve_kind(source, request))
-
+    destination = tmp_path / "note.clean.txt"
     seen: list[str] = []
-    payload = run_clean_item(
-        source, tmp_path / "note.clean.txt", request, plan, on_token=seen.append
-    )
+    payload = execute(
+        replace(request.with_paths((source,)), output=destination),
+        on_token=seen.append,
+    ).results[0].payload
 
     assert "".join(seen) == "Hello streamed world."
     assert payload["exit_code"] == 0
@@ -388,14 +389,12 @@ def test_the_clean_pipeline_streams_when_given_a_sink(stream_server, tmp_path):
 
 
 def test_the_clean_pipeline_does_not_stream_without_a_sink(chat_server, tmp_path):
-    from clean_file import run_clean_item
     from clean_request import build_clean_plan, resolve_kind
 
     source = tmp_path / "note.txt"
     source.write_text(SOURCE, encoding="utf-8")
     request = _request(chat_server, paths=(source,))
-    plan = build_clean_plan(request, tmp_path / "note.clean.txt", resolve_kind(source, request))
-    run_clean_item(source, tmp_path / "note.clean.txt", request, plan)
+    execute(request, on_item=None)
     assert _ChatHandler.seen[0].get("stream") is not True
 
 
@@ -406,17 +405,17 @@ def test_a_backend_that_ignores_stream_still_produces_a_rewrite(chat_server, tmp
     behaviour of any endpoint without SSE support.  Passing a sink used to turn
     that into "empty content"; it now degrades to a single fragment.
     """
-    from clean_file import run_clean_item
     from clean_request import build_clean_plan, resolve_kind
 
     source = tmp_path / "note.txt"
     source.write_text(SOURCE, encoding="utf-8")
     destination = tmp_path / "note.clean.txt"
     request = _request(chat_server, paths=(source,))
-    plan = build_clean_plan(request, destination, resolve_kind(source, request))
-
     seen: list[str] = []
-    payload = run_clean_item(source, destination, request, plan, on_token=seen.append)
+    payload = execute(
+        replace(request.with_paths((source,)), output=destination),
+        on_token=seen.append,
+    ).results[0].payload
 
     assert _ChatHandler.seen[0].get("stream") is True
     assert seen == [REWRITTEN]

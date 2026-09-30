@@ -42,7 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from batch_inputs import InputItem, InputSelection
 from clean_asset import CleanPlan
-from clean_file import _build_parser as _build_clean_parser
+from clean_file import _build_parser as _build_clean_parser, request_from_cli
 from clean_request import (
     CleanPlanPreflightError,
     CleanRequest,
@@ -388,7 +388,7 @@ def compose_request(state: Mapping[str, object], *, allow_remote: bool = False) 
 
     args = _raising_parser().parse_args([*flags, "--", *paths])
     try:
-        request = CleanRequest.from_args(args)
+        request = request_from_cli(args)
     except (ValueError, TypeError) as error:
         raise InvalidOptions(str(error)) from error
 

@@ -190,65 +190,6 @@ class CleanRequest:
             return self.rewrite
         return "tsapa" if self.tsapa else None
 
-    @classmethod
-    def from_args(cls, args) -> CleanRequest:
-        """Adapt an argparse ``Namespace`` from ``clean_file._build_parser``."""
-        paths = tuple(getattr(args, "path", ()) or ())
-        return cls(
-            paths=paths,
-            output=args.output,
-            in_place=args.in_place,
-            recursive=args.recursive,
-            glob=args.glob,
-            extensions=args.extensions,
-            force_type=args.force_type,
-            force_text=args.force_text,
-            nfkc=args.nfkc,
-            aggressive_homoglyphs=args.aggressive_homoglyphs,
-            strip_semantic_format=args.strip_semantic_format,
-            keep_non_ai_metadata=args.keep_non_ai_metadata,
-            soft_binding=args.soft_binding,
-            rewrite=args.rewrite,
-            rewrite_backend=args.rewrite_backend,
-            rewrite_model=args.rewrite_model,
-            rewrite_base_url=args.rewrite_base_url,
-            rewrite_lang=args.rewrite_lang,
-            rewrite_original_lang=args.rewrite_original_lang,
-            rewrite_timeout=args.rewrite_timeout,
-            rewrite_temperature=args.rewrite_temperature,
-            rewrite_candidates=args.rewrite_candidates,
-            rewrite_reasoning_effort=args.rewrite_reasoning_effort,
-            rewrite_disable_thinking=args.rewrite_disable_thinking,
-            rewrite_allow_remote=args.rewrite_allow_remote,
-            tsapa=args.tsapa,
-            tsapa_generations=args.tsapa_generations,
-            tsapa_population=args.tsapa_population,
-            char_perturb=args.char_perturb,
-            char_mode=args.char_mode,
-            char_strength=args.char_strength,
-            seed=args.seed,
-            visible_mask=args.visible_mask,
-            visible_box=args.visible_box,
-            detect_command=args.detect_command,
-            dilate=args.dilate,
-            visible_backend=args.visible_backend,
-            inpaint_command=args.inpaint_command,
-            visible_prompt=args.visible_prompt,
-            quality=args.quality,
-            dry_run=args.dry_run,
-            timeout=args.timeout,
-            degrade=args.degrade,
-            morpho=args.morpho,
-            degrade_strength=args.degrade_strength,
-            degrade_seed=args.degrade_seed,
-            remove_synthid=args.remove_synthid,
-            synthid_strength=args.synthid_strength,
-            wmct_marker=args.wmct_marker,
-            keep_artifacts=args.keep_artifacts,
-            quiet=args.quiet,
-            json=args.json,
-            audit=args.audit,
-        )
 
     def with_paths(self, paths: Sequence[Path]) -> CleanRequest:
         return replace(self, paths=tuple(paths))

@@ -13,6 +13,7 @@ SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 import clean_file
+import clean_pipeline
 from clean_asset import CleanResult
 
 
@@ -36,7 +37,7 @@ def _run_clean(monkeypatch, tmp_path, *, json_flag, residual, degraded=False):
     if degraded:
         details["meta"] = {"degraded": True}
     monkeypatch.setattr(
-        clean_file,
+        clean_pipeline,
         "clean_asset",
         lambda *a, **k: _result("container", dest, residual, details),
     )
@@ -63,7 +64,7 @@ def test_clean_file_json_and_human_agree_on_image_residual(monkeypatch, tmp_path
     src.write_bytes(b"\x89PNG\r\n\x1a\n")
     dest = tmp_path / "x.cleaned.png"
     monkeypatch.setattr(
-        clean_file,
+        clean_pipeline,
         "clean_asset",
         lambda *a, **k: _result("image", dest, True),
     )
