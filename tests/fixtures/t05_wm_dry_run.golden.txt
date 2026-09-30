@@ -1,0 +1,6 @@
+dry-run: <INPUT> -> <OUTPUT>
+  - localize visible mark via box:1,1,1,1
+  - fill holes + dilate radius=0
+  - inpaint with simple backend
+  - strip requested metadata
+  - publish mask to <MASK> and image to <OUTPUT>

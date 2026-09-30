@@ -23,6 +23,7 @@ from image_meta import (
     strip_tiff,
     strip_webp,
 )
+from pipeline_actions import action_sentences
 
 
 def main() -> int:
@@ -118,8 +119,8 @@ def main() -> int:
         print(json.dumps(result, indent=2))
     else:
         eprint(f"wrote {result['output']} ({result['bytes_in']} -> {result['bytes_out']})")
-        for a in result["actions"]:
-            eprint(f"  - {a}")
+        for action in action_sentences(result.get("action_details", ())):
+            eprint(f"  - {action}")
         if result.get("synthid_before") and result["synthid_before"].get("available"):
             label = "yes" if result["synthid_before"].get("is_watermarked") else "no"
             eprint(

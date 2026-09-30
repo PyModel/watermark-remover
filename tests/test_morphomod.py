@@ -324,7 +324,7 @@ def test_remove_visible_texture_pipeline(tmp_path: Path):
         ),
     )
     assert report["status"] == "completed"
-    assert any("texture-patch" in action for action in report["actions"])
+    assert any("texture-patch" in action["text"] for action in report["action_details"])
     assert dest.is_file()
 
 
@@ -670,9 +670,9 @@ def test_clean_file_frictionless_no_mask_artifact_by_default(tmp_path: Path):
     assert dest2.with_name("kept.mask.pgm").is_file()
     visible = json.loads(r2.stdout)["visible"]
     assert visible["mask"] is not None
-    # The staged mask path is retargeted in the structured steps too, not
-    # only in the human lines, so no step names a deleted temp file.
-    assert [d["text"] for d in visible["action_details"]] == visible["actions"]
+    # The staged mask path is retargeted in the structured steps, so no step
+    # names a deleted temp file.
+    assert all(d["text"] for d in visible["action_details"])
     [mask_step] = [d for d in visible["action_details"] if d["code"] == "effective_mask"]
     assert mask_step["params"]["published"] == visible["mask"]
 

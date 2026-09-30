@@ -35,6 +35,7 @@ from common import atomic_write_text, eprint
 from morphomod import VISIBLE_CLEAN_BACKENDS
 from operation import ExitCode
 from perturb_text import MODES as PERTURB_MODES
+from pipeline_actions import action_sentences
 from rewrite_text import LIVE_REWRITE_BACKENDS, REASONING_EFFORTS
 
 # Preserved under the old private name: external callers are not expected, but
@@ -249,8 +250,14 @@ def main() -> int:
             "kind": "unknown",
             "input": str(error.path),
             "output": str(error.output),
-            "actions": [f"error: {error}"],
-            "action_details": [{"code": "failed", "effect": "error", "text": f"error: {error}"}],
+            "action_details": [
+                {
+                    "code": "failed",
+                    "effect": "error",
+                    "text": f"error: {error}",
+                    "params": {},
+                }
+            ],
             "error": str(error),
             "exit_code": ExitCode.RESIDUAL_OR_ERROR.value,
         }
@@ -275,7 +282,7 @@ def main() -> int:
     if request.dry_run and not request.json and not request.quiet:
         for result in results:
             print(f"dry-run: {result['input']} -> {result['output']}")
-            for action in result["actions"]:
+            for action in action_sentences(result.get("action_details", ())):
                 print(f"  - {action}")
     elif request.json:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -337,14 +344,14 @@ def _present_result(result, payload: dict, *, quiet: bool = False) -> None:
         return
     if result.kind == "image":
         eprint(f"wrote {result.output} ({payload['bytes_in']} -> {payload['bytes_out']})")
-        for action in payload.get("actions", []):
+        for action in action_sentences(payload.get("action_details", ())):
             eprint(f"  - {action}")
         if result.residual:
             eprint("warning: residual C2PA/AI/soft-binding signals may remain")
         return
 
     eprint(f"wrote {result.output} format={payload['format']}")
-    for action in payload.get("actions", []):
+    for action in action_sentences(payload.get("action_details", ())):
         eprint(f"  - {action}")
     if result.residual:
         eprint("warning: residual C2PA/AI metadata remains")

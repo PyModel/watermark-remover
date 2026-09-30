@@ -495,11 +495,9 @@ def test_docx_layer_a_via_clean_container(tmp_path: Path):
     src.write_bytes(_make_docx_with_invisible_body())
     dest = tmp_path / "out.docx"
     result = clean_container(src, dest)
-    assert any(a.startswith("layer A text: removed=") for a in result["actions"])
-    # Each human line has a structured twin, in order, so no consumer parses text.
     details = result["action_details"]
-    assert [d["text"] for d in details] == result["actions"]
-    [layer_a] = [d for d in details if d["code"] == "layer_a_text"]
+    assert any(detail["text"].startswith("layer A text: removed=") for detail in details)
+    [layer_a] = [detail for detail in details if detail["code"] == "layer_a_text"]
     assert layer_a["effect"] == "change"
     assert layer_a["params"] == {"removed": 3, "replaced": 1}
     with zipfile.ZipFile(dest) as zf:
