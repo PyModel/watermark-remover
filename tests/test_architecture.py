@@ -1,4 +1,5 @@
 """Import boundaries for the single cleaning execution seam."""
+
 from __future__ import annotations
 
 import ast
