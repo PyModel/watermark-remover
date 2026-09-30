@@ -30,6 +30,7 @@ import sys
 import tempfile
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -37,6 +38,8 @@ from urllib.parse import urlparse
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from asset_kind import classify_bytes
+from clean_pipeline import execute
+from clean_request import CleanRequest
 from common import (
     MAX_INPUT_BYTES,
     eprint,
@@ -44,13 +47,16 @@ from common import (
     read_flag_env,
     which,
 )
-from container_meta import clean_container, inspect_container
-from image_meta import clean_image, inspect_image, run_synthid_score
+from inspect_file import inspect_asset
 from layer_b_discovery import layer_b_status
 from optional_deps import extras_status
 from score_stylometry import score_text_stylometry
 from text_detectors import detector_status, run_all_text_detectors, run_text_detectors
-from text_unicode import clean_text, inspect_text
+
+
+def run_synthid_score(path: Path) -> dict[str, Any] | None:
+    return import_module("image_meta").run_synthid_score(path)
+
 
 VERSION = os.environ.get("WATERMARKS_SERVER_VERSION", "dev")
 
@@ -65,18 +71,17 @@ MAX_BODY_BYTES = MAX_INPUT_BYTES + (MAX_INPUT_BYTES >> 1)
 TEXT_DETECTION_STATUSES = ("DETECTED", "INCONCLUSIVE", "NOT_DETECTED", "NOT_RUN")
 _UNRESOLVED_TEXT_VERDICTS = frozenset({"INCONCLUSIVE", "UNSUPPORTED", "ERROR"})
 
-ALLOWED_CLEAN_OPTIONS = {
-    "nfkc": bool,
-    "aggressive_homoglyphs": bool,
-    "keep_non_ai_metadata": bool,
-    "also_layer_a_text": bool,
-    "remove_pixel": str,
-    "strip_all_metadata": bool,
-    "detect_before": bool,
-    "detect_after": bool,
-    # OURS-only additive keys (Phase 9 plan)
-    "remove_synthid": bool,
-    "wmct_marker": bool,
+CLEAN_OPTION_TRANSLATIONS = {
+    "nfkc": ("nfkc", bool),
+    "aggressive_homoglyphs": ("aggressive_homoglyphs", bool),
+    "keep_non_ai_metadata": ("keep_non_ai_metadata", bool),
+    "also_layer_a_text": ("also_layer_a_text", bool),
+    "strip_all_metadata": ("keep_non_ai_metadata", bool),
+    "detect_before": ("detect_before", bool),
+    "detect_after": ("detect_after", bool),
+    "remove_synthid": ("remove_synthid", bool),
+    "wmct_marker": ("wmct_marker", bool),
+    "remove_pixel": ("pixel_backend", str),
 }
 
 
@@ -188,7 +193,7 @@ def _file_request(extra: dict[str, Any] | None = None) -> dict[str, Any]:
 
 def _clean_request_schema() -> dict[str, Any]:
     options: dict[str, Any] = {}
-    for key, kind in ALLOWED_CLEAN_OPTIONS.items():
+    for key, (_field, kind) in CLEAN_OPTION_TRANSLATIONS.items():
         if kind is bool:
             options[key] = _schema(type="boolean")
         else:
@@ -573,16 +578,23 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError(
                         "refusing to inspect bytes that look like a binary container as text"
                     )
-                raw_text = data.decode("utf-8", errors="surrogateescape")
-                report = inspect_text(raw_text).to_dict()
-                s_rep = score_text_stylometry(raw_text, path=name or "<text>")
-                report["stylometry"] = s_rep.to_dict()
+                inspected = inspect_asset(path)
+                report = {
+                    key: value
+                    for key, value in inspected.items()
+                    if key not in {"kind", "path", "suspicious"}
+                }
                 if run_detect:
-                    report["text_detectors"] = run_all_text_detectors(raw_text)
-            elif kind == "image":
-                report = inspect_image(path).to_dict()
+                    report["text_detectors"] = run_all_text_detectors(
+                        data.decode("utf-8", errors="surrogateescape")
+                    )
             else:
-                report = inspect_container(path).to_dict()
+                inspected = inspect_asset(path)
+                report = {
+                    key: value
+                    for key, value in inspected.items()
+                    if key not in {"kind", "path", "suspicious"}
+                }
         detection_status = _text_detection_status(report.get("text_detectors") or [])
         suspicious = (
             bool(report.get("suspicious_total"))
@@ -644,7 +656,7 @@ class Handler(BaseHTTPRequestHandler):
                 detections = [score]
             else:
                 detections = []
-                report = inspect_container(path).to_dict()
+                report = inspect_asset(path)
                 self._respond(
                     HTTPStatus.OK,
                     {
@@ -664,98 +676,76 @@ class Handler(BaseHTTPRequestHandler):
                 "unrecognized file format; use a filename with a known extension "
                 "(e.g. notes.txt) or a supported image/container name"
             )
-        options = body.get("options")
-        if options is None:
-            options = {}
+        options = body.get("options") or {}
         if not isinstance(options, dict):
             raise ValueError("'options' must be an object")
+        values: dict[str, Any] = {}
         for key, value in options.items():
-            if key not in ALLOWED_CLEAN_OPTIONS:
+            translation = CLEAN_OPTION_TRANSLATIONS.get(key)
+            if translation is None:
                 raise ValueError(f"unknown option: {key}")
-            expected_type = ALLOWED_CLEAN_OPTIONS[key]
+            field, expected_type = translation
             if not isinstance(value, expected_type):
                 type_name = "boolean" if expected_type is bool else "string"
                 raise ValueError(f"option {key!r} must be a {type_name}")
-
+            if key == "strip_all_metadata":
+                values["keep_non_ai_metadata"] = not value
+            elif field == "pixel_backend":
+                values[field] = value
+            else:
+                values[field] = value
+        pixel = values.pop("pixel_backend", None)
+        if pixel is not None:
+            available = bool(capabilities()["pixel_backends"].get(pixel, False))
+            self._respond(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "kind": kind,
+                    "capability": {
+                        "requested": pixel,
+                        "supported": pixel in ("ctrlregen", "diffusion"),
+                        "available": available,
+                        "executed": False,
+                        "reason": (
+                            "pixel backend is unavailable"
+                            if not available
+                            else "pixel backend is not wired into the canonical pipeline"
+                        ),
+                    },
+                },
+            )
+            return
         with tempfile.TemporaryDirectory(prefix="wm-clean-") as tmp:
             tmpdir = Path(tmp)
             src = _tmp_path(tmpdir, name or "input")
             src.write_bytes(data)
-            if kind == "text":
-                if looks_binary(data):
-                    raise ValueError(
-                        "refusing to clean bytes that look like a binary container as text"
-                    )
-                text = data.decode("utf-8", errors="surrogateescape")
-                detect_before = bool(options.get("detect_before"))
-                detect_after = bool(options.get("detect_after"))
-                detector_reports: dict[str, Any] = {}
-                if detect_before:
-                    detector_reports["before"] = run_text_detectors(text)
-                cleaned, stats = clean_text(
-                    text,
-                    nfkc=bool(options.get("nfkc")),
-                    aggressive_homoglyphs=bool(options.get("aggressive_homoglyphs")),
+            dest = tmpdir / f"out{Path(name).suffix}"
+            detector_reports: dict[str, Any] = {}
+            if kind == "text" and values.get("detect_before"):
+                detector_reports["before"] = run_text_detectors(
+                    data.decode("utf-8", errors="surrogateescape")
                 )
-                if detect_after:
-                    detector_reports["after"] = run_text_detectors(cleaned)
-                cleaned_bytes = cleaned.encode("utf-8", errors="surrogateescape")
-                report: dict[str, Any] = {"kind": "text", "stats": stats, "length": len(cleaned)}
-                if detector_reports:
-                    report["text_detectors"] = detector_reports
-            elif kind == "image":
-                dest = tmpdir / "out.png"
-                strip_all = not bool(options.get("keep_non_ai_metadata"))
-                if "strip_all_metadata" in options:
-                    strip_all = bool(options["strip_all_metadata"])
-                remove_pixel = options.get("remove_pixel")
-                if remove_pixel not in (None, "ctrlregen", "diffusion"):
-                    raise ValueError("remove_pixel must be one of: ctrlregen, diffusion")
-                # OURS clean_image doesn't expose remove_pixel yet; it does
-                # expose remove_synthid + wmct_marker as additive keys (Phase 9
-                # plan). Pixel backends (ctrlregen / diffusion) are wired
-                # through a future image_meta port; mark unavailable in the
-                # report rather than failing the request.
-                remove_synthid = bool(options.get("remove_synthid"))
-                wmct_marker = bool(options.get("wmct_marker"))
-                result = clean_image(
-                    src,
-                    dest,
-                    strip_all_metadata=strip_all,
-                    remove_synthid=remove_synthid,
-                    wmct_marker=wmct_marker,
+            request = CleanRequest(paths=(src,), output=dest, **values)
+            result = execute(request).payload
+            if result.get("kind") == "unknown" and result.get("error"):
+                raise ValueError(result["error"])
+            cleaned_bytes = dest.read_bytes()
+            if kind == "text" and values.get("detect_after"):
+                detector_reports["after"] = run_text_detectors(
+                    cleaned_bytes.decode("utf-8", errors="surrogateescape")
                 )
-                if remove_pixel:
-                    result["pixel_removal"] = {
-                        "available": False,
-                        "error": (
-                            f"remove_pixel={remove_pixel!r} is reserved for the future "
-                            "image_meta integration; not yet exposed via OURS "
-                            "clean_image"
-                        ),
-                    }
-                if bool(options.get("detect_before")) and result.get("synthid_before") is None:
-                    result["synthid_before"] = run_synthid_score(src)
-                if bool(options.get("detect_after")) and result.get("synthid_after") is None:
-                    result["synthid_after"] = run_synthid_score(dest)
-                cleaned_bytes = dest.read_bytes()
-                report = {"kind": "image", **result}
-            else:
-                dest = _tmp_path(tmpdir, f"out{Path(name).suffix}")
-                result = clean_container(
-                    src, dest, also_layer_a_text=bool(options.get("also_layer_a_text", True))
-                )
-                cleaned_bytes = dest.read_bytes()
-                report = {"kind": "container", **result}
-            report.pop("input", None)
-            report.pop("output", None)
+            if detector_reports:
+                result["text_detectors"] = detector_reports
+            result.pop("input", None)
+            result.pop("output", None)
         self._respond(
             HTTPStatus.OK,
             {
                 "ok": True,
                 "kind": kind,
                 "cleaned": base64.b64encode(cleaned_bytes).decode("ascii"),
-                "report": report,
+                "report": result,
             },
         )
 

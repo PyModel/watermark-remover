@@ -56,3 +56,11 @@ def test_tui_surfaces_do_not_import_cli_or_concrete_cleaners():
         imports = _imports(module)
         assert "clean_file" not in imports, module
         assert not {"image_meta", "container_meta", "text_unicode"} & imports, module
+# --- HTTP adapter boundary (ticket 03) --------------------------------------
+
+
+def test_http_adapter_does_not_import_concrete_cleaners_or_dispatcher():
+    imports = _imports("server.py")
+    assert not {"clean_asset", "image_meta", "container_meta", "text_unicode"} & imports
+    assert "clean_pipeline" in imports
+    assert not _defines_or_imports_dispatcher("server.py")

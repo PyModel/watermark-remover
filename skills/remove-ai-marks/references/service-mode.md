@@ -74,10 +74,11 @@ The machine-readable contract lives at `$WM/openapi.json` — plug it into any
 OpenAPI tooling instead of hand-rolling clients.
 
 `options` accepted by `/clean`: `nfkc`, `aggressive_homoglyphs` (text),
-`keep_non_ai_metadata`, `strip_all_metadata`, `remove_pixel` (`ctrlregen` |
-`diffusion`) (images), `also_layer_a_text` (containers), `detect_before` /
-`detect_after` (text and images), plus our extras `remove_synthid` and
-`wmct_marker` (images, PNG output).
+`keep_non_ai_metadata` (the inverse of `strip_all_metadata`),
+`strip_all_metadata`, `also_layer_a_text` (containers),
+`detect_before` / `detect_after` (text and images), plus our extras
+`remove_synthid` and `wmct_marker` (images, PNG output). Requests naming a
+pixel backend receive a capability result when that backend is unavailable.
 
 **Inspect first** (decide, don't guess):
 

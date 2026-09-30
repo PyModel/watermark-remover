@@ -103,6 +103,9 @@ class CleanRequest:
 
     # --- Layer M: metadata ----------------------------------------------
     keep_non_ai_metadata: bool = False
+    also_layer_a_text: bool = True
+    detect_before: bool = False
+    detect_after: bool = False
     soft_binding: bool = False
 
     # --- Layer B: LLM rewrite -------------------------------------------
