@@ -49,3 +49,10 @@ def test_execution_dispatcher_is_owned_only_by_clean_pipeline():
         if path.name in {"clean_pipeline.py", "clean_asset.py"}:
             continue
         assert not _defines_or_imports_dispatcher(path.name), path.name
+
+
+def test_tui_surfaces_do_not_import_cli_or_concrete_cleaners():
+    for module in ("tui_core.py", "tui_bridge.py"):
+        imports = _imports(module)
+        assert "clean_file" not in imports, module
+        assert not {"image_meta", "container_meta", "text_unicode"} & imports, module
