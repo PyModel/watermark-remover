@@ -30,10 +30,8 @@ from clean_request import (
     REWRITE_CLI_CHOICES,
     CleanPlanPreflightError,
     CleanRequest,
-    plan_work,
-    select_request_inputs,
 )
-from common import atomic_write_text, cleaned_path, eprint
+from common import atomic_write_text, eprint
 from morphomod import VISIBLE_CLEAN_BACKENDS
 from operation import ExitCode
 from perturb_text import MODES as PERTURB_MODES
@@ -227,6 +225,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     return p
 
+
 def request_from_cli(args) -> CleanRequest:
     """Adapt parser output into the argparse-independent canonical request."""
     values = vars(args).copy()
@@ -263,7 +262,9 @@ def main() -> int:
         return ExitCode.RESIDUAL_OR_ERROR.value
     except ValueError as error:
         if request.json:
-            print(json.dumps({"error": str(error), "exit_code": ExitCode.USAGE_ERROR.value}, indent=2))
+            entry = {"error": str(error), "exit_code": ExitCode.USAGE_ERROR.value}
+            payload = {"total": 1, "results": [entry]} if len(request.paths) > 1 else entry
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
         label = "invalid input selection" if "glob" in str(error) else "invalid output selection"
         eprint(f"{label}: {error}")
         return ExitCode.USAGE_ERROR.value
@@ -295,9 +296,6 @@ def main() -> int:
     return ExitCode.RESIDUAL_OR_ERROR.value
 
 
-
-
-
 def _write_audit(request: CleanRequest, payload: dict | list) -> None:
     """Write the JSON audit report when --audit is requested.
 
@@ -327,8 +325,6 @@ def _write_audit(request: CleanRequest, payload: dict | list) -> None:
     )
 
 
-
-
 def _present_result(result, payload: dict, *, quiet: bool = False) -> None:
     if quiet:
         return
@@ -354,8 +350,6 @@ def _present_result(result, payload: dict, *, quiet: bool = False) -> None:
         eprint("warning: residual C2PA/AI metadata remains")
         for finding in payload.get("post_findings") or []:
             eprint(f"  ! {finding}")
-
-
 
 
 if __name__ == "__main__":

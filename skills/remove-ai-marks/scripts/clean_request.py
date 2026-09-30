@@ -190,7 +190,6 @@ class CleanRequest:
             return self.rewrite
         return "tsapa" if self.tsapa else None
 
-
     def with_paths(self, paths: Sequence[Path]) -> CleanRequest:
         return replace(self, paths=tuple(paths))
 

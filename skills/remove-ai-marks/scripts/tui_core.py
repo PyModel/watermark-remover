@@ -42,7 +42,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from batch_inputs import InputItem, InputSelection
 from clean_asset import CleanPlan
-from clean_file import _build_parser as _build_clean_parser, request_from_cli
+from clean_file import _build_parser as _build_clean_parser
+from clean_file import request_from_cli
 from clean_request import (
     CleanPlanPreflightError,
     CleanRequest,
