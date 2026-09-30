@@ -59,7 +59,8 @@ _FRAMES = claim_stdout() if __name__ == "__main__" else None
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import tui as launcher
-from clean_pipeline import execute
+from clean_pipeline import execute, execute_item
+from asset_kind import classify_asset
 from clean_request import CleanRequest, select_request_inputs
 from inspect_file import inspect_asset
 from rewrite_text import LIVE_REWRITE_BACKENDS
@@ -718,12 +719,13 @@ class Bridge:
                 lambda text: self.event(rid, "token", {"index": index, "text": text})
             )
         try:
-            item_request = replace(request.with_paths((path,)), output=output)
-            run = execute(
-                item_request,
+            return execute_item(
+                path,
+                output,
+                request,
+                plan,
                 on_token=coalescer.add if coalescer is not None else None,
             )
-            return run.results[0].payload
         except (Exception, SystemExit) as error:
             return {"exit_code": 1, "error": f"{type(error).__name__}: {error}"}
         finally:

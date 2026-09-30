@@ -119,6 +119,17 @@ def _execute_item(
     payload.pop("_warning", None)
     return ItemResult(path, destination, payload)
 
+def execute_item(
+    path: Path,
+    output_path: Path | None,
+    request: CleanRequest,
+    plan: CleanPlan,
+    *,
+    on_token: TokenSink | None = None,
+) -> dict:
+    """Execute a preflighted item; retained for bridge seam tests and callbacks."""
+    return _execute_item(path, output_path, request, plan, on_token=on_token).payload
+
 
 def execute(
     request: CleanRequest,

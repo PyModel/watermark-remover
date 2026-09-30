@@ -1307,7 +1307,7 @@ def test_plan_shows_the_remote_gate_and_clean_stops_at_it(tmp_path, monkeypatch)
         seen.append(request)
         return {"kind": "text", "output": str(output), "exit_code": 0}
 
-    monkeypatch.setattr(tui_bridge, "run_clean_item", fake_run)
+    monkeypatch.setattr(tui_bridge, "execute_item", fake_run)
     done = response(call(bridge, sink, "clean", {"state": remote, "confirmed": ["remote"]}, rid=3))[
         "result"
     ]
@@ -1383,7 +1383,7 @@ def test_a_second_clean_is_busy_and_cancel_stops_after_the_current_file(tmp_path
         assert release.wait(10)
         return {"kind": "text", "output": str(output), "exit_code": 0}
 
-    monkeypatch.setattr(tui_bridge, "run_clean_item", slow_run)
+    monkeypatch.setattr(tui_bridge, "execute_item", slow_run)
     bridge, sink = make_bridge()
     first = bridge.handle_line(
         json.dumps({"id": 1, "method": "clean", "params": {"state": state([folder])}})
@@ -1444,14 +1444,14 @@ def test_a_pipeline_system_exit_is_an_internal_error_not_a_wedged_bridge(tmp_pat
 
 def test_a_file_whose_clean_raises_is_a_row_and_the_batch_continues(tmp_path, monkeypatch):
     folder = _two_files(tmp_path)
-    real = tui_bridge.run_clean_item
+    real = tui_bridge.execute_item
 
     def flaky(path, output, request, plan, *, on_token=None):
         if path.name == "a.txt":
             raise SystemExit(2)
         return real(path, output, request, plan, on_token=on_token)
 
-    monkeypatch.setattr(tui_bridge, "run_clean_item", flaky)
+    monkeypatch.setattr(tui_bridge, "execute_item", flaky)
     bridge, sink = make_bridge()
     frames = call(bridge, sink, "clean", {"state": state([folder])})
     done = [frame["data"] for frame in frames if frame.get("event") == "file_done"]
@@ -1469,7 +1469,7 @@ def test_a_failed_file_reports_no_output(tmp_path, monkeypatch):
     def fails(path, output, request, plan, *, on_token=None):
         return {"kind": "text", "output": str(output), "error": "disk full", "exit_code": 1}
 
-    monkeypatch.setattr(tui_bridge, "run_clean_item", fails)
+    monkeypatch.setattr(tui_bridge, "execute_item", fails)
     bridge, sink = make_bridge()
     frames = call(bridge, sink, "clean", {"state": state([source])})
     [done] = [frame["data"] for frame in frames if frame.get("event") == "file_done"]
