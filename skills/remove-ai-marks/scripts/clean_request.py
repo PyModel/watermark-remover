@@ -37,6 +37,7 @@ from batch_inputs import InputItem, InputSelection, safe_output_path, select_inp
 from clean_asset import (
     CleanPlan,
     ImageDegradePlan,
+    ImagePixelPlan,
     TextCleanPlan,
 )
 from common import (
@@ -466,11 +467,23 @@ def build_clean_plan(request: CleanRequest, dest: Path, kind: AssetKind) -> Clea
                 seed=request.degrade_seed,
             )
 
+    pixel_plan = None
+    if kind == "image":
+        pixel_plan = ImagePixelPlan(
+            visible=visible_plan,
+            degrade=degrade_plan,
+            remove_synthid=request.remove_synthid,
+            synthid_strength=request.synthid_strength,
+            wmct_marker=request.wmct_marker,
+            external_backend=None,
+        )
+
     return CleanPlan(
         forced_kind=kind,
         in_place=request.in_place,
         text=text_plan,
         strip_all_metadata=not request.keep_non_ai_metadata,
+        pixel=pixel_plan,
         visible=visible_plan,
         inspect_soft_binding=request.soft_binding,
         degrade=degrade_plan,

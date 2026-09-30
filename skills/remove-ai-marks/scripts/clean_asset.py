@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import math
 import os
 import stat
@@ -34,6 +35,47 @@ from morphomod import (
     encode_png,
     remove_visible,
 )
+
+_PIXEL_BACKENDS = {
+    "ctrlregen": ("ctrlregen", "NOAI_WATERMARK_DIR"),
+    "diffusion": ("markdiffusion", "MARKDIFFUSION_DIR"),
+}
+
+
+def pixel_backend_capability(name: str) -> dict[str, Any]:
+    """Report support and availability for an optional pixel backend.
+
+    Resolution is deliberately owned here, beside execution.  Unknown or
+    unconfigured backends fail closed and are never reported as executed.
+    """
+    backend = _PIXEL_BACKENDS.get(name)
+    if backend is None:
+        return {
+            "requested": name,
+            "supported": False,
+            "available": False,
+            "executed": False,
+            "reason": "unsupported pixel backend",
+        }
+    module, configuration = backend
+    available = bool(os.environ.get(configuration)) and importlib.util.find_spec(module) is not None
+    return {
+        "requested": name,
+        "supported": True,
+        "available": available,
+        "executed": False,
+        "reason": None if available else "pixel backend is unavailable",
+    }
+
+
+def _resolve_pixel_backend(name: str) -> Any:
+    capability = pixel_backend_capability(name)
+    if not capability["available"]:
+        raise RuntimeError(capability["reason"])
+    module, _ = _PIXEL_BACKENDS[name]
+    return __import__(module)
+
+
 from perturb_text import MODES as PERTURB_MODES
 from perturb_text import perturb_text
 from pipeline_actions import retarget_report
@@ -250,11 +292,40 @@ class ImageDegradePlan:
 
 
 @dataclass(frozen=True, slots=True)
+class ImagePixelPlan:
+    """Complete immutable pixel policy for one image."""
+
+    visible: VisiblePlan | None = None
+    degrade: ImageDegradePlan | None = None
+    remove_synthid: bool = False
+    synthid_strength: float = 0.6
+    wmct_marker: bool = False
+    external_backend: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.visible is not None and not isinstance(self.visible, VisiblePlan):
+            raise TypeError("visible must be a VisiblePlan")
+        if self.degrade is not None and not isinstance(self.degrade, ImageDegradePlan):
+            raise TypeError("degrade must be an ImageDegradePlan or None")
+        if not isinstance(self.remove_synthid, bool) or not isinstance(self.wmct_marker, bool):
+            raise TypeError("pixel removal options must be bools")
+        if (
+            isinstance(self.synthid_strength, bool)
+            or not isinstance(self.synthid_strength, (int, float))
+            or not 0.0 <= self.synthid_strength <= 1.0
+        ):
+            raise ValueError("synthid_strength must be in [0, 1]")
+        if self.external_backend is not None and self.external_backend not in _PIXEL_BACKENDS:
+            raise ValueError(f"unsupported pixel backend: {self.external_backend}")
+
+
+@dataclass(frozen=True, slots=True)
 class CleanPlan:
     forced_kind: str = "auto"
     in_place: bool = False
     text: TextCleanPlan = field(default_factory=TextCleanPlan)
     strip_all_metadata: bool = True
+    pixel: ImagePixelPlan | None = None
     visible: VisiblePlan | None = None
     inspect_soft_binding: bool = False
     degrade: ImageDegradePlan | None = None
@@ -276,6 +347,8 @@ class CleanPlan:
                 raise TypeError(f"{name} must be a bool")
         if not isinstance(self.text, TextCleanPlan):
             raise TypeError("text must be a TextCleanPlan")
+        if self.pixel is not None and not isinstance(self.pixel, ImagePixelPlan):
+            raise TypeError("pixel must be an ImagePixelPlan or None")
         if (
             not isinstance(self.synthid_strength, (int, float))
             or not 0.0 <= self.synthid_strength <= 1.0
@@ -288,6 +361,18 @@ class CleanPlan:
                 raise ValueError("visible cleaning requires an inpainting backend")
         if self.degrade is not None and not isinstance(self.degrade, ImageDegradePlan):
             raise TypeError("degrade must be an ImageDegradePlan or None")
+
+
+def _image_pixel_plan(plan: CleanPlan) -> ImagePixelPlan:
+    if plan.pixel is not None:
+        return plan.pixel
+    return ImagePixelPlan(
+        visible=plan.visible,
+        degrade=plan.degrade,
+        remove_synthid=plan.remove_synthid,
+        synthid_strength=plan.synthid_strength,
+        wmct_marker=plan.wmct_marker,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,6 +404,7 @@ class CleanResult:
 def _validate_operation(path: Path, dest: Path, plan: CleanPlan) -> None:
     if not isinstance(plan, CleanPlan):
         raise TypeError("plan must be a CleanPlan")
+    pixel = _image_pixel_plan(plan)
     if path.is_symlink() or not path.is_file():
         raise ValueError(f"not a regular file: {path}")
     if plan.in_place:
@@ -328,31 +414,31 @@ def _validate_operation(path: Path, dest: Path, plan: CleanPlan) -> None:
         if backup.exists() or backup.is_symlink():
             raise ValueError(f"backup already exists: {backup}")
         if (
-            plan.visible is not None
-            and plan.visible.mask_output is not None
-            and paths_alias(plan.visible.mask_output, path)
+            pixel.visible is not None
+            and pixel.visible.mask_output is not None
+            and paths_alias(pixel.visible.mask_output, path)
         ):
-            raise ValueError(f"mask output aliases input: {plan.visible.mask_output}")
+            raise ValueError(f"mask output aliases input: {pixel.visible.mask_output}")
         if (
-            plan.visible is not None
-            and plan.visible.mask_output is not None
-            and paths_alias(plan.visible.mask_output, backup)
+            pixel.visible is not None
+            and pixel.visible.mask_output is not None
+            and paths_alias(pixel.visible.mask_output, backup)
         ):
-            raise ValueError(f"mask output aliases backup: {plan.visible.mask_output}")
+            raise ValueError(f"mask output aliases backup: {pixel.visible.mask_output}")
     else:
         validate_output_path(path, dest)
         if (
-            plan.visible is not None
-            and plan.visible.mask_output is not None
-            and paths_alias(plan.visible.mask_output, path)
+            pixel.visible is not None
+            and pixel.visible.mask_output is not None
+            and paths_alias(pixel.visible.mask_output, path)
         ):
-            raise ValueError(f"mask output aliases input: {plan.visible.mask_output}")
+            raise ValueError(f"mask output aliases input: {pixel.visible.mask_output}")
         if (
-            plan.visible is not None
-            and plan.visible.mask_output is not None
-            and paths_alias(plan.visible.mask_output, dest)
+            pixel.visible is not None
+            and pixel.visible.mask_output is not None
+            and paths_alias(pixel.visible.mask_output, dest)
         ):
-            raise ValueError(f"mask output aliases image output: {plan.visible.mask_output}")
+            raise ValueError(f"mask output aliases image output: {pixel.visible.mask_output}")
 
 
 def _clean_text_asset(
@@ -421,10 +507,11 @@ def _clean_image_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
     from domain_types import QualityResult, map_quality_to_status
     from verification import verify_boundary_seam, verify_halo, verify_outside_mask
 
+    pixel = _image_pixel_plan(plan)
     soft = inspect_soft_binding(path) if plan.inspect_soft_binding else None
     visible_report = None
     verification_status = "VERIFIED"
-    final_mask_output = plan.visible.mask_output if plan.visible is not None else None
+    final_mask_output = pixel.visible.mask_output if pixel.visible is not None else None
 
     with tempfile.TemporaryDirectory(prefix="wm-image-") as temp_dir:
         staging = Path(temp_dir)
@@ -434,8 +521,8 @@ def _clean_image_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
         staged_mask = staging / "effective-mask.pgm"
         mask_details: dict[str, Any] = {}
 
-        if plan.visible is not None:
-            staged_visible_plan = replace(plan.visible, mask_output=staged_mask)
+        if pixel.visible is not None:
+            staged_visible_plan = replace(pixel.visible, mask_output=staged_mask)
             visible_report = remove_visible(
                 path,
                 staged_visible,
@@ -452,12 +539,12 @@ def _clean_image_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
             metadata_source,
             staged_metadata,
             strip_all_metadata=plan.strip_all_metadata,
-            remove_synthid=plan.remove_synthid,
-            synthid_strength=plan.synthid_strength,
-            wmct_marker=plan.wmct_marker,
+            remove_synthid=pixel.remove_synthid,
+            synthid_strength=pixel.synthid_strength,
+            wmct_marker=pixel.wmct_marker,
         )
 
-        if plan.degrade is not None:
+        if pixel.degrade is not None:
             cleaned_data = read_bytes_bounded(
                 staged_metadata,
                 limit=256 * 1024 * 1024,
@@ -468,7 +555,7 @@ def _clean_image_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
                     "degradation requires PNG output; JPEG/HEIF/AVIF inputs are not supported"
                 )
             raster = decode_png(bytes(cleaned_data))
-            degrade_result = _apply_image_degrade(raster, plan.degrade)
+            degrade_result = _apply_image_degrade(raster, pixel.degrade)
             out_raster = Raster(
                 degrade_result.width,
                 degrade_result.height,
@@ -479,7 +566,7 @@ def _clean_image_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
             atomic_write_bytes(staged_final, encode_png(out_raster))
             report["degrade"] = degrade_result.to_dict()
 
-        if plan.visible is not None:
+        if pixel.visible is not None:
             try:
                 source_data = read_bytes_bounded(
                     path,

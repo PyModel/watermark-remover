@@ -141,6 +141,26 @@ def test_dropping_is_a_note_not_a_failure(monkeypatch):
     assert plan.text.rewrite_plan is None
 
 
+def test_image_plan_composes_pixel_policy_fields() -> None:
+    request = CleanRequest(
+        visible_box=(1, 2, 3, 4),
+        visible_backend="simple",
+        degrade="jpeg",
+        remove_synthid=True,
+        synthid_strength=0.75,
+        wmct_marker=True,
+    )
+
+    plan = build_clean_plan(request, Path("output.png"), "image")
+
+    assert plan.pixel is not None
+    assert plan.pixel.visible is plan.visible
+    assert plan.pixel.degrade is plan.degrade
+    assert plan.pixel.remove_synthid is True
+    assert plan.pixel.synthid_strength == 0.75
+    assert plan.pixel.wmct_marker is True
+
+
 def test_markdown_run_reports_the_skipped_rewrite(tmp_path: Path):
     source = tmp_path / "draft.md"
     source.write_text(ZWSP, encoding="utf-8")
