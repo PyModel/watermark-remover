@@ -221,7 +221,7 @@ class ModelDialog implements DialogView {
       steps: onboarding ? [2, 3] : undefined,
       empty: "Scanning local servers…",
       footer:
-        "Only the LLM rewrite needs a model. The scan asks this machine's own servers for their model list. It never sends a document and never contacts another machine.",
+        "Only Deep clean (LLM rewrite) needs a model. Choose a model from your local server, or enter its URL and model ID. Settings are saved for your user. Discovery sends no document.",
       items: () => serverItems(ctl, onboarding),
       onSelect: (item) => this.select(item),
       onClose: () => this.close(),
@@ -316,7 +316,7 @@ function serverItems(ctl: AppController, onboarding: boolean): DialogItem[] {
       right: "This machine only",
       disabled: ctl.app.scanning,
     },
-    { id: "manual", title: "Enter a server", right: "Any URL" },
+    { id: "manual", title: "Enter a server", right: "Your local URL + model" },
     {
       id: "none",
       title: onboarding ? "Skip, clean hidden marks only" : "No model",
@@ -370,6 +370,12 @@ class ManualForm implements Component {
       return
     }
     if (this.field === 0) return
+    if (matchesKey(data, "ctrl+u")) {
+      if (this.field === 1) this.url = ""
+      else this.model = ""
+      this.error = null
+      return
+    }
     if (matchesKey(data, "backspace") || data === "\x7f" || data === "\x08") {
       if (this.field === 1) this.url = this.url.slice(0, -1)
       else this.model = this.model.slice(0, -1)
@@ -392,9 +398,9 @@ class ManualForm implements Component {
       label("Base URL", this.field === 1),
       this.url || "http://127.0.0.1:11434",
       label("Model", this.field === 2),
-      this.model || "e.g. qwen3:14b",
-      "A host other than this machine is saved as typed; each clean asks before any text leaves.",
-      "tab next   ← → backend   enter save   esc back",
+      this.model || "your local server's model ID",
+      "Use localhost, 127.0.0.1 or ::1. URL and model are saved for your user.",
+      "tab next   ← → backend   ctrl+u clear field   enter save   esc back",
     ]
     if (this.error) lines.push(this.error)
     return lines.flatMap((line) => wrap(line, width))
@@ -413,7 +419,24 @@ class ManualForm implements Component {
       this.error = "base URL needs http:// or https:// and a host"
       return
     }
-    this.ctl.setEndpoint({ backend: this.backend, base_url: url, model: this.model.trim() || null })
+    let parsed: URL
+    try {
+      parsed = new URL(url)
+    } catch {
+      this.error = "Enter a valid http:// or https:// local server URL"
+      return
+    }
+    if (!["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname) || parsed.username || parsed.password || parsed.search || parsed.hash) {
+      this.error = "Use a local server: localhost, 127.0.0.1 or ::1; no URL credentials/query/fragment"
+      return
+    }
+    if (!this.model.trim()) {
+      this.error = "Enter the model ID from your local server"
+      return
+    }
+    // Layer B appends its own /v1/... routes to base_url, so the saved value
+    // must be a bare origin; users commonly paste .../v1 from server docs.
+    this.ctl.setEndpoint({ backend: this.backend, base_url: parsed.origin, model: this.model.trim() })
     this.onDone()
   }
 }
@@ -458,8 +481,10 @@ class HelpDialog implements DialogView {
     const rows = COMMANDS.map((command) => `${command.key ?? `/${command.name}`}  ${command.title}`)
     return panel(width, "Help", undefined, [
       "enter  add the path, --flag or /command typed in the prompt",
-      "ctrl+k  ctrl+j  move through files",
-      "↑ ↓  prompt history and cursor",
+      "↑ ↓  move through files when the prompt is empty (ctrl+k / ctrl+j also work)",
+      "space  mark one file; marking another replaces it; ctrl+r cleans only the marked file",
+      "↑ ↓  cursor/completion while typing; alt+↑ / alt+↓  prompt history",
+      "/model  choose or edit your local server URL and model ID",
       "ctrl+p  search every command",
       ...rows,
       "Any flag `wm` accepts works in the prompt: `--nfkc`, `--glob *.md`, `-o out/`. A bare flag typed again turns it off. The command in the footer is the exact `wm` run, so a clean here can be repeated anywhere.",
