@@ -380,7 +380,13 @@ def test_wheel_install_exercises_every_entrypoint(capfd: pytest.CaptureFixture[s
         timeout=180,
     )
     assert staged.returncode == 0, staged.stderr
-    run_dir = Path(next(line.split("=", 1)[1] for line in staged.stdout.splitlines() if line.startswith("run_dir=")))
+    run_dir = Path(
+        next(
+            line.split("=", 1)[1]
+            for line in staged.stdout.splitlines()
+            if line.startswith("run_dir=")
+        )
+    )
     expected = cache / "watermark-remover" / "tui-0.6.0"
     assert run_dir.resolve() == expected.resolve()
     assert os.access(run_dir, os.W_OK)
