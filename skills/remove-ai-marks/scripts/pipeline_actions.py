@@ -70,6 +70,7 @@ class ActionCode(str, Enum):
     CLEAN_DATA_URI = "clean_data_uri"
     DROP_HTML_META = "drop_html_meta"
     DROP_JSON_LD = "drop_json_ld"
+    DROP_HTML_COMMENT = "drop_html_comment"
     DROP_DATA_AI_ATTRIBUTES = "drop_data_ai_attributes"
     DROP_SVG_METADATA = "drop_svg_metadata"
     DROP_SVG_XMP = "drop_svg_xmp"
@@ -382,6 +383,26 @@ def drop_json_ld() -> Action:
     return _act(ActionCode.DROP_JSON_LD, Effect.CHANGE, "drop json-ld provenance-like script")
 
 
+def scrub_json_ld_key(key: str) -> Action:
+    """Remove one provenance key from a kept JSON-LD block (surgical clean)."""
+    return _act(
+        ActionCode.SCRUB_FIELD,
+        Effect.CHANGE,
+        f"scrub json-ld provenance key: {key}",
+        part="json-ld",
+        field=key,
+    )
+
+
+def drop_html_comment(count: int) -> Action:
+    return _act(
+        ActionCode.DROP_HTML_COMMENT,
+        Effect.CHANGE,
+        f"drop {count} HTML comment(s) with AI markers",
+        count=count,
+    )
+
+
 def drop_data_ai_attributes(count: int) -> Action:
     return _act(
         ActionCode.DROP_DATA_AI_ATTRIBUTES,
@@ -401,8 +422,13 @@ def drop_svg_xmp(count: int) -> Action:
     return _act(ActionCode.DROP_SVG_XMP, Effect.CHANGE, f"drop xmpmeta x{count}", count=count)
 
 
-def drop_svg_comment() -> Action:
-    return _act(ActionCode.DROP_SVG_COMMENT, Effect.CHANGE, "drop SVG comment with AI markers")
+def drop_svg_comment(count: int) -> Action:
+    return _act(
+        ActionCode.DROP_SVG_COMMENT,
+        Effect.CHANGE,
+        f"drop {count} SVG comment(s) with AI markers",
+        count=count,
+    )
 
 
 def drop_svg_generator_attributes(count: int) -> Action:
