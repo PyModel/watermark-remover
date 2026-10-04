@@ -151,6 +151,88 @@ export class BridgeError extends Error {
   }
 }
 
+/**
+ * Bridge `reveal.marks` are Unicode code-point indexes into `text`.
+ * Python already applied the ellipsis shift (`…` is one code point), so this
+ * step must not add another +1. A non-BMP character is one code point and two
+ * JavaScript units; rendering slices with JavaScript indexes.
+ *
+ * BMP text takes the no-op path: the same string and the same marks array.
+ * `parseFinding` is the only conversion. Calling it again on the object it
+ * returned does not shift marks. Calling it again on the original wire object
+ * reconverts from those code-point indexes, so a render may read the wire
+ * value every frame. Do not copy a converted excerpt and convert the copy.
+ */
+const convertedReveals = new WeakSet<Reveal>()
+const convertedFindings = new WeakSet<Finding>()
+
+function hasNonBmp(text: string): boolean {
+  for (let i = 0; i < text.length; i++) {
+    const unit = text.charCodeAt(i)
+    if (unit >= 0xd800 && unit <= 0xdbff) return true
+  }
+  return false
+}
+
+function codePointToUnit(text: string, codePointIndex: number): number {
+  if (codePointIndex <= 0) return 0
+  let units = 0
+  let points = 0
+  while (points < codePointIndex && units < text.length) {
+    const unit = text.charCodeAt(units)
+    const step = unit >= 0xd800 && unit <= 0xdbff ? 2 : 1
+    if (units + step > text.length) return text.length
+    units += step
+    points += 1
+  }
+  return units
+}
+
+/** Code-point mark indexes → JavaScript string indexes. BMP returns the same object. */
+export function convertReveal(reveal: Reveal): Reveal {
+  if (convertedReveals.has(reveal) || !hasNonBmp(reveal.text)) {
+    convertedReveals.add(reveal)
+    return reveal
+  }
+  const marks = reveal.marks.map(([start, end, name]) => {
+    const jsStart = codePointToUnit(reveal.text, start)
+    const jsEnd = codePointToUnit(reveal.text, end)
+    return [jsStart, jsEnd < jsStart ? jsStart : jsEnd, name] as [number, number, string]
+  })
+  const next: Reveal = { ...reveal, marks }
+  convertedReveals.add(next)
+  return next
+}
+
+/**
+ * The one Findings parse step. Wire excerpts are converted here, nowhere else.
+ * A BMP finding is returned unchanged.
+ */
+export function parseFinding(finding: Finding): Finding {
+  if (!finding.reveal) {
+    const next: Finding = { ...finding, reveal: [] }
+    convertedFindings.add(next)
+    return next
+  }
+  if (convertedFindings.has(finding) || finding.reveal.length === 0) {
+    convertedFindings.add(finding)
+    return finding
+  }
+  let changed = false
+  const reveal = finding.reveal.map((excerpt) => {
+    const next = convertReveal(excerpt)
+    if (next !== excerpt) changed = true
+    return next
+  })
+  if (!changed) {
+    convertedFindings.add(finding)
+    return finding
+  }
+  const next: Finding = { ...finding, reveal }
+  convertedFindings.add(next)
+  return next
+}
+
 /** What the UI needs from a bridge; tests supply a fake. */
 export interface BridgeLike {
   request<T>(method: string, params?: object, onEvent?: (event: BridgeEvent) => void): Promise<T>
