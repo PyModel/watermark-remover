@@ -23,9 +23,9 @@ export interface MountOptions {
 /**
  * Key routing sits on addInputListener, which runs before the focused editor.
  * ctrl+j is also the editor's newline default, so selection must consume it.
- * up/down are not consumed: the editor recalls history only on the first visual
- * line (or when already browsing). Selection is ctrl+k / ctrl+j. pageup/pagedown
- * belong to the alt-screen viewport and are not selection keys.
+ * Empty prompt: up/down navigate files and Space marks one clean target.
+ * Editing/completion and overlays keep their arrows. Alt+up/down recalls prompt
+ * history explicitly. pageup/pagedown scroll the viewport, not selection.
  * ctrl+o copies the selected file's output path; f2 copies its diff. Neither is an
  * editor or viewport binding, so both are consumed here.
  */
@@ -115,11 +115,20 @@ function routeKeys(data: string, ctl: AppController, editor: Editor, tui: TUI, c
   // Overlay handleInput runs after this listener. Do not consume: arrows,
   // enter, escape, and type-to-filter belong to the focused dialog.
   if (ctl.app.dialogs.length > 0 || tui.hasOverlay()) return
-  if (matchesKey(data, "ctrl+j")) {
+  if (matchesKey(data, "alt+up") || matchesKey(data, "alt+down")) {
+    editor.handleInput(matchesKey(data, "alt+up") ? "\x1b[A" : "\x1b[B")
+    return { consume: true }
+  }
+  const browsing = !editor.getText() && !editor.isShowingAutocomplete()
+  if (browsing && matchesKey(data, "space")) {
+    ctl.markFile()
+    return { consume: true }
+  }
+  if (matchesKey(data, "ctrl+j") || (browsing && matchesKey(data, "down"))) {
     ctl.select(ctl.app.selected + 1)
     return { consume: true }
   }
-  if (matchesKey(data, "ctrl+k")) {
+  if (matchesKey(data, "ctrl+k") || (browsing && matchesKey(data, "up"))) {
     ctl.select(ctl.app.selected - 1)
     return { consume: true }
   }
@@ -148,6 +157,9 @@ function routeKeys(data: string, ctl: AppController, editor: Editor, tui: TUI, c
     ctl.openDialog({ type: "help" })
     return { consume: true }
   }
+  // Completion owns Tab while its menu is visible; never change cleaning
+  // policy as a side effect of accepting a suggestion.
+  if (matchesKey(data, "tab") && editor.isShowingAutocomplete()) return
   if (matchesKey(data, "shift+tab")) {
     ctl.cyclePreset(-1)
     return { consume: true }

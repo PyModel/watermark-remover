@@ -33,6 +33,7 @@ import threading
 import time
 import traceback
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -248,6 +249,33 @@ def _select(request: CleanRequest) -> InputSelection:
         return select_request_inputs(request)
     except ValueError as error:
         raise InvalidOptions(str(error)) from error
+
+
+def _marked_composition(
+    state: Mapping[str, Any], *, allow_remote: bool = False, required: bool = False
+):
+    """Bind a TUI mark to its discovered file set before composing a single-file run."""
+    composition = compose_request(state, allow_remote=allow_remote)
+    if "clean_path" not in state:
+        return composition  # Bridge batch clients do not use the TUI mark field.
+    target = state["clean_path"]
+    if target is None:
+        if required:
+            raise InvalidOptions("Mark one file with Space before cleaning.")
+        return composition
+    if not isinstance(target, str) or not target:
+        raise BadRequest("state.clean_path must be a nonempty string or null")
+    try:
+        path = Path(target).resolve()
+    except (OSError, RuntimeError, ValueError) as error:
+        raise BadRequest("state.clean_path must be a valid filesystem path") from error
+    # Single-file masks/boxes must not prevent browsing the containing folder.
+    browse = replace(composition.request, visible_mask=None, visible_box=None)
+    if path not in {item.path.resolve() for item in _select(browse).items}:
+        raise InvalidOptions(
+            "The marked file is no longer in the discovered file list. Mark it again."
+        )
+    return compose_request({**state, "paths": [str(path)]}, allow_remote=allow_remote)
 
 
 def _file_done(
@@ -511,7 +539,7 @@ class Bridge:
         """The cheap preview. Reads, never writes."""
         state = _state(params)
         try:
-            composition = compose_request(state)
+            discovery = compose_request(state)
         except InvalidOptions as error:
             return {
                 "ok": False,
@@ -528,9 +556,20 @@ class Bridge:
                 "warnings": [],
                 "preflight_error": None,
             }
+        target_error = None
+        try:
+            composition = _marked_composition(state)
+        except InvalidOptions as error:
+            composition = discovery
+            target_error = str(error)
         request = composition.request
-        preview, kinds = self._preview_selection(request)
-        total = preview["files_total"]
+        browse = discovery.request
+        if "clean_path" in state:
+            browse = replace(browse, visible_mask=None, visible_box=None)
+        preview, kinds = self._preview_selection(browse, request)
+        if target_error:
+            preview["preflight_error"] = target_error
+        total = 1 if state.get("clean_path") and not target_error else preview["files_total"]
         # Unknown kinds (nothing selected, or preflight refused) count every
         # step the options ask for, and every file as rewritten.
         layer = plan_layer(request, kinds or ())
@@ -548,7 +587,9 @@ class Bridge:
             "warnings": plan_warnings(request, kinds),
         }
 
-    def _preview_selection(self, request: CleanRequest) -> tuple[dict[str, Any], list[str] | None]:
+    def _preview_selection(
+        self, request: CleanRequest, run_request: CleanRequest | None = None
+    ) -> tuple[dict[str, Any], list[str] | None]:
         """``plan``'s file fields, plus each file's resolved kind when preflight passes."""
         try:
             selection = select_request_inputs(request)
@@ -568,7 +609,9 @@ class Bridge:
             "preflight_error": None,
         }
         try:
-            return preview, _kinds(preflight_work(request, selection))
+            if run_request is not None and run_request != request:
+                selection = select_request_inputs(run_request)
+            return preview, _kinds(preflight_work(run_request or request, selection))
         except ValueError as error:
             preview["preflight_error"] = str(error)
             return preview, None
@@ -620,7 +663,7 @@ class Bridge:
             raise BadRequest("params.confirmed must be a list of strings")
         # A confirmed "remote" is this run's egress permission and nothing
         # more: it is composed in here and never saved anywhere.
-        composition = compose_request(state, allow_remote="remote" in confirmed)
+        composition = _marked_composition(state, allow_remote="remote" in confirmed, required=True)
         request = composition.request
         selection = _select(request)
         try:

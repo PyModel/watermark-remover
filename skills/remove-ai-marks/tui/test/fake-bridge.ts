@@ -19,6 +19,7 @@ export const FILES = [
 export class FakeBridge implements BridgeLike {
   calls: { method: string; params: any }[] = []
   onboard = false
+  removedFiles = new Set<string>()
   confirm: { kind: string; message: string }[] = []
   /** When set, a confirmed clean waits on it, so a test can look mid-run. */
   cleanGate: Promise<void> | null = null
@@ -27,8 +28,10 @@ export class FakeBridge implements BridgeLike {
   async request<T>(method: string, params: any = {}, onEvent?: (e: BridgeEvent) => void): Promise<T> {
     this.calls.push({ method, params })
     const state: State | undefined = params.state
-    const files = () =>
-      (state?.paths.length ? FILES : []).map((display) => ({ path: `/abs/${display}`, display, kind: display.endsWith(".png") ? "image" : "text", size: 100 }))
+    const files = () => {
+      const discovered = (state?.paths.length ? FILES : []).map((display) => ({ path: `/abs/${display}`, display, kind: display.endsWith(".png") ? "image" : "text", size: 100 })).filter((file) => !this.removedFiles.has(file.path))
+      return method === "clean" && state?.clean_path ? discovered.filter((file) => file.path === state.clean_path) : discovered
+    }
     switch (method) {
       case "hello":
         return {
@@ -46,7 +49,7 @@ export class FakeBridge implements BridgeLike {
         return {
           ok: !bad,
           error: bad ? "unrecognized arguments: --bogus" : null,
-          command: ["wm", ...state!.paths, ...preset.flags, ...state!.flags].join(" "),
+          command: ["wm", ...(state!.clean_path ? [state!.clean_path] : state!.paths), ...preset.flags, ...state!.flags].join(" "),
           files: bad ? [] : files(),
           files_total: bad ? 0 : files().length,
           discover_error: null,
@@ -95,21 +98,23 @@ export class FakeBridge implements BridgeLike {
               output: f.path.replace(/(\.\w+)$/, ".cleaned$1"),
               layer: "A",
               result_class: "Verifiable",
-              exit_code: 0,
+              exit_code: f.display === "assets/cover.png" ? 1 : 0,
               before: { hidden: 3 },
               after: { hidden: 0 },
               lines: ["Removed 3 hidden characters.", "Dropped frontmatter key generator."],
               diff: "--- a\n+++ b\n@@ -1 +1 @@\n-Hello<U+200B> world\n+Hello world",
-              error: index === 3 ? "refusing to treat assets/cover.png as text: binary content" : null,
+              error: f.display === "assets/cover.png" ? "refusing to treat assets/cover.png as text: binary content" : null,
             },
           })
         })
+        const errors = list.filter((file) => file.display === "assets/cover.png").length
+        const command = ["wm", ...(state?.clean_path ? [state.clean_path] : state?.paths ?? [])].join(" ")
         return {
           total: list.length,
-          errors: 1,
+          errors,
           cancelled: false,
-          command: "wm drafts",
-          history: { time: "14:02:11", command: "wm drafts", summary: "5 files, 1 error. Verifiable." },
+          command,
+          history: { time: "14:02:11", command, summary: `${list.length} files, ${errors} errors. Verifiable.` },
         } as T
       }
       case "detect_endpoints":

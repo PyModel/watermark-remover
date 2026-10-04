@@ -274,6 +274,7 @@ test("the running app labels a finished file by result class, highlights a conve
   const stored = mounted.ctl.app.findings["/abs/drafts/intro.md"]!.reveal[0]!
   expect(stored.text.slice(stored.marks[0]![0], stored.marks[0]![1])).toBe("\u25C6")
 
+  await press(" ")
   await press("\x12")
   const frame = screen()
   const intro = frame.split("\n").find((line) => line.includes("\u2192") && line.includes("drafts/intro.md"))
@@ -281,7 +282,8 @@ test("the running app labels a finished file by result class, highlights a conve
   expect(intro).toContain("Verifiable")
   expect(intro).not.toMatch(/\bcleaned\b/)
   expect(intro).not.toMatch(/\berror\b/)
-  expect(cover).toContain("Verifiable")
+  expect(cover).not.toContain("Verifiable")
+  expect(Object.keys(mounted.ctl.app.results)).toEqual(["/abs/drafts/intro.md"])
   expect(cover).not.toMatch(/\berror\b/)
   expect(frame).toContain("3 marks removed")
   expect(frame.split("\n").some((line) => line.trim() === "cleaned" || line.trim() === "error")).toBe(false)

@@ -1874,6 +1874,7 @@ def test_a_missing_frontend_is_a_clear_error(monkeypatch, capsys, tmp_path):
 def _fake_frontend(root: Path) -> Path:
     (root / "src").mkdir(parents=True)
     (root / "package.json").write_text("{}", encoding="utf-8")
+    (root / "bun.lock").write_text("fixture lock", encoding="utf-8")
     (root / "src" / "index.ts").write_text("", encoding="utf-8")
     return root
 

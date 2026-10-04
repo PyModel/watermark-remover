@@ -77,6 +77,7 @@ test("a missing clipboard helper degrades to a toast", async () => {
 test("file paths in the running app are OSC 8 sequences written to the terminal", async () => {
   const { term, type, press } = await bootCopy(null)
   await type("drafts")
+  await press(" ")
   await press("\x12")
   const written = term.writes.join("")
   const source = pathToFileURL("/abs/drafts/intro.md").href
@@ -171,6 +172,7 @@ test("copy keys on the running app copy the output path and the diff without tou
   const clip = memoryClipboard()
   const { term, mounted, screen, type, press } = await bootCopy(clip)
   await type("drafts")
+  await press(" ")
   await press("\x12")
   term.input("z")
   await press("\x0f")
@@ -191,10 +193,11 @@ test("the running app writes title and progress sequences, and a dying bridge cl
   })
   const { term, tui, screen, type } = await bootCopy(null, 120, 30, bridge)
   await type("drafts")
+  term.input(" ")
   term.input("\x12")
   tui.renderNow()
   const running = term.writes.join("")
-  expect(occurrences(running, "\x1b]0;Cleaning 1 of 5: drafts/intro.md\x07")).toBe(1)
+  expect(occurrences(running, "\x1b]0;Cleaning 1 of 1: drafts/intro.md\x07")).toBe(1)
   expect(occurrences(running, "\x1b]9;4;3\x07")).toBe(1)
   bridge.die("bridge exited with code 1")
   tui.renderNow()
@@ -208,6 +211,7 @@ test("the running app writes title and progress sequences, and a dying bridge cl
 test("an unavailable clipboard helper on the running app toasts and writes no OSC 52", async () => {
   const { term, screen, type, press } = await bootCopy(null)
   await type("drafts")
+  await press(" ")
   await press("\x12")
   const before = term.writes.length
   await press("\x0f")

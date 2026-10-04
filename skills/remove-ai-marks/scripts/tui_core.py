@@ -232,7 +232,7 @@ PRESETS: tuple[Preset, ...] = (
         label="Deep clean (LLM rewrite)",
         description=(
             "Hidden marks, then a local model rephrases the text to break "
-            "token-level watermarks. No detector guarantee. Needs an endpoint."
+            "token-level watermarks. No detector guarantee. Pick a model first."
         ),
         layer="B",
         flags=("--rewrite", "paraphrase"),
@@ -640,6 +640,7 @@ HIT_NOUNS: dict[str, str] = {
     "confusable": "confusable character",
     "strip": "invisible character",
     "other_cf": "format character",
+    "braille_blank": "braille blank carrier",
 }
 
 
@@ -1056,6 +1057,9 @@ _ACTION_PHRASES: dict[str, Callable[[Mapping[str, Any]], Sequence[str]]] = {
     ActionCode.CLEAN_DATA_URI: lambda p: (f"cleaned an embedded {p['mime']} image{_nested(p)}",),
     ActionCode.DROP_HTML_META: lambda p: (f"dropped meta tag {p['tag']}",),
     ActionCode.DROP_JSON_LD: lambda p: ("dropped a JSON-LD provenance script",),
+    ActionCode.DROP_HTML_COMMENT: lambda p: (
+        f"dropped {_count(p['count'], 'HTML comment')} with AI markers",
+    ),
     ActionCode.DROP_DATA_AI_ATTRIBUTES: lambda p: (
         f"dropped {_count(p['count'], 'data-ai attribute')}",
     ),
@@ -1063,7 +1067,9 @@ _ACTION_PHRASES: dict[str, Callable[[Mapping[str, Any]], Sequence[str]]] = {
         f"dropped {_count(p['count'], 'SVG metadata block')}",
     ),
     ActionCode.DROP_SVG_XMP: lambda p: (f"dropped {_count(p['count'], 'XMP packet')}",),
-    ActionCode.DROP_SVG_COMMENT: lambda p: ("dropped an SVG comment with AI markers",),
+    ActionCode.DROP_SVG_COMMENT: lambda p: (
+        f"dropped {_count(p['count'], 'SVG comment')} with AI markers",
+    ),
     ActionCode.DROP_SVG_GENERATOR_ATTRIBUTES: lambda p: (
         f"dropped {_count(p['count'], 'generator attribute')}",
     ),

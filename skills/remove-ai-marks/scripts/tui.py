@@ -22,6 +22,7 @@ the bridge pays for the pipeline import once it is actually needed.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -187,17 +188,29 @@ def prepare_frontend(source: Path, bun: str) -> tuple[Path | None, int]:
         )
         return None, 1
     run_dir = source
-    if not (source / "node_modules").is_dir():
+    try:
         if not os.access(source, os.W_OK):
-            try:
-                run_dir = _stage_frontend(source)
-            except OSError as error:
-                print(f"wm-tui: cannot stage the frontend into the cache: {error}", file=sys.stderr)
-                return None, 1
-        if not (run_dir / "node_modules").is_dir():
+            run_dir = _stage_frontend(source)
+        package = (run_dir / "package.json").read_bytes()
+        lock = (run_dir / "bun.lock").read_bytes()
+        fingerprint = hashlib.sha256(package + b"\x00" + lock).hexdigest()
+        modules = run_dir / "node_modules"
+        stamp = modules / ".wm-install-state"
+        dependencies = json.loads(package).get("dependencies", {})
+        installed = (
+            stamp.is_file()
+            and stamp.read_text(encoding="utf-8") == fingerprint
+            and all((modules / name / "package.json").is_file() for name in dependencies)
+        )
+        if not installed:
             code = _install(run_dir, bun)
             if code != 0:
                 return None, 1
+            modules.mkdir(exist_ok=True)
+            stamp.write_text(fingerprint, encoding="utf-8")
+    except (OSError, ValueError) as error:
+        print(f"wm-tui: cannot prepare the frontend: {error}", file=sys.stderr)
+        return None, 1
     return run_dir, 0
 
 

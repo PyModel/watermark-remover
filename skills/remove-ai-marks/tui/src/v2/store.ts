@@ -33,6 +33,7 @@ export interface Run {
   index: number
   total: number
   display: string
+  path?: string
 }
 
 export interface Toast {
@@ -74,7 +75,7 @@ export function createApp(bridge: BridgeLike, onQuit: () => void, notify: () => 
   const app: AppState = {
     hello: null,
     fatal: null,
-    state: { paths: [], preset: "hidden", flags: [], endpoint: { ...NO_ENDPOINT } },
+    state: { paths: [], preset: "hidden", flags: [], endpoint: { ...NO_ENDPOINT }, clean_path: null },
     plan: null,
     findings: {},
     results: {},
@@ -124,6 +125,10 @@ export function createApp(bridge: BridgeLike, onQuit: () => void, notify: () => 
       // typo in a flag shows the error without emptying the view.
       const shown = !plan.ok && app.plan ? { ...plan, files: app.plan.files, files_total: app.plan.files_total } : plan
       app.plan = shown
+      if (app.state.clean_path && !shown.files.some((file) => file.path === app.state.clean_path)) {
+        app.state.clean_path = null
+        toast("The marked file left the list. Mark another with Space.")
+      }
       if (app.selected >= shown.files.length) app.selected = Math.max(0, shown.files.length - 1)
       touch()
     } catch (error) {
@@ -132,6 +137,7 @@ export function createApp(bridge: BridgeLike, onQuit: () => void, notify: () => 
   }
 
   function schedulePlan() {
+    ++planSeq
     clearTimeout(planTimer)
     planTimer = later(60, () => void refreshPlan())
   }
@@ -147,6 +153,7 @@ export function createApp(bridge: BridgeLike, onQuit: () => void, notify: () => 
         preset,
         flags: hello.initial.flags,
         endpoint: { ...settings.endpoint },
+        clean_path: null,
       }
       if (hello.onboard) app.dialogs = [{ type: "welcome" }]
       touch()
@@ -173,6 +180,7 @@ export function createApp(bridge: BridgeLike, onQuit: () => void, notify: () => 
 
   function clearPaths() {
     app.state.paths = []
+    app.state.clean_path = null
     app.findings = {}
     app.results = {}
     app.streams = {}
@@ -237,6 +245,15 @@ export function createApp(bridge: BridgeLike, onQuit: () => void, notify: () => 
     touch()
   }
 
+  function markFile() {
+    if (app.run || app.dialogs.some((dialog) => dialog.type === "confirm")) return
+    const file = app.plan?.files[app.selected]
+    if (!file) return
+    app.state.clean_path = app.state.clean_path === file.path ? null : file.path
+    touch()
+    schedulePlan()
+  }
+
   const openDialog = (dialog: Dialog) => {
     app.dialogs = [...app.dialogs.filter((d) => d.type !== dialog.type), dialog]
     touch()
@@ -274,17 +291,19 @@ export function createApp(bridge: BridgeLike, onQuit: () => void, notify: () => 
     }
   }
 
-  async function clean(confirmed: string[] = []) {
+  async function clean(confirmed: string[] = [], state = snapshot()) {
     if (app.run) return toast("Already running. Esc stops after the current file.")
     const plan = app.plan
     if (!plan?.files.length) return toast("Add a file or folder first.")
     if (!plan.ok) return toast(plan.error ?? "the options are not valid", "error")
-    const files = plan.files
-    app.run = { kind: "clean", index: 0, total: files.length, display: files[0]!.display }
+    const target = plan.files.find((file) => file.path === state.clean_path)
+    if (!target) return toast("Mark one file with Space before cleaning.")
+    const files = [target]
+    app.run = { kind: "clean", index: 0, total: 1, display: target.display, path: target.path }
     app.streams = {}
     touch()
     try {
-      const result = await bridge.request<CleanResult>("clean", { state: snapshot(), confirmed }, (message) => {
+      const result = await bridge.request<CleanResult>("clean", { state, confirmed }, (message) => {
         if (message.event === "inspected") return
         const path = files[message.data.index]?.path
         if (!path) return
@@ -307,7 +326,7 @@ export function createApp(bridge: BridgeLike, onQuit: () => void, notify: () => 
         app.run = null
         touch()
         const items = error.confirm
-        if (await confirm(items)) return await clean(items.map((item) => item.kind))
+        if (await confirm(items)) return await clean(items.map((item) => item.kind), state)
         return toast("Nothing was written.")
       }
       fail(error)
@@ -392,6 +411,7 @@ export function createApp(bridge: BridgeLike, onQuit: () => void, notify: () => 
     cyclePreset,
     setEndpoint,
     select,
+    markFile,
     openDialog,
     closeDialog,
     inspect,

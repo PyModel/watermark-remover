@@ -11,6 +11,8 @@ export interface State {
   preset: string
   flags: string[]
   endpoint: Endpoint
+  /** TUI clean target; null means no marked file. Batch bridge callers may omit it. */
+  clean_path?: string | null
 }
 
 export interface Preset {

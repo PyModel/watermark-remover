@@ -98,7 +98,7 @@ test("a path refreshes the plan and lists files", async () => {
   const frame = screen()
   expect(frame).toContain("5 files")
   expect(frame).toContain("intro.md")
-  expect(frame).toContain("$ wm drafts")
+  expect(frame).toContain("Space marks one")
 })
 
 test("a flag typed in the prompt is added, and typed again is removed", async () => {
@@ -131,6 +131,7 @@ test("/tmp is a path, /clear clears, /preset routes, /quit quits", async () => {
   expect(screen()).toContain("Needs a model")
   expect(screen()).toContain("Best-effort")
   await type("drafts")
+  mounted.ctl.markFile()
   await type("/clean")
   expect(bridge.calls.some((call) => call.method === "clean")).toBe(true)
   await type("/quit")
@@ -151,6 +152,41 @@ test("ctrl+j selects the next file and does not insert a newline", async () => {
   expect(mounted.ctl.app.selected).toBe(0)
 })
 
+test("tab accepts visible autocomplete without changing the preset", async () => {
+  const { term, tui, mounted } = await boot(80, 24)
+  for (const ch of "/cle") term.input(ch)
+  await new Promise((resolve) => setTimeout(resolve, 200))
+  tui.renderNow()
+  expect(mounted.editor.isShowingAutocomplete()).toBe(true)
+  const preset = mounted.ctl.app.state.preset
+  term.input("\t")
+  expect(mounted.editor.getText()).toBe("/clean ")
+  expect(mounted.ctl.app.state.preset).toBe(preset)
+})
+
+test("selection scrolls into view without overriding manual viewport scrolling", async () => {
+  const { term, tui, mounted, screen } = await boot(60, 12)
+  const plan = mounted.ctl.app.plan!
+  mounted.ctl.app.plan = {
+    ...plan,
+    files: Array.from({ length: 40 }, (_, index) => ({
+      path: `/file-${index}`, display: `FILE_${index}`, kind: "text", size: 100,
+    })),
+    files_total: 40,
+  }
+  tui.renderNow()
+  for (let i = 0; i < 30; i++) term.input("\n")
+  tui.renderNow()
+  expect(screen()).toContain("→ [ ] · FILE_30")
+  term.input("\x1b[5~")
+  tui.renderNow()
+  expect(mounted.ctl.app.selected).toBe(30)
+  expect(screen()).not.toContain("→ [ ] · FILE_30")
+  term.input("\x0b")
+  tui.renderNow()
+  expect(screen()).toContain("→ [ ] · FILE_29")
+})
+
 test("pageup scrolls the viewport and does not change selection", async () => {
   const { term, tui, type, mounted } = await boot(80, 24)
   await type("drafts")
@@ -167,6 +203,7 @@ test("run stays cancellable and shows a spinner until the clean finishes", async
   })
   const { term, tui, screen, type, mounted } = await boot(80, 24, bridge)
   await type("drafts")
+  term.input(" ")
   term.input("\x12")
   tui.renderNow()
   expect(mounted.ctl.app.run).not.toBeNull()
@@ -192,13 +229,87 @@ test("the bridge dying shows an error screen instead of hanging", async () => {
   expect(frame).toContain("exited with code 1")
 })
 
-test("each successful submit is recalled by up-arrow on an empty prompt", async () => {
+test("each successful submit is recalled by alt+up on an empty prompt", async () => {
   const { term, type, mounted } = await boot(80, 24)
   await type("drafts")
   await type("notes.txt")
   expect(mounted.editor.getText()).toBe("")
-  term.input("\x1b[A")
+  term.input("\x1b[1;3A")
   expect(mounted.editor.getText()).toBe("notes.txt")
-  term.input("\x1b[A")
+  term.input("\x1b[1;3A")
   expect(mounted.editor.getText()).toBe("drafts")
+})
+
+test("arrows navigate and Space marks exactly one file, without submitting or cleaning", async () => {
+  const { term, tui, type, mounted, bridge, screen } = await boot(100, 30)
+  await type("drafts")
+  const files = mounted.ctl.app.plan!.files
+  term.input("\x1b[B")
+  expect(mounted.ctl.app.selected).toBe(1)
+  expect(mounted.editor.getText()).toBe("")
+  term.input(" ")
+  expect(mounted.ctl.app.state.clean_path).toBe(files[1]!.path)
+  term.input("\x1b[B")
+  expect(mounted.ctl.app.state.clean_path).toBe(files[1]!.path)
+  term.input(" ")
+  expect(mounted.ctl.app.state.clean_path).toBe(files[2]!.path)
+  tui.renderNow()
+  expect(screen().split("[x]")).toHaveLength(2)
+  term.input("\r")
+  expect(bridge.calls.some((call) => call.method === "clean")).toBe(false)
+  term.input(" ")
+  expect(mounted.ctl.app.state.clean_path).toBeNull()
+  term.input("\x1b[A")
+  expect(mounted.ctl.app.selected).toBe(1)
+})
+
+test("clean refuses without a mark, then sends only the marked target even after navigation", async () => {
+  const { term, type, mounted, bridge } = await boot(100, 30)
+  await type("drafts")
+  await mounted.ctl.clean()
+  expect(bridge.calls.filter((call) => call.method === "clean")).toHaveLength(0)
+  term.input("\x1b[B")
+  term.input(" ")
+  const target = mounted.ctl.app.state.clean_path
+  term.input("\x1b[B")
+  await mounted.ctl.clean()
+  expect(bridge.calls.find((call) => call.method === "clean")!.params.state.clean_path).toBe(target)
+  expect(Object.keys(mounted.ctl.app.results)).toEqual([target!])
+})
+
+test("prompt editing/completion owns arrows and spaces while typing", async () => {
+  const { term, type, mounted, tui } = await boot(100, 30)
+  await type("drafts")
+  mounted.editor.setText("first\nsecond")
+  term.input("\x1b[A")
+  expect(mounted.ctl.app.selected).toBe(0)
+  term.input(" ")
+  expect(mounted.editor.getText()).toContain(" ")
+  expect(mounted.ctl.app.state.clean_path).toBeNull()
+  mounted.editor.setText("")
+  for (const ch of "/cle") term.input(ch)
+  await new Promise((resolve) => setTimeout(resolve, 200))
+  tui.renderNow()
+  expect(mounted.editor.isShowingAutocomplete()).toBe(true)
+  term.input("\x1b[B")
+  expect(mounted.ctl.app.selected).toBe(0)
+})
+
+test("refresh clears a disappeared mark and clearing paths never retains a clean target", async () => {
+  const { term, type, mounted, bridge } = await boot(100, 30)
+  await type("drafts")
+  term.input(" ")
+  const target = mounted.ctl.app.state.clean_path!
+  bridge.removedFiles.add(target)
+  mounted.ctl.addPaths(["another-folder"])
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  expect(mounted.ctl.app.state.clean_path).toBeNull()
+  expect(mounted.ctl.app.plan!.files.some((file) => file.path === target)).toBe(false)
+  term.input(" ")
+  expect(mounted.ctl.app.state.clean_path).not.toBeNull()
+  mounted.ctl.clearPaths()
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  expect(mounted.ctl.app.state.clean_path).toBeNull()
+  await mounted.ctl.clean()
+  expect(bridge.calls.some((call) => call.method === "clean")).toBe(false)
 })

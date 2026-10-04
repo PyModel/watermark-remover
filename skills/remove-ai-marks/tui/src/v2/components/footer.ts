@@ -37,10 +37,10 @@ export class Footer implements Component {
       left = app.plan.warnings[0]!
       color = theme.warning
     } else if (app.plan?.files.length) {
-      left = `$ ${app.plan.command}`
+      left = app.state.clean_path ? `$ ${app.plan.command}` : "Space: mark one file to clean"
       color = theme.faint
     }
-    const hints = width >= 100 ? "ctrl+r clean   ctrl+e inspect   tab preset   ctrl+p commands" : "ctrl+r clean   ctrl+p commands"
+    const hints = width >= 100 ? "↑↓ files   space mark   ctrl+r clean   ctrl+e inspect   /model" : "↑↓ files   space mark   ctrl+r clean"
     const room = Math.max(0, width - visibleWidth(hints) - 2)
     return [truncateToWidth(paint(truncateToWidth(left, room, ""), color) + "  " + paint(hints, theme.muted), Math.max(1, width), "")]
   }

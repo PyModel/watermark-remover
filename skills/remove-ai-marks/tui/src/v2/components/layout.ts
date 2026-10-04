@@ -3,6 +3,7 @@ import { clearTerminalChrome } from "../ops"
 import type { FileEntry } from "../protocol"
 import { type AppController, endpointLabel } from "../store"
 import { paint, theme } from "../theme"
+import { renderWordmark } from "./brand"
 import { DetailView } from "./detail"
 import { Footer } from "./footer"
 import { PromptStatus } from "./prompt"
@@ -17,7 +18,8 @@ export function renderEmpty(width: number): string[] {
     "Type a file or folder below and press enter.",
     "",
     "ctrl+e    See what is hidden, without writing",
-    "ctrl+r    Clean, leaving the originals untouched",
+    "↑ ↓       Move through files; Space marks one",
+    "ctrl+r    Clean the marked file; originals stay untouched",
     "tab       Choose what to remove",
     "ctrl+p    Every command",
   ]
@@ -37,8 +39,7 @@ function status(ctl: AppController, file: FileEntry, frame: number): { glyph: st
   const app = ctl.app
   const done = app.results[file.path]
   const run = app.run
-  const index = app.plan?.files.findIndex((f) => f.path === file.path) ?? -1
-  if (run && run.kind === "clean" && index === run.index && !done) {
+  if (run && run.kind === "clean" && run.path === file.path) {
     return { glyph: SPINNER[frame] ?? SPINNER[0]!, text: "cleaning" }
   }
   if (done) return { glyph: done.error ? "✗" : "✓", text: done.result_class }
@@ -62,11 +63,15 @@ class Header implements Component {
   invalidate(): void {}
   render(width: number): string[] {
     if (this.ctl.app.fatal) clearTerminalChrome(this.terminal, this.chrome)
-    const left = paint("wm", theme.primary, true) + paint("  watermark remover", theme.muted)
+    const banner = renderWordmark(width, this.terminal.rows)
+    const left = paint("wm", theme.primary, true) + paint("  WATERMARK REMOVER", theme.text)
     const endpoint = endpointLabel(this.ctl.app.state.endpoint)
-    const right = endpoint ? paint("● ", theme.primary) + paint(endpoint, theme.muted) : paint("No model", theme.faint)
+    const model = endpoint ? paint("● ", theme.primary) + paint(endpoint, theme.muted) : paint("No model", theme.faint)
+    const available = Math.max(0, width - visibleWidth(left) - 2)
+    const right = available > 0 ? truncateToWidth(model, available, "…") : ""
     const gap = Math.max(1, width - visibleWidth(left) - visibleWidth(right))
-    return [fit(left + " ".repeat(gap) + right, width)]
+    const status = fit(left + " ".repeat(gap) + right, width)
+    return banner.length ? [...banner, "", status, ""] : [status]
   }
 }
 
@@ -100,16 +105,43 @@ class FileListView implements Component {
   render(width: number): string[] {
     const app = this.ctl.app
     const files = app.plan?.files ?? []
-    const lines = [paint(fileCount(app.plan?.files_total ?? 0, files.length), theme.muted)]
+    const count = fileCount(app.plan?.files_total ?? 0, files.length)
+    const lines = [paint(`${count} · ${app.state.clean_path ? "1 marked" : "Space marks one"}`, theme.muted)]
     if (app.plan?.discover_error) lines.push(paint(app.plan.discover_error, theme.error))
     for (const file of files) {
       const selected = files[app.selected]?.path === file.path
       const row = status(this.ctl, file, this.frame())
       const mark = selected ? "→ " : "  "
-      const text = `${mark}${row.glyph} ${file.display}${row.text ? "  " + row.text : ""}`
+      const check = app.state.clean_path === file.path ? "[x]" : "[ ]"
+      const text = `${mark}${check} ${row.glyph} ${file.display}${row.text ? "  " + row.text : ""}`
       lines.push(paint(text, selected ? theme.text : theme.muted))
     }
     return lines.map((line) => fit(line, width))
+  }
+}
+
+class SelectedFileScrollView extends ScrollView {
+  private selection = ""
+  private selectionRow = -1
+
+  constructor(child: Component, private ctl: AppController) {
+    super(child, { follow: "none", primary: true, scrollbar: "hidden" })
+  }
+
+  override updateLayout(contentHeight: number, viewportHeight: number, requestRender: () => void): void {
+    const resized = this.viewportHeight !== viewportHeight
+    super.updateLayout(contentHeight, viewportHeight, requestRender)
+    const app = this.ctl.app
+    const path = app.plan?.files[app.selected]?.path ?? ""
+    const row = app.selected + 1 + (app.plan?.discover_error ? 1 : 0)
+    // Manual page/wheel scrolling must remain independent until selection
+    // changes (or the viewport shrinks).
+    if (path && viewportHeight > 0 && (resized || path !== this.selection || row !== this.selectionRow)) {
+      if (row < this.scrollTop) this.scrollTo(row)
+      else if (row >= this.scrollTop + viewportHeight) this.scrollTo(row - viewportHeight + 1)
+    }
+    this.selection = path
+    this.selectionRow = row
   }
 }
 
@@ -125,7 +157,7 @@ function scroll(child: Component, primary = false): ScrollView {
 export function buildLayout(ctl: AppController, editor: Component, frame: () => number, terminal: Terminal): Component {
   const fatal = scroll(new FatalView(ctl))
   const empty = scroll(new EmptyView(), true)
-  const list = scroll(new FileListView(ctl, frame), true)
+  const list = new SelectedFileScrollView(new FileListView(ctl, frame), ctl)
   const detail = scroll(new DetailView(ctl))
   const panes = new HStack(
     [
@@ -137,7 +169,7 @@ export function buildLayout(ctl: AppController, editor: Component, frame: () => 
   const alive = () => ctl.app.fatal == null
   const hasFiles = () => (ctl.app.plan?.files.length ?? 0) > 0 || Boolean(ctl.app.plan?.discover_error)
   return new VStack([
-    { component: new Header(ctl, terminal), basis: 1, shrink: 0 },
+    { component: new Header(ctl, terminal), basis: "auto", shrink: 0 },
     { component: fatal, grow: 1, visible: () => ctl.app.fatal != null },
     { component: empty, grow: 1, visible: () => alive() && !hasFiles() },
     { component: panes, grow: 1, visible: () => alive() && hasFiles() },
