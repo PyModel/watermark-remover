@@ -32,7 +32,7 @@ test("fake terminal implements the full interface", async () => {
   asTerm.stop()
   expect(term.titles).toEqual(["wm"])
   expect(term.progress).toEqual([true])
-  expect(term.writes).toEqual(["x"])
+  expect(term.writes).toEqual(["\x1b]0;wm\x07", "\x1b]9;4;3\x07", "x"])
 })
 
 test("empty layout render(width) names the one thing to do", () => {

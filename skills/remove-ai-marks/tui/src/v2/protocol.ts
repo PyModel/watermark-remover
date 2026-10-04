@@ -204,11 +204,27 @@ export function convertReveal(reveal: Reveal): Reveal {
   return next
 }
 
+function usableFinding(value: unknown): value is Finding {
+  if (!value || typeof value !== "object") return false
+  const finding = value as Partial<Finding>
+  if (typeof finding.path !== "string") return false
+  if (finding.reveal == null) return true
+  if (!Array.isArray(finding.reveal)) return false
+  return finding.reveal.every((excerpt) => {
+    if (!excerpt || typeof excerpt !== "object") return false
+    const reveal = excerpt as Partial<Reveal>
+    return typeof reveal.text === "string" && Array.isArray(reveal.marks)
+  })
+}
+
 /**
  * The one Findings parse step. Wire excerpts are converted here, nowhere else.
- * A BMP finding is returned unchanged.
+ * A BMP finding is returned unchanged. A finding whose reveal text is not a
+ * string, or whose reveal is not an array of excerpts, is rejected (`null`)
+ * so the caller ignores that frame instead of throwing inside the reader.
  */
-export function parseFinding(finding: Finding): Finding {
+export function parseFinding(finding: Finding): Finding | null {
+  if (!usableFinding(finding)) return null
   if (!finding.reveal) {
     const next: Finding = { ...finding, reveal: [] }
     convertedFindings.add(next)

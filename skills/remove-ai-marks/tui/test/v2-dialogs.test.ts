@@ -305,6 +305,10 @@ test("help lists every command and f1, enter, and escape close it", async () => 
   const help = screen()
   expect(help).toContain("Help")
   expect(help).toContain("Any flag `wm` accepts")
+  expect(help).toContain("ctrl+k")
+  expect(help).toContain("ctrl+j")
+  expect(help).toContain("prompt history and cursor")
+  expect(help).not.toContain("↑ ↓  move through files")
   for (const command of COMMANDS) expect(help).toContain(command.title)
   press(key.f1)
   expect(mounted.ctl.app.dialogs).toEqual([])
@@ -432,6 +436,43 @@ test("dialog scrim paints the theme background instead of bare spaces", async ()
   expect(scrim).toContain(THEME_BG)
   const titled = raw.find((line) => stripTerminalSequences(line).includes("Commands"))
   expect(titled).toContain(THEME_BG)
+})
+
+/** Columns inside the panel that are not painted with theme.bg. */
+function unpaintedPanelColumns(raw: string, panel: number, screen: number): number {
+  const left = Math.floor((screen - panel) / 2)
+  let bgOn = false
+  let col = 0
+  let holes = 0
+  for (let i = 0; i < raw.length; i++) {
+    if (raw[i] !== "\x1b") {
+      if (col >= left && col < left + panel && !bgOn) holes += 1
+      col += 1
+      continue
+    }
+    const end = raw.indexOf("m", i)
+    if (end < 0) break
+    const seq = raw.slice(i, end + 1)
+    if (seq.includes("48;2;15;18;25")) bgOn = true
+    if (seq === "\x1b[49m" || seq === "\x1b[0m") bgOn = false
+    i = end
+  }
+  return holes
+}
+
+test("short dialog panel lines fill to the panel width with the theme background", async () => {
+  const { tui, press } = await boot(100, 40)
+  press(key.f1)
+  const raw = tui.getScreenLines()
+  const titled = raw.find((line) => {
+    const plain = stripTerminalSequences(line)
+    return plain.includes("Help") && plain.includes("esc") && !plain.includes("f1")
+  })
+  expect(titled).toBeDefined()
+  expect(unpaintedPanelColumns(titled!, 72, 100)).toBe(0)
+  const short = raw.find((line) => stripTerminalSequences(line).includes("prompt history and cursor"))
+  expect(short).toBeDefined()
+  expect(unpaintedPanelColumns(short!, 72, 100)).toBe(0)
 })
 
 test("kitty CSI-u enter continues, closes, confirms, and saves the other dialogs", async () => {

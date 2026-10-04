@@ -68,10 +68,14 @@ export class FakeTerminal implements Terminal {
 
   setTitle(title: string): void {
     this.titles.push(title)
+    // Library Terminal.setTitle writes OSC 0. Capture it once, on writes.
+    this.writes.push(`\x1b]0;${title}\x07`)
   }
 
   setProgress(active: boolean): void {
     this.progress.push(active)
+    // Library Terminal.setProgress writes OSC 9;4. Capture it once, on writes.
+    this.writes.push(active ? "\x1b]9;4;3\x07" : "\x1b]9;4;0\x07")
   }
 
   /** Deliver one input sequence to the listener registered by start(). */

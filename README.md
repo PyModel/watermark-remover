@@ -145,6 +145,8 @@ The screen has four parts:
 | `ctrl+r` | clean; each file gets a `NAME.cleaned.EXT` beside it and originals stay untouched |
 | `tab` | next preset: Hidden marks, Hidden marks aggressive, Deep clean (LLM rewrite), Images |
 | `ctrl+p` | every command: model, history, doctor, setup, help |
+| `ctrl+k` / `ctrl+j` | previous / next file |
+| `up` / `down` | prompt history recall and cursor |
 | `esc` | stop after the current file |
 
 **First run** opens a three-step setup:

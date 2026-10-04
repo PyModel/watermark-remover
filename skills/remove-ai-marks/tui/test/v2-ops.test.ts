@@ -27,6 +27,10 @@ function done(patch: Partial<FileDone> = {}): FileDone {
   }
 }
 
+function occurrences(haystack: string, needle: string): number {
+  return haystack.split(needle).length - 1
+}
+
 function memoryClipboard(): NativeClipboard & { texts: string[] } {
   const texts: string[] = []
   return {
@@ -104,12 +108,14 @@ test("the terminal title and progress change while a clean runs and clear after"
   ctl.app.run = { kind: "clean", index: 0, total: 2, display: "drafts/intro.md" }
   const footer = new Footer(ctl, term, () => 0)
   footer.render(80)
-  expect(term.writes.join("")).toContain("\x1b]0;Cleaning 1 of 2: drafts/intro.md\x07")
-  expect(term.writes.join("")).toContain("\x1b]9;4;3\x07")
+  const cleaning = term.writes.join("")
+  expect(occurrences(cleaning, "\x1b]0;Cleaning 1 of 2: drafts/intro.md\x07")).toBe(1)
+  expect(occurrences(cleaning, "\x1b]9;4;3\x07")).toBe(1)
   ctl.app.run = null
   footer.render(80)
-  expect(term.writes.join("")).toContain("\x1b]0;wm\x07")
-  expect(term.writes.join("")).toContain("\x1b]9;4;0\x07")
+  const cleared = term.writes.join("")
+  expect(occurrences(cleared, "\x1b]0;wm\x07")).toBe(1)
+  expect(occurrences(cleared, "\x1b]9;4;0\x07")).toBe(1)
   ctl.app.run = { kind: "clean", index: 0, total: 1, display: "bad\u0007name" }
   footer.render(80)
   const written = term.writes.join("")
@@ -188,8 +194,8 @@ test("the running app writes title and progress sequences, and a dying bridge cl
   term.input("\x12")
   tui.renderNow()
   const running = term.writes.join("")
-  expect(running).toContain("\x1b]0;Cleaning 1 of 5: drafts/intro.md\x07")
-  expect(running).toContain("\x1b]9;4;3\x07")
+  expect(occurrences(running, "\x1b]0;Cleaning 1 of 5: drafts/intro.md\x07")).toBe(1)
+  expect(occurrences(running, "\x1b]9;4;3\x07")).toBe(1)
   bridge.die("bridge exited with code 1")
   tui.renderNow()
   const died = term.writes.join("")

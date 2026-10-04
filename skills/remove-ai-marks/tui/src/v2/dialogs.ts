@@ -186,10 +186,16 @@ function scrimFill(text: string): string {
   return styleText(text, { bg: parseColor(theme.bg) }, "truecolor")
 }
 
+/**
+ * Center a panel line. Short lines are filled to the panel width with the
+ * theme background before the right margin, so the plate has no terminal-default gaps.
+ */
 function place(line: string, panel: number, width: number): string {
   const inner = truncateToWidth(line, panel, "")
+  const shortfall = Math.max(0, panel - visibleWidth(inner))
+  const filled = scrimFill(inner + " ".repeat(shortfall))
   const left = Math.max(0, Math.floor((width - panel) / 2))
-  const placed = scrimFill(" ".repeat(left)) + inner
+  const placed = scrimFill(" ".repeat(left)) + filled
   return placed + scrimFill(" ".repeat(Math.max(0, width - visibleWidth(placed))))
 }
 
@@ -452,7 +458,8 @@ class HelpDialog implements DialogView {
     const rows = COMMANDS.map((command) => `${command.key ?? `/${command.name}`}  ${command.title}`)
     return panel(width, "Help", undefined, [
       "enter  add the path, --flag or /command typed in the prompt",
-      "↑ ↓  move through files",
+      "ctrl+k  ctrl+j  move through files",
+      "↑ ↓  prompt history and cursor",
       "ctrl+p  search every command",
       ...rows,
       "Any flag `wm` accepts works in the prompt: `--nfkc`, `--glob *.md`, `-o out/`. A bare flag typed again turns it off. The command in the footer is the exact `wm` run, so a clean here can be repeated anywhere.",

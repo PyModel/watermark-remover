@@ -260,6 +260,7 @@ export function createApp(bridge: BridgeLike, onQuit: () => void, notify: () => 
       await bridge.request<{ files: Finding[] }>("inspect", { state: snapshot() }, (message) => {
         if (message.event !== "inspected") return
         const finding = parseFinding(message.data)
+        if (!finding) return
         app.findings[finding.path] = finding
         if (app.run) app.run = { ...app.run, index: app.run.index + 1, display: finding.display }
         touch()

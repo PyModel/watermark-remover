@@ -100,12 +100,10 @@ export function applyCleanChrome(
   if (seen.title !== next.title) {
     seen.title = next.title
     terminal.setTitle(next.title)
-    terminal.write(`\x1b]0;${next.title}\x07`)
   }
   if (seen.progress !== next.progress) {
     seen.progress = next.progress
     terminal.setProgress(next.progress)
-    terminal.write(next.progress ? "\x1b]9;4;3\x07" : "\x1b]9;4;0\x07")
   }
 }
 

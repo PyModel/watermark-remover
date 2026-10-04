@@ -98,7 +98,15 @@ export class Bridge implements BridgeLike {
     if (frame.id == null) return
     const waiting = this.pending.get(frame.id)
     if (frame.event) {
-      waiting?.onEvent?.({ event: frame.event, data: frame.data } as BridgeEvent)
+      // A bad frame must not stop the stdout reader. Ignore the callback error;
+      // a result for this id, and every later request, can still settle.
+      if (waiting?.onEvent) {
+        try {
+          waiting.onEvent({ event: frame.event, data: frame.data } as BridgeEvent)
+        } catch (error) {
+          this.keepIoFailure(error)
+        }
+      }
       return
     }
     if (!waiting) return
