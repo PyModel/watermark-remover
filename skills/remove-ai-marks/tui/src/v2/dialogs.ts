@@ -1,5 +1,7 @@
 import {
   matchesKey,
+  parseColor,
+  styleText,
   truncateToWidth,
   visibleWidth,
   type Component,
@@ -171,18 +173,24 @@ class Scrim implements DialogView {
     const body = this.inner.render(panel).map((line) => place(line, panel, width))
     const height = Math.max(body.length, this.host.rows())
     const top = Math.max(0, Math.floor((height - body.length) / 2))
-    const blank = " ".repeat(Math.max(1, width))
+    const blank = scrimFill(" ".repeat(Math.max(1, width)))
     const lines = Array.from({ length: height }, () => blank)
     for (let i = 0; i < body.length && top + i < lines.length; i++) lines[top + i] = body[i]!
     return lines
   }
 }
 
+/** Backdrop plate. Empty input stays empty so a zero pad does not emit a reset. */
+function scrimFill(text: string): string {
+  if (!text) return ""
+  return styleText(text, { bg: parseColor(theme.bg) }, "truecolor")
+}
+
 function place(line: string, panel: number, width: number): string {
   const inner = truncateToWidth(line, panel, "")
   const left = Math.max(0, Math.floor((width - panel) / 2))
-  const placed = " ".repeat(left) + inner
-  return placed + " ".repeat(Math.max(0, width - visibleWidth(placed)))
+  const placed = scrimFill(" ".repeat(left)) + inner
+  return placed + scrimFill(" ".repeat(Math.max(0, width - visibleWidth(placed))))
 }
 
 class ModelDialog implements DialogView {
@@ -349,7 +357,7 @@ class ManualForm implements Component {
       this.cycle(matchesKey(data, "left") ? -1 : 1)
       return
     }
-    if (data === "\r") {
+    if (matchesKey(data, "enter")) {
       if (this.field === 0) this.field = 1
       else if (this.field === 1) this.field = 2
       else this.submit()
@@ -409,13 +417,16 @@ class WelcomeDialog implements DialogView {
   invalidate(): void {}
 
   handleInput(data: string): void {
-    if (data === "\r") {
+    if (matchesKey(data, "enter")) {
       this.ctl.closeDialog()
       this.ctl.openDialog({ type: "preset", onboarding: true })
       this.ctl.openDialog({ type: "model", onboarding: true })
       return
     }
-    if (matchesKey(data, "escape")) void this.ctl.finishOnboarding(true)
+    if (matchesKey(data, "escape")) {
+      this.ctl.closeDialog()
+      void this.ctl.finishOnboarding(true)
+    }
   }
 
   render(width: number): string[] {
@@ -434,7 +445,7 @@ class HelpDialog implements DialogView {
   invalidate(): void {}
 
   handleInput(data: string): void {
-    if (matchesKey(data, "escape") || data === "\r" || matchesKey(data, "f1")) this.ctl.closeDialog()
+    if (matchesKey(data, "escape") || matchesKey(data, "enter") || matchesKey(data, "f1")) this.ctl.closeDialog()
   }
 
   render(width: number): string[] {
@@ -459,7 +470,7 @@ class DoctorDialog implements DialogView {
   }
 
   handleInput(data: string): void {
-    if (matchesKey(data, "escape") || data === "\r") this.ctl.closeDialog()
+    if (matchesKey(data, "escape") || matchesKey(data, "enter")) this.ctl.closeDialog()
   }
 
   render(width: number): string[] {
@@ -535,7 +546,7 @@ class ConfirmDialog implements DialogView {
   invalidate(): void {}
 
   handleInput(data: string): void {
-    if (data === "\r" || data === "y" || data === "Y") this.answer(true)
+    if (matchesKey(data, "enter") || data === "y" || data === "Y") this.answer(true)
     else if (matchesKey(data, "escape") || data === "n" || data === "N") this.answer(false)
   }
 

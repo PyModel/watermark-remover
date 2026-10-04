@@ -433,3 +433,104 @@ test("page down moves the palette selection by a page", async () => {
   const marked = screen().split("\n").find((line) => line.includes("→")) ?? ""
   expect(marked).not.toContain("Clean")
 })
+
+/** CSI-u enter (kitty flags 7). CR is \r; this is the form Ghostty/kitty send. */
+const KITTY_ENTER = "\x1b[13u"
+
+test("kitty CSI-u enter runs the palette selection", async () => {
+  const { screen, press, mounted } = await boot(100, 40)
+  press(key.ctrlP)
+  for (const ch of "help") press(ch)
+  press(KITTY_ENTER)
+  expect(mounted.ctl.app.dialogs.map((dialog) => dialog.type)).toEqual(["help"])
+  expect(screen()).toContain("Any flag `wm` accepts")
+})
+
+/** theme.bg #0f1219 as a truecolor background, independent of styleText. */
+const THEME_BG = "\x1b[48;2;15;18;25m"
+
+test("dialog scrim paints the theme background instead of bare spaces", async () => {
+  const { tui, press } = await boot(100, 40)
+  press(key.ctrlP)
+  const raw = tui.getScreenLines()
+  const scrim = raw.find((line) => stripTerminalSequences(line).trim() === "")
+  expect(scrim).toBeDefined()
+  expect(scrim).toContain(THEME_BG)
+  const titled = raw.find((line) => stripTerminalSequences(line).includes("Commands"))
+  expect(titled).toContain(THEME_BG)
+})
+
+test("kitty CSI-u enter continues, closes, confirms, and saves the other dialogs", async () => {
+  const welcome = await boot(100, 30, (b) => {
+    b.onboard = true
+  })
+  welcome.press(KITTY_ENTER)
+  expect(welcome.mounted.ctl.app.dialogs.map((dialog) => dialog.type)).toEqual(["preset", "model"])
+  welcome.stop()
+
+  const help = await boot(120, 60)
+  help.press(key.f1)
+  help.press(KITTY_ENTER)
+  expect(help.mounted.ctl.app.dialogs).toEqual([])
+  help.stop()
+
+  const doctor = await boot(120, 40)
+  await doctor.type("/doctor")
+  await until(doctor.tui, doctor.screen, "standard library alone.")
+  doctor.press(KITTY_ENTER)
+  expect(doctor.mounted.ctl.app.dialogs).toEqual([])
+  doctor.stop()
+
+  let release: () => void = () => {}
+  const confirm = await boot(120, 40, (b) => {
+    b.confirm = [{ kind: "remote", message: "Text will be sent to 10.0.0.5" }]
+    b.cleanGate = new Promise((resolve) => {
+      release = resolve
+    })
+  })
+  await confirm.type("drafts")
+  confirm.press(key.ctrlR)
+  await until(confirm.tui, confirm.screen, "Before anything is written")
+  confirm.press(KITTY_ENTER)
+  await until(confirm.tui, () => String(confirm.mounted.ctl.app.run != null), "true")
+  expect(confirm.bridge.calls.filter((call) => call.method === "clean")).toHaveLength(2)
+  release()
+  await until(confirm.tui, () => String(confirm.mounted.ctl.app.run == null), "true")
+  confirm.stop()
+
+  const manual = await boot()
+  await manual.type("/model")
+  await until(manual.tui, manual.screen, "Ollama")
+  for (let i = 0; i < 3; i++) manual.press(key.down)
+  manual.press(key.enter)
+  manual.press(key.right)
+  manual.press(KITTY_ENTER)
+  for (const ch of "http://127.0.0.1:8080") manual.press(ch)
+  manual.press(key.tab)
+  for (const ch of "local-model") manual.press(ch)
+  manual.press(KITTY_ENTER)
+  await until(manual.tui, () => JSON.stringify(manual.mounted.ctl.app.state.endpoint), "local-model")
+  expect(manual.mounted.ctl.app.state.endpoint).toEqual({
+    backend: "openai-compatible",
+    base_url: "http://127.0.0.1:8080",
+    model: "local-model",
+  })
+})
+
+test("escaping welcome closes its overlay before the save, and a second enter stacks nothing", async () => {
+  const { screen, press, mounted, tui, bridge } = await boot(100, 30, (b) => {
+    b.onboard = true
+  })
+  expect(screen()).toContain("Welcome to wm")
+  expect(tui.hasOverlay()).toBe(true)
+  press(key.esc)
+  // Stay synchronous. The save is already requested; its toast is a microtask.
+  expect(bridge.calls.some((call) => call.method === "save_settings")).toBe(true)
+  expect(screen()).not.toContain("Setup skipped")
+  expect(tui.hasOverlay()).toBe(false)
+  expect(tui.getFocusedComponent()).toBe(mounted.editor)
+  press(key.enter)
+  expect(mounted.ctl.app.dialogs).toEqual([])
+  expect(tui.hasOverlay()).toBe(false)
+  expect(screen()).not.toContain("A model for rewriting")
+})

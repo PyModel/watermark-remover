@@ -79,7 +79,7 @@ export class ListDialog implements Component {
       this.move(visible, this.visibleRows())
       return
     }
-    if (data === "\r") {
+    if (matchesKey(data, "enter")) {
       this.choose(visible)
       return
     }
