@@ -116,12 +116,15 @@ wm-tui                     # the current directory
 wm-tui ./drafts --recursive --glob "*.md"
 ```
 
-`wm-tui` is a single-screen terminal UI in the style of opencode and pi. It is
-built on [OpenTUI](https://github.com/anomalyco/opentui), so it needs
+`wm-tui` is a single-screen terminal UI in the style of opencode and pi. It
+renders on [@earendil-works/pi-tui](https://github.com/earendil-works/pi/tree/main/packages/tui)
+(alternate-screen fullscreen layout, differential rendering), so it needs
 [Bun](https://bun.sh) 1.4 or later on the `PATH`. The Python install stays
-dependency-free: on first launch `wm-tui` runs `bun install` for its own
-frontend, and it prints the install hint if Bun is missing. macOS, Linux and
-Windows are supported.
+dependency-free: on first launch `wm-tui` runs
+`bun install --frozen-lockfile --production` for its frontend — three runtime
+packages, not the previous hundreds — and it prints the install hint if Bun is
+missing. A read-only install is copied into the user cache before that install.
+macOS, Linux and Windows are supported.
 
 The screen has four parts:
 
@@ -166,12 +169,19 @@ first write. That covers a remote endpoint, `--in-place`,
 
 The UI is two processes:
 
-- A Bun frontend (`skills/remove-ai-marks/tui/`) that only renders.
+- A Bun frontend (`skills/remove-ai-marks/tui/`, entry `src/index.ts`) that only
+  renders, on pi-tui. First launch installs three runtime packages with
+  `bun install --frozen-lockfile --production`.
 - A Python bridge (`scripts/tui_bridge.py`) that owns every decision. It builds
   the request through `wm`'s own parser, `plan_work` and `run_clean_item`, so
   it hits every refusal the CLI makes.
 
 `tui/PROTOCOL.md` documents the protocol between them.
+
+Set `PI_TUI_WRITE_LOG` to a file path, or to an existing directory (a
+timestamped log is created there), to capture the raw ANSI stream the frontend
+writes. That is the rendering-bug log. It is not `WM_TUI_LOG`, which is the
+bridge stderr log.
 
 ---
 
