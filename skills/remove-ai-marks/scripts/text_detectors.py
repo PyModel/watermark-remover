@@ -17,10 +17,13 @@ unresolved evidence, never a clean result.
 
 Detectors:
 
-- gemini-synthid-text — Google's official SynthID-text detector, called
-  through the Gemini API (taskType DETECT_TEXT_WATERMARK). Activated by
-  WATERMARKS_GEMINI_API_KEY. User text is sent to Google only when the
-  operator sets that key.
+- gemini-synthid-text — RESERVED slot for Google's SynthID-text detector.
+  The Gemini generateContent API does not support the DETECT_TEXT_WATERMARK
+  task type yet, so available() reports False and detect() never sends any
+  text to Google, regardless of WATERMARKS_GEMINI_API_KEY. No network
+  machinery ships for it: when a supported endpoint exists, the request
+  layer gets added back next to parse_gemini_detect_response(), which is
+  kept (tested) as the response-parsing contract.
 - markllm — optional research harness (KGW / SynthID schemes) via
   detect_text_watermark.py, activated by MARKLLM_DIR. Same-config-only
   detection; not a vendor oracle.
@@ -37,10 +40,8 @@ import os
 import re
 import sys
 import tempfile
-import time
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import urlparse
 
 from common import (
     emit_json,
@@ -50,20 +51,12 @@ from external_command import (
     ExternalCommandTimeout,
     run_command,
 )
-from layer_b_http import LayerBHTTPError, request_json
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 
-GEMINI_DETECT_URL = "https://generativelanguage.googleapis.com"
-GEMINI_DETECT_ROUTE_TEMPLATE = "/v1beta/models/{model}:generateContent"
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
-DEFAULT_GEMINI_TIMEOUT = 30.0
-DEFAULT_GEMINI_MAX_CHARS = 1_000_000
 DEFAULT_MARKLLM_SCHEME = "kgw"
 DEFAULT_MARKLLM_TIMEOUT = 600.0
 DEFAULT_MARKLLM_OUTPUT_LIMIT = 1_000_000
-
-_RETRYABLE_HTTP_CODES = frozenset({429, 500, 502, 503, 504})
 
 
 class DetectorError(RuntimeError):
@@ -81,13 +74,6 @@ class TextDetector(Protocol):
 def _env_float(name: str, default: float) -> float:
     try:
         return float(os.environ.get(name, str(default)))
-    except ValueError:
-        return default
-
-
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.environ.get(name, str(default)))
     except ValueError:
         return default
 
@@ -184,51 +170,6 @@ def parse_gemini_detect_response(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _call_gemini(
-    endpoint: str,
-    route: str,
-    body: dict[str, Any],
-    api_key: str,
-    timeout: float,
-    opener: Any = None,
-) -> dict[str, Any]:
-    """POST *body* to *route* under *endpoint*, retrying once on transient failures.
-
-    Uses the shared layer_b_http.request_json seam. Distinguishes retryable
-    HTTP codes (429, 500, 502, 503, 504) by inspecting the error message
-    text layer_b_http emits; the bound is intentionally narrow so we never
-    retry on 4xx (except 429) or on programming errors.
-    """
-    if urlparse(endpoint).scheme not in ("http", "https"):
-        raise DetectorError(f"refusing non-http(s) Gemini endpoint: {endpoint}")
-    headers = {"x-goog-api-key": api_key}
-    last_error: LayerBHTTPError | None = None
-    for attempt in range(2):
-        try:
-            return request_json(
-                endpoint,
-                route,
-                body,
-                headers=headers,
-                timeout=timeout,
-                opener=opener,
-            )
-        except LayerBHTTPError as error:
-            last_error = error
-            retryable = _is_retryable_layer_b_error(error)
-            if not retryable or attempt == 1:
-                raise DetectorError(str(error)) from error
-        time.sleep(1.0)
-    if last_error is not None:
-        raise DetectorError(str(last_error))
-    raise DetectorError("Gemini API call failed")
-
-
-def _is_retryable_layer_b_error(error: LayerBHTTPError) -> bool:
-    msg = str(error)
-    return any(f"HTTP {code}" in msg for code in _RETRYABLE_HTTP_CODES)
-
-
 class GeminiSynthIDTextDetector:
     """Google's official SynthID-text detector via the Gemini API."""
 
@@ -243,6 +184,10 @@ class GeminiSynthIDTextDetector:
         return False
 
     def detect(self, text: str) -> dict[str, Any]:
+        # No request layer ships for this slot (see module docstring), so the
+        # report is the same in every configuration: unavailable. "configured"
+        # stays truthful — it reflects the key, not usability — and "available"
+        # never disagrees with available().
         api_key = os.environ.get("WATERMARKS_GEMINI_API_KEY", "").strip()
         if not api_key:
             return {
@@ -252,24 +197,11 @@ class GeminiSynthIDTextDetector:
                 "configured": False,
                 "error": "WATERMARKS_GEMINI_API_KEY not set",
             }
-
-        max_chars = _env_int("WATERMARKS_GEMINI_MAX_CHARS", DEFAULT_GEMINI_MAX_CHARS)
-        if len(text) > max_chars:
-            return {
-                "detector": self.name,
-                "vendor": self.vendor,
-                "available": True,
-                "configured": True,
-                "skipped": True,
-                "reason": f"text longer than {max_chars} chars",
-                "is_watermarked": None,
-            }
-
         return {
             "detector": self.name,
             "vendor": self.vendor,
             "available": False,
-            "configured": False,
+            "configured": True,
             "error": (
                 "DETECT_TEXT_WATERMARK task type is not supported by the "
                 "Gemini generateContent API; this detector is disabled until "
