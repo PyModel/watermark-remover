@@ -2,35 +2,9 @@ import { afterEach, expect, test } from "bun:test"
 import { isViewportTUI, stripTerminalSequences, TuiAltScreen } from "@earendil-works/pi-tui"
 import { COMMANDS } from "../src/v2/commands"
 import { mountApp, type MountedApp } from "../src/v2/app"
-import { BridgeError } from "../src/v2/protocol"
 import { ListDialog, type DialogItem } from "../src/v2/ui/list-dialog"
 import { FakeBridge } from "./fake-bridge"
 import { FakeTerminal } from "./fake-terminal"
-
-/**
- * The shared fake throws the pre-v2 BridgeError. The v2 store matches its own
- * class, which is what v2/bridge.ts rejects with. Translate only that error.
- */
-class DialogBridge extends FakeBridge {
-  override async request<T>(method: string, params: any = {}, onEvent?: (event: any) => void): Promise<T> {
-    try {
-      return await super.request(method, params, onEvent)
-    } catch (error) {
-      if (isNeedsConfirm(error)) throw new BridgeError(error.code, error.message, error.confirm)
-      throw error
-    }
-  }
-}
-
-function isNeedsConfirm(error: unknown): error is { code: string; message: string; confirm: { kind: string; message: string }[] } {
-  return (
-    error instanceof Error &&
-    "code" in error &&
-    (error as { code?: string }).code === "needs_confirm" &&
-    "confirm" in error &&
-    Array.isArray((error as { confirm?: unknown }).confirm)
-  )
-}
 
 const key = {
   ctrlP: "\x10",
@@ -124,7 +98,7 @@ interface Boot {
 }
 
 async function boot(columns = 100, rows = 40, configure?: (bridge: FakeBridge) => void): Promise<Boot> {
-  const bridge = new DialogBridge()
+  const bridge = new FakeBridge()
   configure?.(bridge)
   const term = new FakeTerminal(columns, rows)
   const tui = new TuiAltScreen(term, false)

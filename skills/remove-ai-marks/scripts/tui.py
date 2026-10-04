@@ -119,8 +119,8 @@ def frontend_env(argv: list[str]) -> dict[str, str]:
     """The ``WM_TUI_*`` variables the frontend receives (PROTOCOL "Environment").
 
     ``WM_TUI_CWD`` is the one addition: the frontend must run with its own
-    directory as cwd (Bun reads ``bunfig.toml`` from there), so the bridge needs
-    to be told where the operator's relative paths are relative to.
+    directory as cwd (``bun run src/index.ts`` resolves from there), so the
+    bridge needs to be told where the operator's relative paths are relative to.
     """
     log = os.environ.get("WM_TUI_LOG") or str(cache_root() / "watermark-remover" / "tui.log")
     return {
@@ -158,19 +158,19 @@ def _stage_frontend(source: Path) -> Path:
 
 
 def _install(directory: Path, bun: str) -> int:
-    """``bun install --frozen-lockfile``: the lockfile, not the network, decides versions."""
+    """``bun install --frozen-lockfile --production``: lockfile versions, no devDependencies."""
     print(
         f"wm-tui: installing frontend dependencies in {directory} (first run only)...",
         file=sys.stderr,
     )
     result = subprocess.run(
-        [bun, "install", "--frozen-lockfile"],
+        [bun, "install", "--frozen-lockfile", "--production"],
         cwd=directory,
         check=False,
     )
     if result.returncode != 0:
         print(
-            f"wm-tui: `bun install --frozen-lockfile` failed in {directory} "
+            f"wm-tui: `bun install --frozen-lockfile --production` failed in {directory} "
             f"(exit {result.returncode})",
             file=sys.stderr,
         )
@@ -179,10 +179,10 @@ def _install(directory: Path, bun: str) -> int:
 
 def prepare_frontend(source: Path, bun: str) -> tuple[Path | None, int]:
     """Return a directory with installed dependencies to run from, or an exit code."""
-    if not (source / "package.json").is_file() or not (source / "src" / "index.tsx").is_file():
+    if not (source / "package.json").is_file() or not (source / "src" / "index.ts").is_file():
         print(
             f"wm-tui: the terminal frontend is missing from {source} "
-            "(expected package.json and src/index.tsx). Set WM_TUI_DIR to its directory.",
+            "(expected package.json and src/index.ts). Set WM_TUI_DIR to its directory.",
             file=sys.stderr,
         )
         return None, 1
@@ -239,7 +239,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     env = {**os.environ, **wm_env}
-    command = [bun, "run", "src/index.tsx"]
+    command = [bun, "run", "src/index.ts"]
     if os.name == "nt":
         # No exec on Windows that keeps the console; wait and pass the code on.
         return subprocess.run(command, cwd=run_dir, env=env, check=False).returncode

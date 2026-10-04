@@ -1874,7 +1874,7 @@ def test_a_missing_frontend_is_a_clear_error(monkeypatch, capsys, tmp_path):
 def _fake_frontend(root: Path) -> Path:
     (root / "src").mkdir(parents=True)
     (root / "package.json").write_text("{}", encoding="utf-8")
-    (root / "src" / "index.tsx").write_text("", encoding="utf-8")
+    (root / "src" / "index.ts").write_text("", encoding="utf-8")
     return root
 
 
@@ -1901,7 +1901,7 @@ def test_the_launcher_installs_once_then_execs_bun_in_the_frontend(monkeypatch, 
     assert launcher.main(["."]) == 0
     assert installs == [frontend]
     file, args, env, cwd = execs[0]
-    assert (file, args) == ("/fake/bun", ["/fake/bun", "run", "src/index.tsx"])
+    assert (file, args) == ("/fake/bun", ["/fake/bun", "run", "src/index.ts"])
     assert cwd.resolve() == frontend.resolve()
     assert env["WM_TUI_PYTHON"] == sys.executable
     assert json.loads(env["WM_TUI_ARGV"]) == ["."]
@@ -1934,7 +1934,7 @@ def test_a_truly_read_only_frontend_is_staged_into_a_writable_copy(monkeypatch, 
     monkeypatch.setattr(launcher, "_install", fake_install)
     run_dirs: list[Path] = []
     monkeypatch.setattr(launcher.os, "execvpe", lambda *args: run_dirs.append(Path.cwd()))
-    paths = [frontend / "package.json", frontend / "src" / "index.tsx", frontend / "src", frontend]
+    paths = [frontend / "package.json", frontend / "src" / "index.ts", frontend / "src", frontend]
     try:
         for path in paths:
             path.chmod(0o555 if path.is_dir() else 0o444)
@@ -1947,9 +1947,28 @@ def test_a_truly_read_only_frontend_is_staged_into_a_writable_copy(monkeypatch, 
             path.chmod(0o755 if path.is_dir() else 0o644)
     staged = tmp_path / "cache" / "watermark-remover" / f"tui-{launcher.package_version()}"
     assert installs == [staged]
-    assert (staged / "src" / "index.tsx").is_file()
+    assert (staged / "src" / "index.ts").is_file()
     assert [path.resolve() for path in run_dirs] == [staged.resolve()] * 2
     assert os.access(staged, os.W_OK) and os.access(staged / "package.json", os.W_OK)
+
+
+def test_the_first_run_install_is_frozen_and_production(monkeypatch, tmp_path, capsys):
+    """First-run install must not resolve versions or pull devDependencies."""
+    calls: list[tuple[list[str], dict]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((list(argv), kwargs))
+        return subprocess.CompletedProcess(argv, 1)
+
+    monkeypatch.setattr(launcher.subprocess, "run", fake_run)
+    assert launcher._install(tmp_path, "/fake/bun") == 1
+    assert len(calls) == 1
+    argv, kwargs = calls[0]
+    assert argv == ["/fake/bun", "install", "--frozen-lockfile", "--production"]
+    assert kwargs["cwd"] == tmp_path and kwargs["check"] is False
+    err = capsys.readouterr().err
+    assert "--frozen-lockfile --production" in err
+    assert "first run only" in err
 
 
 def test_a_failed_install_stops_the_launch(monkeypatch, tmp_path, capsys):

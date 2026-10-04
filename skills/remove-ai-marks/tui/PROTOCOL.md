@@ -2,7 +2,7 @@
 
 `wm-tui` is two processes:
 
-- **The frontend** is TypeScript on Bun with OpenTUI and Solid, in this
+- **The frontend** is TypeScript on Bun with `@earendil-works/pi-tui`, in this
   directory. It owns the terminal.
 - **The bridge** is Python, in `scripts/tui_bridge.py`. It owns every decision
   about a clean.
@@ -12,7 +12,7 @@ stdin and stdout. The bridge is the only place a `CleanRequest` is built.
 Everything else in the frontend is presentation.
 
 ```
-wm-tui (python, scripts/tui.py)  ── validates argv, finds bun, execs ──▶  bun src/index.tsx
+wm-tui (python, scripts/tui.py)  ── validates argv, finds bun, execs ──▶  bun src/index.ts
                                                                             │ spawn
                                                                             ▼
                                         $WM_TUI_PYTHON $WM_TUI_BRIDGE  (scripts/tui_bridge.py)
@@ -193,12 +193,13 @@ one per affected line, and is empty for anything that is not read as text:
             "marks": [[5, 6, "ZWSP"], [21, 22, "RLO"]]}]
 ```
 
-- In `text`, each invisible or format codepoint is replaced by `◆`, which takes
-  one column. An excerpt is at most 100 columns and is centred on its first
-  mark. `…` marks the edge where it was cut.
+- In `text`, each invisible or format code point is replaced by `◆`, which is
+  one code point (and one terminal column). An excerpt is at most 100 code
+  points and is centred on its first mark. `…` marks the edge where it was cut.
 - Each entry in `marks` is `[start, end, short_name]`, and `end` is exclusive.
   Offsets are Unicode code-point indices into the emitted `text` (not UTF-16
-  code units and not bytes); a non-BMP character such as U+1F600 counts as one.
+  code units, not bytes, and not terminal columns); a non-BMP character such
+  as U+1F600 counts as one.
 - Offsets come from `inspect_asset`'s `layer_a_hits[*].sample_offsets`.
 - `suspicious` is true when the raw report says so, or when
   `counts.hidden > 0`.

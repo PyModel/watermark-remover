@@ -1,4 +1,4 @@
-import { BridgeError, type BridgeEvent, type BridgeLike, type Hello, type Plan, type State } from "../src/protocol"
+import { BridgeError, type BridgeEvent, type BridgeLike, type Hello, type Plan, type State } from "../src/v2/protocol"
 
 export const PRESETS = [
   { key: "hidden", label: "Hidden marks", description: "Zero-width carriers, bidi controls and AI metadata.", layer: "A", result_class: "Verifiable", flags: [], requires_endpoint: false },

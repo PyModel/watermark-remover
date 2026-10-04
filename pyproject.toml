@@ -81,14 +81,15 @@ packages = ["watermark_remover", "watermark_remover.scripts"]
 [tool.setuptools.package-data]
 # Ship the skill documentation and bootstrap assets so a wheel install is
 # self-sufficient for the CLI surfaces that read them at runtime.
-# The wm-tui frontend ships as source; the launcher runs `bun install` on
-# first start (into a cache copy when site-packages is read-only).
+# The wm-tui frontend ships as source; the launcher runs
+# `bun install --frozen-lockfile --production` on first start (into a cache
+# copy when site-packages is read-only). tsconfig.json ships so `tsc` can
+# typecheck those sources; the launcher does not execute it.
 "watermark_remover" = [
     "SKILL.md",
     "references/*.md",
     "tui/package.json",
     "tui/bun.lock",
-    "tui/bunfig.toml",
     "tui/tsconfig.json",
     "tui/src/**/*",
     "tui/PROTOCOL.md",
