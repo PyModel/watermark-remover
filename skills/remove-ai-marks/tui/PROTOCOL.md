@@ -62,11 +62,22 @@ CLI flag is valid here and the command preview is exact.
 ```json
 {
   "paths": ["drafts/", "notes.md"],
+  "clean_path": null,
   "preset": "hidden",
   "flags": ["--recursive", "--glob", "*.md"],
   "endpoint": {"backend": "ollama", "base_url": "http://127.0.0.1:11434", "model": "qwen3:14b"}
 }
 ```
+
+The TUI always sends `clean_path`: null means no file is marked; a string is
+one absolute path returned in `plan.files`. Space toggles/replaces the mark
+independently of the focused row. The bridge refuses a clean without a mark,
+with a malformed mark, or with a mark no longer in the discovered regular files.
+A marked plan keeps the discovery list, but its command, preflight, warnings,
+layer and confirmation gates describe only the marked file. `clean` runs only
+that file; `inspect` remains read-only inspection of discovery. Confirmation
+retries use the original immutable run state, not new selection/options.
+Clients that **omit** `clean_path` retain batch behavior; the TUI never omits it.
 
 `endpoint` has the same three keys everywhere: in `state`, in `hello.settings`,
 and in `save_settings`. Reasoning effort is set with
@@ -149,7 +160,7 @@ Returns:
 - **`warnings`.** Non-fatal problems with the options, such as a base URL that
   is malformed or not http(s).
 - **`preflight_error`.** What `clean_request.plan_work` would refuse for the
-  whole selection, such as an output collision or a binary file forced to
+  clean target (or legacy batch selection), such as an output collision or a binary file forced to
   text.
 - **`layer` and `result_class`.** The weakest layer the selected files will
   actually get: B if a text file is rewritten, else V if pixels change or text
@@ -246,6 +257,10 @@ The candidates are the `WATERMARKS_REWRITE_*` endpoint first, then Ollama
 :11434, LM Studio :1234, llama.cpp :8080 and OpenAI-compatible :8000. All
 probes run in parallel through `layer_b_discovery.probe_backend` with
 `allow_remote=False`, so detection is loopback only.
+
+The picker also allows a manually entered loopback server URL and model ID,
+using Ollama or OpenAI-compatible. These values are saved per user; there is
+no fixed model, Pi authentication or cloud-model catalog. Probes send no document.
 
 ### `checks` `{}`
 

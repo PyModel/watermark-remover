@@ -10,9 +10,9 @@
   <a href="https://hits.sh/github.com/PyModel/watermark-remover/"><img alt="Visitors" src="https://hits.sh/github.com/PyModel/watermark-remover.svg?label=visitors&color=30363d&labelColor=0f1110"></a>
 </p>
 
-Tools for finding and removing AI provenance signals from files you own. Four channels are covered: hidden Unicode in text, statistical token watermarks, visible marks burned into images, and metadata such as C2PA, EXIF, and XMP.
+Inspect and clean files you own: remove hidden Unicode characters from text and AI/provenance metadata from images and documents. Originals stay untouched unless you explicitly choose `--in-place`.
 
-The core runs on Python 3.10+ using the standard library only. Anything that needs a network call, a model, a GPU, or a system binary sits behind an adapter you opt into, so the default install has no dependencies.
+Use it as an **agent skill**, install the **PyPI command-line package**, or run the **CLI/TUI from a clone**. The core needs Python 3.10+ and has no required dependencies. A model is optional: text rewriting uses your own local model; visible image removal requires a supplied mask/box or detector.
 
 **Honesty contract:** deterministic cleaners report exactly what they removed. Rewrite, inpainting, and detector-evasion methods are labeled best-effort. Nothing here certifies that a vendor detector will fail.
 
@@ -37,61 +37,79 @@ Optional edges, none required by the core:
 
 ---
 
-## Quick start
+## Choose how to use it
+
+| Route | Best for | Needs |
+| --- | --- | --- |
+| Agent skill | Ask your coding agent to inspect/clean a file | Python + a harness that can read skills and run commands |
+| PyPI package | Installed `wm` and `wm-tui` commands | Python; Bun for the TUI |
+| Clone / CLI | Development or running without installing the package | Python; Bun for the TUI |
+
+### 1. Agent skill — any skill-capable harness
+
+Clone once, then link the **whole skill folder**, not just `SKILL.md`, into your harness's skills directory:
 
 ```bash
-pip install watermark-remover
+git clone https://github.com/PyModel/watermark-remover.git
+cd watermark-remover
 
-# Unified clean. The source is never modified without --in-place.
+# Pi example; replace this directory with your harness's skills directory.
+mkdir -p ~/.pi/agent/skills
+ln -s "$(pwd)/skills/remove-ai-marks" ~/.pi/agent/skills/remove-ai-marks
+```
+
+Common directories: Pi `~/.pi/agent/skills`, Codex `~/.agents/skills`, Claude Code `~/.claude/skills`, Cursor `.cursor/skills`, Grok `.grok/skills`. Keep the clone where the link points; use your harness's configured directory if different.
+
+Reload skills, then invoke `/remove-ai-marks` **if your harness supports skill commands**, or ask:
+
+> Use the remove-ai-marks skill to inspect `/absolute/path/draft.md`. Explain the findings, then clean to a new file. Do not overwrite the original.
+
+For a harness without skill discovery, ask it to read `skills/remove-ai-marks/SKILL.md` from the clone and follow those instructions. The skill uses the same Python cleaners as the CLI; it does not require Pi or any specific agent vendor. The agent's model is separate from the optional local rewrite model.
+
+### 2. PyPI package — installed commands
+
+```bash
+python3 -m pip install watermark-remover
+
+# Remove hidden characters / metadata, preserving originals.
 wm draft.md -o draft.cleaned.md
 wm image.png -o image.cleaned.png
 
-# Machine-readable result, plus a JSON record of what was removed
+# JSON result plus an audit record.
 wm draft.md -o draft.cleaned.md --json --audit
+
+# Interactive UI (requires Bun on PATH).
+wm-tui ./drafts
 ```
 
-The install pulls no dependencies — the core is standard library only. Extras
-are opt-in: `watermark-remover[visible]` for image inpainting,
-`[quality]` for scoring, `[ai]` for the torch-backed adapters, `[provenance]`
-for C2PA, or `[all]`. Five commands are installed:
-`wm`, `wm-tui`, `wm-serve`, `wm-audit-dir`, `wm-audit-site`.
+Installed commands: `wm` cleans, `wm-tui` is the terminal UI, `wm-serve` exposes the HTTP API, and `wm-audit-dir` / `wm-audit-site` inspect directories/sites. Optional extras: `[visible]`, `[quality]`, `[ai]`, `[provenance]`, `[all]`; none is required for the core clean.
 
-```bash
-# Live Layer B rewrite through a local endpoint, in the same command
-wm draft.md -o draft.cleaned.md \
-  --rewrite humanize --rewrite-backend openai-compatible \
-  --rewrite-base-url http://127.0.0.1:8000 --rewrite-model my-local-model
-```
-
-### From a clone
+### 3. Clone — CLI or local TUI development
 
 ```bash
 git clone https://github.com/PyModel/watermark-remover.git
 cd watermark-remover
 SCRIPTS=skills/remove-ai-marks/scripts
 
-# Inspect before changing anything
+# Inspect first; this writes nothing.
 python3 "$SCRIPTS/inspect_file.py" draft.md
-python3 "$SCRIPTS/inspect_file.py" image.png --soft-binding
 
-# Unified clean
+# Clean to a new file.
 python3 "$SCRIPTS/clean_file.py" draft.md -o draft.cleaned.md
-python3 "$SCRIPTS/clean_file.py" image.png -o image.cleaned.png
+
+# Run the local TUI source; no build needed. Restart after edits.
+python3 "$SCRIPTS/tui.py" ./drafts
 ```
 
-### Install as an agent skill
+Hidden-mark and metadata cleaning need no model. To rewrite plain text as well, use your own local OpenAI-compatible server:
 
 ```bash
-# Project-local (Grok Build)
-mkdir -p .grok/skills
-ln -sfn "$(pwd)/skills/remove-ai-marks" .grok/skills/remove-ai-marks
-
-# User-global
-mkdir -p ~/.grok/skills
-ln -sfn "$(pwd)/skills/remove-ai-marks" ~/.grok/skills/remove-ai-marks
+wm draft.txt -o draft.cleaned.txt \
+  --rewrite humanize --rewrite-backend openai-compatible \
+  --rewrite-base-url http://127.0.0.1:8000 --rewrite-model YOUR_MODEL_ID
 ```
 
-Invoke with `/remove-ai-marks`, or ask to inspect or clean C2PA, hidden Unicode, visible marks, or statistical text marks.
+Replace the port and model ID with yours. For Ollama, use `--rewrite-backend ollama` and port `11434`. From a clone, replace `wm` with `python3 "$SCRIPTS/clean_file.py"`.
 
 ### Batch mode
 
@@ -128,7 +146,7 @@ macOS, Linux and Windows are supported.
 
 The screen has four parts:
 
-- **The file list** on the left, which also shows progress and results.
+- **The file list** on the left: `→` is the focused row, `[x]` is the one file marked for cleaning. Moving the arrow does not change the mark.
 - **The selected file** on the right: what was found, what was removed, and a
   before/after diff.
 - **One prompt** at the bottom:
@@ -136,24 +154,30 @@ The screen has four parts:
   - a `--flag` adds a `wm` option (any flag `wm` accepts, checked by the
     CLI's own parser; type a bare flag again to turn it off);
   - a `/command` runs a command.
-- **The footer**, which always shows the exact `wm …` command a clean would
-  run.
+- **The footer** prompts you to mark a file, then shows the `wm …` command for that marked file.
 
 | Key | Does |
 | --- | --- |
 | `ctrl+e` | inspect, which writes nothing |
-| `ctrl+r` | clean; each file gets a `NAME.cleaned.EXT` beside it and originals stay untouched |
+| `ctrl+r` | clean **only the marked file**; writes `NAME.cleaned.EXT` beside it, preserving the original |
 | `tab` | next preset: Hidden marks, Hidden marks aggressive, Deep clean (LLM rewrite), Images |
 | `ctrl+p` | every command: model, history, doctor, setup, help |
-| `ctrl+k` / `ctrl+j` | previous / next file |
-| `up` / `down` | prompt history recall and cursor |
+| `up` / `down` | previous / next file when the prompt is empty; cursor/completion while typing |
+| `space` | mark the focused file; marking another replaces the old mark; Space again unmarks it |
+| `ctrl+k` / `ctrl+j` | alternative previous / next file shortcuts |
+| `alt+up` / `alt+down` | prompt history |
+| `enter` | submit the typed path, flag or command; never automatically clean |
 | `esc` | stop after the current file |
+
+**Typical workflow:** ↑/↓ to a file → Space to mark it → Ctrl+E to inspect → Ctrl+R to clean. Ctrl+E inspects the discovered list; Ctrl+R never cleans the whole directory. With no mark, cleaning is refused.
+
+**Your local model:** type `/model` to choose a model reported by a local server, or select **Enter a server**. Use ←/→ to choose Ollama/OpenAI-compatible, Tab to edit the local URL and model ID (Ctrl+U clears a field), then Enter to save. Each user supplies their own server and model; there is no fixed model, Pi authentication, or cloud-model catalog. A local OpenAI-compatible URL ending in `/v1` is normalized to its server root automatically. Select **Deep clean (LLM rewrite)** with Tab or `/preset rewrite` to use it. Markdown/documents normally use container cleaning and skip rewriting; `--as text` explicitly opts into text-body rewriting.
 
 **First run** opens a three-step setup:
 
 1. What the result classes mean.
 2. A scan for a local model server. The scan only contacts `127.0.0.1`: it
-   checks Ollama, LM Studio, llama.cpp and vLLM for their model lists, and
+   checks Ollama, LM Studio, llama.cpp and OpenAI-compatible servers for their model lists, and
    never sends a document.
 3. The default preset.
 
@@ -167,7 +191,7 @@ and never displayed.
 Results are labelled by layer, never by outcome: Verifiable, Best-effort or
 Detection-only. A clean that needs confirmation stops and asks before the
 first write. That covers a remote endpoint, `--in-place`,
-`--strip-semantic-format`, and a long LLM batch.
+`--strip-semantic-format`, and a long LLM run.
 
 The UI is two processes:
 
@@ -178,7 +202,7 @@ The UI is two processes:
   the request through `wm`'s own parser, `plan_work` and `run_clean_item`, so
   it hits every refusal the CLI makes.
 
-`tui/PROTOCOL.md` documents the protocol between them.
+[`tui/PROTOCOL.md`](skills/remove-ai-marks/tui/PROTOCOL.md) documents the protocol between them.
 
 Set `PI_TUI_WRITE_LOG` to a file path, or to an existing directory (a
 timestamped log is created there), to capture the raw ANSI stream the frontend
@@ -238,14 +262,14 @@ Layer B is also reachable from `wm` directly, so a rewrite and the Layer A
 re-scrub happen in one pass over one file or a whole tree:
 
 ```bash
-wm draft.md -o draft.cleaned.md \
+wm draft.txt -o draft.cleaned.txt \
   --rewrite humanize \
   --rewrite-backend openai-compatible \
   --rewrite-base-url http://127.0.0.1:8000 \
   --rewrite-model my-local-model \
   --rewrite-candidates 3 --rewrite-timeout 120
 
-wm draft.md -o draft.cleaned.md --tsapa    # alias for --rewrite tsapa
+wm draft.txt -o draft.cleaned.txt --tsapa    # alias for --rewrite tsapa
 ```
 
 Strengths: `paraphrase`, `backtranslate`, `structural`, `humanize`, `code`,
@@ -478,19 +502,19 @@ Bootstrap any of them with `setup_ctrlregen.sh`, `setup_synthid.sh`, `setup_mark
 
 | Format | Inspect and clean behavior |
 | --- | --- |
-| PNG | `caBX`, text, XMP, and EXIF chunks, plus the optional visible pipeline |
+| PNG | `caBX`, text, XMP, EXIF, and `tIME` chunks, plus the optional visible pipeline |
 | JPEG | APP11/JUMBF and APP metadata, external visible backend supported |
 | WebP | Full RIFF parse: `C2PA` chunk always stripped; `ICCP`/`EXIF`/`XMP ` per mode; RIFF size recompute |
 | BMP | Trailing-byte metadata strip with file-size rewrite |
 | GIF | Comment/XMP/unknown app extensions stripped; NETSCAPE2.0/ICC kept unless marker-hit |
-| TIFF / BigTIFF | In-place IFD patching: XMP/IPTC/Exif/GPS/MakerNote/Photoshop/XP tags dropped, structural tags kept, orphaned payloads zeroed |
-| HEIC, HEIF, AVIF | ISO-BMFF brands (`heic`/`heif`/`avif`/`avio`), JUMBF/C2PA UUID boxes, top-level XMP `uuid` box, direct-file Exif and XMP extents. Unsupported external or idat layouts fail closed |
+| TIFF / BigTIFF | In-place IFD patching: XMP/IPTC/Exif/GPS/MakerNote/Photoshop/XP/SubIFD/Interoperability tags dropped (nested chains zeroed), structural tags kept, orphaned payloads zeroed |
+| HEIC, HEIF, AVIF | ISO-BMFF brands (`heic`/`heif`/`avif`/`avio`), JUMBF/C2PA UUID boxes, marker-bearing `uuid` boxes (top level and inside `meta`), top-level XMP `uuid` box, direct-file Exif and XMP extents. Unsupported external or idat layouts fail closed |
 | SVG | `<metadata>`, XMP, provenance-like comments |
 | PDF | XMP and docinfo via exiftool, then a qpdf structural rewrite (when qpdf is present), then a full-document pypdf clone, otherwise an unchanged copy with a residual warning |
-| DOCX / XLSX / PPTX | OOXML scrub: docProps cleaned, embedded media stripped, customXml dropped with dangling relationships and Content-Type overrides pruned, Layer A on `<w:t>`/`<t>`/`<a:t>` text |
+| DOCX / XLSX / PPTX | OOXML scrub: docProps cleaned, `docProps/thumbnail` previews dropped (rels and Content-Type overrides pruned), embedded media stripped, customXml dropped with dangling relationships and Content-Type overrides pruned, Layer A on `<w:t>`/`<t>`/`<a:t>` text |
 | EPUB | OPF metadata scrub, embedded media strip, XHTML + Layer A clean, manifest pruning, mimetype stored first |
-| ODT | meta.xml and generator-like metadata, marker-carrying non-core parts dropped, Layer A on `<text:p>` |
-| HTML | meta tags, provenance JSON-LD, `data-ai*` attributes |
+| ODT | meta.xml scrubbed unconditionally (generator, template, creator/initial-creator, dates, description/subject, AI user-defined fields), marker-carrying non-core parts dropped, Layer A on `<text:p>` |
+| HTML | meta tags, JSON-LD provenance keys (surgical: the key goes, the payload stays), provenance-phrase comments, `data-ai*` attributes |
 | Markdown | AI-like YAML frontmatter plus a Layer A body pass |
 | Text and code | Layer A, optional Layer B or character perturbation |
 
@@ -613,8 +637,15 @@ The demo calls the same modules as the CLI, it is not a second implementation. L
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements-test.txt
-make check
+make check           # Python lint/format/tests/smoke + independent residual verifier
+make tui-check       # frozen Bun install, TypeScript check + mounted UI tests
+make packaging       # build/install wheel, verify all commands and read-only TUI boot
+# make ci            # all of the above; requires Bun 1.4+
 ```
+
+CI runs Python/workflow checks, a Linux/Windows Python matrix, Linux/macOS TUI tests and a dependency audit in parallel. Independent cleaning and installed-wheel gates depend on those fast checks. **CI gate** fails if any required job fails or is skipped. Weekly/manual `deps-latest.yml` tests the newest dependencies within declared ranges, without provider credentials or document/model calls.
+
+Maintainer-pushed `v*` tags run the same full gates before Trusted Publishing. The wheel installed by the packaging test and its source distribution are promoted unchanged to PyPI, then attached to the GitHub release. No release-please or automatic version/tag creation. `WM_PACKAGING_DIST` exports verified artifacts into a **new** directory; ordinary tests keep their artifacts in temporary storage.
 
 ## Documentation
 
