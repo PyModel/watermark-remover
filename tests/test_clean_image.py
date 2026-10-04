@@ -81,6 +81,22 @@ def test_strip_png_discards_trailing_payload():
     assert cleaned.endswith(_png_chunk(b"IEND", b""))
 
 
+def test_strip_png_removes_time_chunk():
+    sig = b"\x89PNG\r\n\x1a\n"
+    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+    data = (
+        sig
+        + _png_chunk(b"IHDR", ihdr)
+        + _png_chunk(b"tIME", struct.pack(">HBBBBB", 2025, 1, 1, 0, 0, 0))
+        + _png_chunk(b"IDAT", zlib.compress(b"\x00\x00\x00"))
+        + _png_chunk(b"IEND", b"")
+    )
+    cleaned, actions = strip_png(data)
+    assert b"tIME" not in cleaned
+    assert any("tIME" in a.text for a in actions)
+    assert cleaned.endswith(_png_chunk(b"IEND", b""))
+
+
 def test_clean_image_discards_trailing_payload_at_public_entry_point(tmp_path: Path):
     payload = b"HIDDEN-PAYLOAD"
     src = tmp_path / "input.png"

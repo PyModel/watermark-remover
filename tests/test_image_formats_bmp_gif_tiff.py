@@ -393,6 +393,88 @@ def test_tiff_keep_non_ai_metadata():
     assert b"AIGC" not in cleaned
 
 
+def _tiff_with_sub_ifds() -> bytes:
+    """Classic LE TIFF: IFD0 -> SubIFD(330, preview) and ExifIFD(34665) -> InteropIFD(40965).
+
+    Each sub-IFD carries a benign structural tag (320 ColorMap) whose payload is
+    a sentinel so we can assert the whole chain is zeroed, not just the pointer.
+    """
+    sentinel_a = b"PREVIEW-PAYLOAD"
+    sentinel_b = b"INTEROP-PAYLOAD"
+
+    def entry(tag: int, ftype: int, count: int, value: bytes) -> bytes:
+        return struct.pack("<HHI", tag, ftype, count) + value.ljust(4, b"\x00")[:4]
+
+    # Layout: header | IFD0 | subIFD(330) | exifIFD | interopIFD | payloads
+    header = b"II" + struct.pack("<HI", 42, 8)
+    ifd0_off = 8
+    ifd0_count = 4  # 256 width, 273 stripoffset, 330 subifd, 34665 exififd
+    ifd0_end = ifd0_off + 2 + ifd0_count * 12 + 4
+    sub_a_off = ifd0_end
+    sub_a_end = sub_a_off + 2 + 1 * 12 + 4
+    exif_off = sub_a_end
+    exif_end = exif_off + 2 + 1 * 12 + 4
+    sub_b_off = exif_end
+    sub_b_end = sub_b_off + 2 + 1 * 12 + 4
+    off_a = sub_b_end
+    off_b = off_a + len(sentinel_a)
+
+    ifd0 = bytearray(struct.pack("<H", ifd0_count))
+    ifd0 += entry(256, 3, 1, struct.pack("<H", 1))
+    ifd0 += entry(273, 4, 1, struct.pack("<I", off_a + len(sentinel_a) + len(sentinel_b)))
+    ifd0 += entry(330, 4, 1, struct.pack("<I", sub_a_off))
+    ifd0 += entry(34665, 4, 1, struct.pack("<I", exif_off))
+    ifd0 += struct.pack("<I", 0)
+
+    sub_a = bytearray(struct.pack("<H", 1))
+    sub_a += entry(320, 1, len(sentinel_a), struct.pack("<I", off_a))
+    sub_a += struct.pack("<I", 0)
+
+    exif = bytearray(struct.pack("<H", 1))
+    exif += entry(40965, 4, 1, struct.pack("<I", sub_b_off))
+    exif += struct.pack("<I", 0)
+
+    sub_b = bytearray(struct.pack("<H", 1))
+    sub_b += entry(320, 1, len(sentinel_b), struct.pack("<I", off_b))
+    sub_b += struct.pack("<I", 0)
+
+    return (
+        header + bytes(ifd0) + bytes(sub_a) + bytes(exif) + bytes(sub_b) + sentinel_a + sentinel_b
+    )
+
+
+def test_tiff_strip_zeroes_subifd_previews_and_interop_ifd():
+    data = _tiff_with_sub_ifds()
+    cleaned, actions = strip_tiff(data)
+    assert any("drop TIFF tag 330" in a.text for a in actions)
+    assert any("drop TIFF tag 40965" in a.text for a in actions)
+    assert b"PREVIEW-PAYLOAD" not in cleaned
+    assert b"INTEROP-PAYLOAD" not in cleaned
+    assert detect_format(cleaned) == "tiff"
+    has_c2pa, has_ai, _findings, _notes = inspect_tiff(cleaned)
+    assert has_c2pa is False
+    assert has_ai is False
+
+
+def test_tiff_selective_mode_keeps_benign_subifd():
+    data = _tiff_with_sub_ifds()
+    cleaned, actions = strip_tiff(data, strip_all_metadata=False)
+    assert b"PREVIEW-PAYLOAD" in cleaned
+    assert b"INTEROP-PAYLOAD" in cleaned  # kept ExifIFD chain stays reachable
+    assert not any("drop TIFF tag 330" in a.text for a in actions)
+
+
+def test_tiff_truncated_subifd_entry_does_not_crash():
+    """A TIFF cut mid-entry (incl. a tag-330 pointer field) must never raise
+    from strip_tiff — malformed pointers are treated as absent, not fatal."""
+    tagged = _tiff_with_sub_ifds()
+    ifd0_end = 8 + 2 + 4 * 12
+    truncated_pointer = tagged[: ifd0_end - 8] + b"\x4a\x01\x04\x00\x01\x00\x00\x00"
+    for payload in (truncated_pointer, tagged[: ifd0_end - 2]):
+        cleaned, _actions = strip_tiff(payload)
+        assert detect_format(cleaned) == "tiff"
+
+
 def test_tiff_roundtrip(tmp_path: Path):
     data, _off, _strip = _minimal_tiff()
     src = tmp_path / "photo.tiff"

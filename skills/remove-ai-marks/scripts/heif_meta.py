@@ -265,6 +265,33 @@ def _xmp_uuid_boxes(data: bytes) -> list[Box]:
     return out
 
 
+def _marker_uuid_boxes(data: bytes) -> list[Box]:
+    """Non-XMP `uuid` boxes carrying AI/provenance markers.
+
+    The single source of truth for this box set: ``inspect_heif`` and
+    ``neutralize_heif`` both call it, so inspection can never flag less (or
+    more) than clean neutralizes — no detect/clean asymmetry by construction.
+    """
+    out: list[Box] = []
+
+    def _candidate(box: Box) -> bool:
+        if box.type != b"uuid":
+            return False
+        payload = data[box.payload_start : box.end]
+        if payload.startswith(XMP_UUID):
+            return False
+        return bool(_contains_any(payload, AI_META_HINTS + C2PA_MARKERS))
+
+    for box in _iter_boxes(data, 0, len(data)):
+        if _candidate(box):
+            out.append(box)
+        if box.type == b"meta":
+            for child in _iter_boxes(data, box.payload_start + 4, box.end):
+                if _candidate(child):
+                    out.append(child)
+    return out
+
+
 def _item_extent_bytes(
     data: bytes,
     items: dict[int, tuple[bytes, str, str]],
@@ -345,16 +372,14 @@ def inspect_heif(data: bytes) -> tuple[bool, bool, list[str], list[str], dict[st
         else:
             notes.append(f"XMP uuid box @ {box.header_start}")
 
-    for box in _iter_boxes(data, 0, len(data)):
-        if box.type != b"uuid":
-            continue
+    # Non-XMP `uuid` boxes carrying markers, top level AND inside `meta` —
+    # the exact set clean neutralizes (shared helper: inspect can never flag
+    # less than clean removes, nor vice versa).
+    for box in _marker_uuid_boxes(data):
         payload = data[box.payload_start : box.end]
-        if payload.startswith(XMP_UUID):
-            continue
         hits = _contains_any(payload, AI_META_HINTS + C2PA_MARKERS)
-        if hits:
-            has_ai = True
-            findings.append(f"uuid box @ {box.header_start}: {', '.join(hits[:8])}")
+        has_ai = True
+        findings.append(f"uuid box @ {box.header_start}: {', '.join(hits[:8])}")
 
     try:
         items, extents = _provenance_items(data)
@@ -438,6 +463,19 @@ def neutralize_heif(data: bytes, *, strip_all_metadata: bool = True) -> tuple[by
             )
             if hits:
                 actions.append(act.neutralize_tokens("XMP uuid box", hits[:8]))
+
+    # 1c. Neutralize any other `uuid` box carrying AI/provenance markers
+    # (mirrors inspect, so a flagged box is never left intact by clean).
+    for box in _marker_uuid_boxes(bytes(buf)):
+        if strip_all_metadata:
+            buf[box.header_start + 4 : box.header_start + 8] = b"free"
+            for i in range(box.payload_start, box.end):
+                buf[i] = 0
+            actions.append(act.neutralize_box("uuid", box.end - box.payload_start))
+        else:
+            hits = _neutralize_runs(buf, box.payload_start, box.end - box.payload_start, 0x00)
+            if hits:
+                actions.append(act.neutralize_tokens("uuid box", hits[:8]))
 
     # 2. Exif / XMP item extents.
     items, extents = _provenance_items(bytes(buf))

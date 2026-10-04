@@ -643,6 +643,12 @@ def strip_png(data: bytes, *, strip_all_text: bool = True) -> tuple[bytes, list[
             if strip_all_text or _text_chunk_is_ai(bytes(payload), ctype):
                 drop = True
                 actions.append(act.drop_png_chunk(name))
+        elif ctype == b"tIME":
+            # Last-modification timestamp: provenance metadata, not image
+            # data. Dropped under the same strip-all switch as text chunks.
+            if strip_all_text:
+                drop = True
+                actions.append(act.drop_png_chunk(name))
         elif _contains_any(ctype + bytes(payload), C2PA_MARKERS) and ctype not in (
             b"IHDR",
             b"IDAT",
@@ -1177,7 +1183,24 @@ def strip_gif(data: bytes, *, strip_all_metadata: bool = True) -> tuple[bytes, l
 # ---------------------------------------------------------------------------
 
 
-_TIFF_TYPE_SIZES = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8, 11: 4, 12: 8}
+_TIFF_TYPE_SIZES = {
+    1: 1,
+    2: 1,
+    3: 2,
+    4: 4,
+    5: 8,
+    6: 1,
+    7: 1,
+    8: 2,
+    9: 4,
+    10: 8,
+    11: 4,
+    12: 8,
+    13: 4,
+    16: 8,
+    17: 8,
+    18: 8,
+}
 
 # Provenance / descriptive metadata tags stripped when cleaning TIFF.
 _TIFF_META_TAG_NAMES = {
@@ -1201,9 +1224,35 @@ _TIFF_META_TAG_NAMES = {
     34665: "ExifIFD",
     34853: "GPSInfo",
     37500: "MakerNote",
+    330: "SubIFD",
+    40965: "InteroperabilityIFD",
 }
 
 _TIFF_DROP_TAGS = frozenset(_TIFF_META_TAG_NAMES)
+
+#: Tags whose value is a LONG offset to a nested IFD. ONE copy — parse,
+#: inspect labels, strip, and the reachability/zero-protection walks must all
+#: agree on this set, or a kept SubIFD chain can be zeroed by another drop.
+_TIFF_SUBIFD_TAGS = (34665, 34853, 330, 40965)
+
+
+def _tiff_subifd_ptr(data: bytes, off_fmt: str, ent: dict[str, Any]) -> tuple[int, ...]:
+    """All sub-IFD offsets, decoded by value type rather than file offset size."""
+    if ent["type"] not in (4, 13, 16, 18):
+        return ()
+    count = ent["count"]
+    size = _TIFF_TYPE_SIZES[ent["type"]]
+    start = ent["value_offset"]
+    if start is not None and (start < 0 or start + count * size > len(data)):
+        return ()
+    if count > MAX_TIFF_IFDS:
+        raise ValueError("TIFF sub-IFD pointer count exceeds safety limit")
+    value = _tiff_entry_payload(data, ent)
+    if value is None or len(value) != count * size:
+        return ()
+    fmt = off_fmt[0] + ("I" if size == 4 else "Q")
+    return tuple(ptr for (ptr,) in struct.iter_unpack(fmt, value) if ptr)
+
 
 # Structural tags that must survive even when their payload looks marker-ish.
 _TIFF_KEEP_TAGS = frozenset(
@@ -1253,7 +1302,6 @@ _TIFF_KEEP_TAGS = frozenset(
         327,
         328,
         329,
-        330,
         331,
         332,
         333,
@@ -1338,7 +1386,10 @@ def _parse_tiff_ifds(data: bytes) -> tuple[str, bool, dict[int, dict[str, Any]]]
     todo = [first]
     while todo and len(ifds) < MAX_TIFF_IFDS:
         off = todo.pop()
-        if off in seen or off + count_len > n:
+        # An IFD can never start inside the file header, and a pointer into
+        # it (malformed sub-IFD entry) must not be trusted: parsing the header
+        # as an IFD would later let the in-place rewrite clobber the magic.
+        if off < header_size or off in seen or off + count_len > n:
             continue
         seen.add(off)
         count = struct.unpack(count_fmt, data[off : off + count_len])[0]
@@ -1380,10 +1431,8 @@ def _parse_tiff_ifds(data: bytes) -> tuple[str, bool, dict[int, dict[str, Any]]]
         if next_ptr:
             todo.append(next_ptr)
         for ent in entries:
-            if ent["tag"] in (34665, 34853, 40965):
-                ptr = struct.unpack(off_fmt, ent["value"][:off_len])[0]
-                if ptr:
-                    todo.append(ptr)
+            if ent["tag"] in _TIFF_SUBIFD_TAGS:
+                todo.extend(_tiff_subifd_ptr(data, off_fmt, ent))
     return bo, bigtiff, ifds
 
 
@@ -1421,7 +1470,7 @@ def inspect_tiff(data: bytes) -> MetadataScan:
                 findings.append(f"TIFF tag {tag}: {', '.join(hits[:6])}")
             name = _TIFF_META_TAG_NAMES.get(tag)
             if name:
-                label = "sub-IFD" if tag in (34665, 34853, 40965) else "tag"
+                label = "sub-IFD" if tag in _TIFF_SUBIFD_TAGS else "tag"
                 notes.append(f"TIFF {label} {tag} ({name}) present")
     whole = _contains_any(data, C2PA_MARKERS)
     if whole and not has_c2pa:
@@ -1436,6 +1485,7 @@ def _collect_tiff_sub_ifd_drops(
     off_fmt: str,
     off_len: int,
     ifds: dict[int, dict[str, Any]],
+    data: bytes,
     data_len: int,
     ptr: int,
     drop_ranges: list[tuple[int, int]],
@@ -1453,11 +1503,44 @@ def _collect_tiff_sub_ifd_drops(
             vo, vs = ent["value_offset"], ent["byte_size"]
             if vo + vs <= data_len:
                 drop_ranges.append((vo, vo + vs))
+        # Recurse into nested sub-IFD chains (InteropIFD inside ExifIFD, …) so
+        # the whole referenced block set is zeroed, not just the pointer entry.
+        if ent["tag"] in _TIFF_SUBIFD_TAGS:
+            for nested in _tiff_subifd_ptr(data, off_fmt, ent):
+                _collect_tiff_sub_ifd_drops(
+                    off_fmt,
+                    off_len,
+                    ifds,
+                    data,
+                    data_len,
+                    nested,
+                    drop_ranges,
+                    drop_ifd_ranges,
+                    visited,
+                )
+    if sub["next"]:
+        _collect_tiff_sub_ifd_drops(
+            off_fmt,
+            off_len,
+            ifds,
+            data,
+            data_len,
+            sub["next"],
+            drop_ranges,
+            drop_ifd_ranges,
+            visited,
+        )
 
 
 def strip_tiff(data: bytes, *, strip_all_metadata: bool = True) -> tuple[bytes, list[Action]]:
     """Drop TIFF metadata tags (classic or BigTIFF) without moving referenced data."""
-    bo, bigtiff, ifds = _parse_tiff_ifds(data)
+    try:
+        bo, bigtiff, ifds = _parse_tiff_ifds(data)
+    except ValueError as error:
+        # inspect_tiff reports "not a valid TIFF" for the same bytes; a
+        # malformed structure (e.g. a sub-IFD pointer count over the safety
+        # limit) must degrade the same way here, not hard-error the pipeline.
+        return data, [act.nothing_removed("tiff", f"not a valid TIFF: {error}")]
     if not ifds:
         raise ValueError("not a valid TIFF (no image file directories)")
     n = len(data)
@@ -1476,19 +1559,19 @@ def strip_tiff(data: bytes, *, strip_all_metadata: bool = True) -> tuple[bytes, 
             tag = ent["tag"]
             payload = _tiff_entry_payload(data, ent)
             marker_hit = bool(_contains_any(payload or b"", AI_META_HINTS + C2PA_MARKERS))
-            if tag in (34665, 34853):
-                ptr = struct.unpack(off_fmt, ent["value"][:off_len])[0]
-                sub = ifds.get(ptr)
-                if sub is not None:
-                    sub_blob = data[ptr : min(ptr + sub["block_len"] + off_len, n)]
-                    marker_hit = marker_hit or bool(
-                        _contains_any(sub_blob, AI_META_HINTS + C2PA_MARKERS)
-                    )
-                    for sent in sub["entries"]:
-                        s_payload = _tiff_entry_payload(data, sent)
-                        if _contains_any(s_payload or b"", AI_META_HINTS + C2PA_MARKERS):
-                            marker_hit = True
-                            break
+            if tag in _TIFF_SUBIFD_TAGS:
+                for ptr in _tiff_subifd_ptr(data, off_fmt, ent):
+                    sub = ifds.get(ptr)
+                    if sub is not None:
+                        sub_blob = data[ptr : min(ptr + sub["block_len"] + off_len, n)]
+                        marker_hit = marker_hit or bool(
+                            _contains_any(sub_blob, AI_META_HINTS + C2PA_MARKERS)
+                        )
+                        for sent in sub["entries"]:
+                            s_payload = _tiff_entry_payload(data, sent)
+                            if _contains_any(s_payload or b"", AI_META_HINTS + C2PA_MARKERS):
+                                marker_hit = True
+                                break
             drop = False
             if tag in _TIFF_DROP_TAGS:
                 drop = strip_all_metadata or marker_hit
@@ -1499,12 +1582,12 @@ def strip_tiff(data: bytes, *, strip_all_metadata: bool = True) -> tuple[bytes, 
                 continue
             name = _TIFF_META_TAG_NAMES.get(tag)
             actions.append(act.drop_tiff_tag(tag, name))
-            if tag in (34665, 34853):
-                ptr = struct.unpack(off_fmt, ent["value"][:off_len])[0]
-                _collect_tiff_sub_ifd_drops(
-                    off_fmt, off_len, ifds, n, ptr, drop_ranges, drop_ifd_ranges, set()
-                )
-            elif ent["value_offset"] is not None and ent["value_offset"] + ent["byte_size"] <= n:
+            if tag in _TIFF_SUBIFD_TAGS:
+                for ptr in _tiff_subifd_ptr(data, off_fmt, ent):
+                    _collect_tiff_sub_ifd_drops(
+                        off_fmt, off_len, ifds, data, n, ptr, drop_ranges, drop_ifd_ranges, set()
+                    )
+            if ent["value_offset"] is not None and ent["value_offset"] + ent["byte_size"] <= n:
                 drop_ranges.append((ent["value_offset"], ent["value_offset"] + ent["byte_size"]))
         kept[off] = keep_here
 
@@ -1516,8 +1599,9 @@ def strip_tiff(data: bytes, *, strip_all_metadata: bool = True) -> tuple[bytes, 
             return
         reachable.add(off)
         for ent in kept.get(off, []):
-            if ent["tag"] in (34665, 34853, 40965):
-                _mark_reachable(struct.unpack(off_fmt, ent["value"][:off_len])[0])
+            if ent["tag"] in _TIFF_SUBIFD_TAGS:
+                for ptr in _tiff_subifd_ptr(data, off_fmt, ent):
+                    _mark_reachable(ptr)
         if ifds[off]["next"]:
             _mark_reachable(ifds[off]["next"])
 
@@ -1533,17 +1617,17 @@ def strip_tiff(data: bytes, *, strip_all_metadata: bool = True) -> tuple[bytes, 
         for ent in kept.get(off, []):
             if ent["value_offset"] is not None and ent["value_offset"] + ent["byte_size"] <= n:
                 referenced.append((ent["value_offset"], ent["value_offset"] + ent["byte_size"]))
-            if ent["tag"] in (34665, 34853, 40965):
-                ptr = struct.unpack(off_fmt, ent["value"][:off_len])[0]
-                sub = ifds.get(ptr)
-                if sub is not None:
-                    referenced.append((ptr, min(ptr + sub["block_len"] + off_len, n)))
-                    for sent in sub["entries"]:
-                        if sent["value_offset"] is not None:
-                            vo = sent["value_offset"]
-                            vs = sent["byte_size"]
-                            if vo + vs <= n:
-                                referenced.append((vo, vo + vs))
+            if ent["tag"] in _TIFF_SUBIFD_TAGS:
+                for ptr in _tiff_subifd_ptr(data, off_fmt, ent):
+                    sub = ifds.get(ptr)
+                    if sub is not None:
+                        referenced.append((ptr, min(ptr + sub["block_len"] + off_len, n)))
+                        for sent in sub["entries"]:
+                            if sent["value_offset"] is not None:
+                                vo = sent["value_offset"]
+                                vs = sent["byte_size"]
+                                if vo + vs <= n:
+                                    referenced.append((vo, vo + vs))
 
     for r_start, r_end in drop_ranges:
         if r_start >= r_end:
@@ -1573,6 +1657,8 @@ def strip_tiff(data: bytes, *, strip_all_metadata: bool = True) -> tuple[bytes, 
     # entries removed, block zero-padded to its original length.
     out = bytearray(data)
     for off, ifd in sorted(ifds.items()):
+        if off not in reachable:
+            continue  # Do not reconstruct the orphan directories we just zeroed.
         block_start = off
         block_len = ifd["block_len"]
         block = bytearray(b"\x00" * block_len)
