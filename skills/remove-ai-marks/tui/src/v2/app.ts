@@ -1,10 +1,11 @@
-import { isViewportTUI, matchesKey, type Component, type Editor, type TUI } from "@earendil-works/pi-tui"
+import { isViewportTUI, matchesKey, type Component, type Editor, type OverlayHandle, type TUI } from "@earendil-works/pi-tui"
 import { runCommand } from "./commands"
 import { buildLayout, SPINNER } from "./components/layout"
 import { createEditor } from "./components/prompt"
+import { syncDialogOverlays } from "./dialogs"
 import { parsePrompt } from "./prompt"
 import type { BridgeLike } from "./protocol"
-import { createApp, type AppController } from "./store"
+import { createApp, type AppController, type Dialog } from "./store"
 
 export interface MountedApp {
   ctl: AppController
@@ -22,7 +23,18 @@ export interface MountedApp {
  */
 export function mountApp(tui: TUI, bridge: BridgeLike, onQuit: () => void): MountedApp {
   if (!isViewportTUI(tui)) throw new Error("wm-tui requires a fullscreen viewport")
-  const ctl = createApp(bridge, onQuit, () => tui.requestRender())
+  const handles = new Map<Dialog, OverlayHandle>()
+  let alive = true
+  let current: AppController | undefined
+  const ctl = createApp(bridge, onQuit, () => {
+    if (!alive || !current) return
+    syncDialogOverlays(tui, current, handles, {
+      copy: (text) => copyOsc52(tui, text),
+      rows: () => tui.terminal.rows,
+    })
+    tui.requestRender()
+  })
+  current = ctl
   const editor = createEditor(tui)
   editor.onSubmit = (text) => submitPrompt(ctl, editor, text)
   let frame = 0
@@ -35,15 +47,27 @@ export function mountApp(tui: TUI, bridge: BridgeLike, onQuit: () => void): Moun
   const root = buildLayout(ctl, editor, () => frame)
   tui.setLayoutRoot(root)
   tui.setFocus(editor)
-  const unsubscribe = tui.addInputListener((data) => routeKeys(data, ctl, editor))
+  const unsubscribe = tui.addInputListener((data) => routeKeys(data, ctl, editor, tui))
   return {
     ctl,
     editor,
     root,
     dispose() {
+      alive = false
       clearInterval(timer)
       unsubscribe()
+      for (const handle of handles.values()) handle.hide()
+      handles.clear()
     },
+  }
+}
+
+function copyOsc52(tui: TUI, text: string): boolean {
+  try {
+    tui.terminal.write(`\x1b]52;c;${Buffer.from(text, "utf8").toString("base64")}\x07`)
+    return true
+  } catch {
+    return false
   }
 }
 
@@ -57,12 +81,14 @@ function submitPrompt(ctl: AppController, editor: Editor, text: string): void {
   else runCommand(ctl, parsed.name, parsed.arg)
 }
 
-function routeKeys(data: string, ctl: AppController, editor: Editor) {
+function routeKeys(data: string, ctl: AppController, editor: Editor, tui: TUI) {
   if (matchesKey(data, "ctrl+c") || matchesKey(data, "ctrl+d")) {
     ctl.quit()
     return { consume: true }
   }
-  if (ctl.app.dialogs.length > 0) return
+  // Overlay handleInput runs after this listener. Do not consume: arrows,
+  // enter, escape, and type-to-filter belong to the focused dialog.
+  if (ctl.app.dialogs.length > 0 || tui.hasOverlay()) return
   if (matchesKey(data, "ctrl+j")) {
     ctl.select(ctl.app.selected + 1)
     return { consume: true }
