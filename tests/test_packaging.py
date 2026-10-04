@@ -5,8 +5,9 @@ Execution order step 4): "MARKED skip-unless-env WM_PACKAGING_E2E=1 — CI-fast
 default, explicit e2e on demand". The default suite collects this file and
 skips it. ``WM_PACKAGING_E2E=1`` runs the release gate.
 
-Build and verify outputs stay under the to-auto state tmp directory, never in
-the worktree. Servers started here are killed by the recorded PID only.
+Build and verify outputs use pytest temporary storage (WM_PACKAGING_TMP can
+choose its parent). Set WM_PACKAGING_DIST to export only successfully verified
+artifacts into a new directory for CI publication. Servers are killed by recorded PID only.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -30,12 +32,20 @@ pytestmark = pytest.mark.skipif(
 )
 
 REPO = Path(__file__).resolve().parents[1]
-STATE_TMP = Path(
-    os.environ.get(
-        "WM_PACKAGING_TMP",
-        "/Users/panda/.local/state/to-auto/9d8da70d5fcb4e0f/tmp/ship-watermark-remover-as-a-pip-installa",
-    )
-)
+
+
+@pytest.fixture
+def packaging_output(tmp_path):
+    parent = Path(os.environ.get("WM_PACKAGING_TMP", str(tmp_path)))
+    parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="wm-packaging-", dir=parent) as directory:
+        output = Path(directory)
+        try:
+            yield output
+        finally:
+            _make_writable(output)
+
+
 ENTRYPOINTS = ("wm", "wm-tui", "wm-serve", "wm-audit-dir", "wm-audit-site")
 PRINT_ENV_KEYS = {
     "WM_TUI_PYTHON",
@@ -180,7 +190,7 @@ def _assert_release_sources(capfd: pytest.CaptureFixture[str]) -> None:
     assert "PI_TUI_WRITE_LOG" in readme
     assert "--frozen-lockfile --production" in readme
     assert "three runtime packages" in readme
-    assert "`wm`, `wm-tui`, `wm-serve`, `wm-audit-dir`, `wm-audit-site`." in readme
+    assert all(f"`{name}`" in readme for name in ENTRYPOINTS)
     _emit(capfd, "readme: no OpenTUI; pi-tui + three-package production install + PI_TUI_WRITE_LOG")
 
 
@@ -224,7 +234,9 @@ def _write_helpers(out: Path, real_bun: str) -> tuple[Path, Path]:
     return bun_wrap, tee
 
 
-def test_wheel_install_exercises_every_entrypoint(capfd: pytest.CaptureFixture[str]) -> None:
+def test_wheel_install_exercises_every_entrypoint(
+    capfd: pytest.CaptureFixture[str], packaging_output: Path
+) -> None:
     """Build, install the wheel, and exercise every console script plus first-run staging."""
     assert os.name != "nt", "the read-only staging check uses POSIX permissions"
     assert not (hasattr(os, "geteuid") and os.geteuid() == 0), "chmod a-w does not bind root"
@@ -233,11 +245,7 @@ def test_wheel_install_exercises_every_entrypoint(capfd: pytest.CaptureFixture[s
 
     _assert_release_sources(capfd)
 
-    out = STATE_TMP / "e2e"
-    _make_writable(out)
-    if out.exists():
-        shutil.rmtree(out)
-    out.mkdir(parents=True)
+    out = packaging_output
     dist = out / "dist"
     work = out / "work"
     work.mkdir()
@@ -395,7 +403,7 @@ def test_wheel_install_exercises_every_entrypoint(capfd: pytest.CaptureFixture[s
     _emit(capfd, f"bun argv: {argv_log.strip()}")
     assert "install --frozen-lockfile --production" in argv_log
     installed_names = sorted(
-        path.name for path in (run_dir / "node_modules").iterdir() if path.name != ".bin"
+        path.name for path in (run_dir / "node_modules").iterdir() if not path.name.startswith(".")
     )
     _emit(capfd, "runtime node_modules: " + " ".join(installed_names))
     modules = run_dir / "node_modules"
@@ -488,3 +496,12 @@ def test_wheel_install_exercises_every_entrypoint(capfd: pytest.CaptureFixture[s
     site_help = _run(capfd, [str(venv / "bin" / "wm-audit-site"), "--help"], env=fresh_env)
     assert site_help.returncode == 0, site_help.stderr
     _emit(capfd, "audit dry invocation: wm-audit-dir tests/fixtures; wm-audit-site --help")
+
+    # Promote the very wheel installed above, not a second untested rebuild.
+    # Refuse an existing directory so stale distributions cannot be published.
+    if export := os.environ.get("WM_PACKAGING_DIST"):
+        destination = Path(export).resolve()
+        destination.mkdir(parents=True, exist_ok=False)
+        for artifact in (*wheels, *sdists):
+            shutil.copy2(artifact, destination / artifact.name)
+        _emit(capfd, f"verified distributions exported to {destination}")

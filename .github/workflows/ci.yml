@@ -4,89 +4,145 @@ on:
   push:
     branches: [main]
   pull_request:
-  # Merge-queue builds report required checks through this event; without it
-  # every queued PR fails protection with "ci-green is expected".
   merge_group:
+  workflow_call:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  lint:
+    name: Python and workflow checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements-test.txt
+      - run: make lint format-check compile
+      - name: Install and run actionlint
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/actionlint"
+          gh release download v1.7.7 --repo rhysd/actionlint \
+            --pattern actionlint_1.7.7_linux_amd64.tar.gz \
+            --pattern actionlint_1.7.7_checksums.txt \
+            --dir "$RUNNER_TEMP/actionlint"
+          cd "$RUNNER_TEMP/actionlint"
+          grep ' actionlint_1.7.7_linux_amd64.tar.gz$' actionlint_1.7.7_checksums.txt | sha256sum -c -
+          tar -xzf actionlint_1.7.7_linux_amd64.tar.gz actionlint
+          cd "$GITHUB_WORKSPACE"
+          "$RUNNER_TEMP/actionlint/actionlint"
+
   test:
+    name: Python (${{ matrix.os }}, ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            python-version: "3.10"
-          - os: ubuntu-latest
-            python-version: "3.12"
-          - os: ubuntu-latest
-            python-version: "3.14"
-          # Windows leg (pwsh smoke + .ps1 validation live here).
-          - os: windows-latest
-            python-version: "3.12"
-    runs-on: ${{ matrix.os }}
+          - {os: ubuntu-latest, python: '3.10'}
+          - {os: ubuntu-latest, python: '3.12'}
+          - {os: ubuntu-latest, python: '3.14'}
+          - {os: windows-latest, python: '3.12'}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
-          cache: pip
+          python-version: ${{ matrix.python }}
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libimage-exiftool-perl qpdf
+      - run: python -m pip install -r requirements-test.txt
+      - run: python -m pytest -q
+      - name: Validate OpenAPI specification
+        run: >-
+          python -c "from pathlib import Path; import sys;
+          sys.path.insert(0, str(Path('skills/remove-ai-marks/scripts').resolve()));
+          from server import openapi_spec; from openapi_spec_validator import validate;
+          validate(openapi_spec())"
 
-      - name: Install test dependencies
-        run: python -m pip install --upgrade pip -r requirements-test.txt
+  tui:
+    name: TUI (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.2'
+      - run: make tui-check
 
-      - name: Compile
-        run: python -m compileall -q skills/remove-ai-marks/scripts demo.py
-
-      - name: Test
-        run: python -m pytest -q
-
-      - name: Validate OpenAPI spec (module call, no live server)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          python -c "import sys; sys.path.insert(0, 'skills/remove-ai-marks/scripts'); import server; from openapi_spec_validator import validate; validate(server.openapi_spec())"
-
-      - name: Full check (lint, format, compile, test, smoke)
-        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.14'
-        run: make check PYTHON=python
-
-      - name: Audit dependencies (pip-audit)
-        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.14'
-        run: |
-          python -m pip install pip-audit==2.10.1
-          python -m pip_audit -r requirements-test.txt \
-            -r skills/remove-ai-marks/scripts/requirements-synthid-scorer.txt
-
-      - name: Smoke (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          python skills/remove-ai-marks/scripts/clean_text.py tests/fixtures/sample_watermarked.txt -o "$env:TEMP/wm.cleaned.txt" --stats &&
-          python skills/remove-ai-marks/scripts/rewrite_text.py tests/fixtures/sample_watermarked.txt --backend print-prompt > $null &&
-          python skills/remove-ai-marks/scripts/clean_file.py tests/fixtures/sample_ai.md -o "$env:TEMP/sample_ai.cleaned.md" &&
-          python skills/remove-ai-marks/scripts/clean_file.py tests/fixtures/sample_ai.html -o "$env:TEMP/sample_ai.cleaned.html" &&
-          python skills/remove-ai-marks/scripts/clean_file.py tests/fixtures/sample_meta.svg -o "$env:TEMP/sample_meta.cleaned.svg"
-
-      - name: Validate setup .ps1 scripts
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          $files = @('skills/remove-ai-marks/scripts/setup_ctrlregen.ps1', 'skills/remove-ai-marks/scripts/setup_synthid.ps1')
-          foreach ($f in $files) {
-            $tokens = $null; $errors = $null
-            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f), [ref]$tokens, [ref]$errors) | Out-Null
-            if ($errors.Count) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }
-          }
-          $ps1 = Get-Content skills/remove-ai-marks/scripts/setup_ctrlregen.ps1 -Raw
-          if ($ps1 -notmatch 'cuda\.is_available\(\)') { Write-Error 'post-install CUDA verification missing'; exit 1 }
-
-  # Single stable context for branch protection; the matrix can change freely.
-  ci-green:
-    if: always()
-    needs: [test]
+  verify:
+    name: Independent cleaning verification
+    needs: [lint, test, tui]
     runs-on: ubuntu-latest
     steps:
-      - name: Check matrix result
-        run: '[ "${{ needs.test.result }}" = "success" ]'
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements-test.txt
+      - run: make smoke verify
+
+  packaging:
+    name: Installed-wheel gate
+    needs: [lint, test, tui]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.2'
+      - run: python -m pip install -r requirements-test.txt
+      - name: Build, install and verify release artifacts
+        env:
+          WM_PACKAGING_DIST: dist
+        run: make packaging
+      - run: python -m pip install twine && python -m twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-dist
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements-test.txt pip-audit
+      - run: python -m pip_audit
+
+  ci:
+    name: CI gate
+    if: always()
+    needs: [lint, test, tui, verify, packaging, audit]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every gate to pass
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python - <<'PY'
+          import json, os, sys
+          jobs = json.loads(os.environ['NEEDS_JSON'])
+          failed = {name: job['result'] for name, job in jobs.items() if job['result'] != 'success'}
+          print(failed or 'All gates passed')
+          sys.exit(bool(failed))
+          PY
