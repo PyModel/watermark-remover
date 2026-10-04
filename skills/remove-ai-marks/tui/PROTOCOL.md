@@ -196,8 +196,9 @@ one per affected line, and is empty for anything that is not read as text:
 - In `text`, each invisible or format codepoint is replaced by `◆`, which takes
   one column. An excerpt is at most 100 columns and is centred on its first
   mark. `…` marks the edge where it was cut.
-- Each entry in `marks` is `[start, end, short_name]`. The columns count into
-  `text`, and `end` is exclusive.
+- Each entry in `marks` is `[start, end, short_name]`, and `end` is exclusive.
+  Offsets are Unicode code-point indices into the emitted `text` (not UTF-16
+  code units and not bytes); a non-BMP character such as U+1F600 counts as one.
 - Offsets come from `inspect_asset`'s `layer_a_hits[*].sample_offsets`.
 - `suspicious` is true when the raw report says so, or when
   `counts.hidden > 0`.

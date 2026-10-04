@@ -807,6 +807,17 @@ def test_the_diff_shows_invisible_characters_and_is_capped():
 
 RLO = "\u202e"
 
+#: JSON a non-Python consumer can read without running this module.
+#: U+1F600 is one code point and two UTF-16 units, so the index units disagree.
+ASTRAL_REVEAL_FIXTURE_JSON = """
+{
+  "text": "😀x◆y",
+  "marks": [[2, 3, "ZWSP"]],
+  "names": ["ZWSP"]
+}
+"""
+ASTRAL_REVEAL_FIXTURE: dict[str, Any] = json.loads(ASTRAL_REVEAL_FIXTURE_JSON)
+
 
 def _reveal(path: Path) -> list[dict]:
     from inspect_file import inspect_asset
@@ -821,6 +832,46 @@ def test_reveal_maps_offsets_to_the_right_columns(tmp_path):
         {"line": 1, "text": "Hello\u25c6 world", "marks": [[5, 6, "ZWSP"]]},
         {"line": 2, "text": "second \u25c6line", "marks": [[7, 8, "RLO"]]},
     ]
+
+
+def test_reveal_offsets_are_code_points_when_a_non_bmp_character_precedes_the_mark(
+    tmp_path,
+):
+    """A real inspect emits code-point indices of the excerpt, not UTF-16 units."""
+    source = tmp_path / "astral.txt"
+    source.write_text(f"\U0001f600x{ZWSP}y\n", encoding="utf-8")
+    raw = source.read_text(encoding="utf-8")
+    assert ord(raw[0]) > 0xFFFF and raw.index(ZWSP) > 0
+    fixture = ASTRAL_REVEAL_FIXTURE
+    assert json.loads(ASTRAL_REVEAL_FIXTURE_JSON) == fixture
+    assert set(fixture) == {"text", "marks", "names"}
+    env = bridge_env(tmp_path, WM_TUI_CWD=str(tmp_path))
+    bridge = BridgeProcess(tmp_path, env)
+    try:
+        assert bridge.next_frame()["event"] == "ready"
+        frames = bridge.request(1, "inspect", {"state": state([source])})
+        assert frames[0]["event"] == "inspected"
+        [excerpt] = frames[0]["data"]["reveal"]
+        assert response(frames)["result"]["files"][0]["reveal"] == [excerpt]
+        text, marks = excerpt["text"], excerpt["marks"]
+        assert text == fixture["text"]
+        assert marks == fixture["marks"]
+        assert [name for _, _, name in marks] == fixture["names"]
+        for start, end, name in marks:
+            assert text[start:end] == "\u25c6" and name == "ZWSP"
+            assert start == len(text[:start]) and end == len(text[:end])
+            assert len(text[:start].encode("utf-16-le")) // 2 != start
+        assert bridge.close() == 0
+    finally:
+        bridge.close()
+
+
+def test_the_protocol_defines_reveal_offsets_as_unicode_code_point_indices():
+    protocol = (ROOT / "skills/remove-ai-marks/tui/PROTOCOL.md").read_text(encoding="utf-8")
+    _, _, reveal = protocol.partition("`reveal` shows")
+    reveal, _, _ = reveal.partition("### `clean`")
+    assert reveal
+    assert "Unicode code-point indices" in reveal
 
 
 def test_reveal_merges_marks_on_one_line_and_reads_markdown(tmp_path):
