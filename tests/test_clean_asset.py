@@ -522,3 +522,11 @@ def test_clean_plans_are_immutable() -> None:
     clean_plan = CleanPlan()
     with pytest.raises(FrozenInstanceError):
         clean_plan.forced_kind = "image"
+
+
+def test_clean_asset_refuses_unknown_binary(tmp_path: Path) -> None:
+    """Unknown binaries are refused, never mangled as text (router contract)."""
+    blob = tmp_path / "mystery"
+    blob.write_bytes(b"\x00\x01\x02\x03" * 8)
+    with pytest.raises(ValueError, match="unrecognized format"):
+        clean_asset(blob, tmp_path / "out", CleanPlan())

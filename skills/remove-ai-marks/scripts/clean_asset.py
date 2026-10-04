@@ -617,7 +617,13 @@ def clean_asset(
     _validate_operation(path, dest, plan)
     kind = classify_asset(path, forced_kind=plan.forced_kind)
     if kind == "unknown":
-        kind = "text"
+        # Contract (asset_kind.classify_asset): unknown binaries are never
+        # mangled as text. The CLI preflight refuses earlier; any direct
+        # caller gets the same refusal here.
+        raise ValueError(
+            f"refusing to clean {path}: unrecognized format "
+            "(pass --force-text to handle the bytes as text anyway, or --as to force a format)"
+        )
     if plan.visible is not None and kind != "image":
         raise ValueError("visible cleaning is only valid for image assets")
     if plan.degrade is not None and kind != "image":
