@@ -1,4 +1,4 @@
-.PHONY: check lint format-check format lint-fix compile test smoke smoke-synthid bootstrap-synthid docker-synthid-build docker-synthid-help \
+.PHONY: check lint format-check format lint-fix compile test smoke verify tui-check packaging ci smoke-synthid bootstrap-synthid docker-synthid-build docker-synthid-help \
 	smoke-ctrlregen bootstrap-ctrlregen docker-ctrlregen-build docker-ctrlregen-help \
 	smoke-markllm bootstrap-markllm docker-markllm-build docker-markllm-help \
 	smoke-markdiffusion bootstrap-markdiffusion docker-markdiffusion-build docker-markdiffusion-help \
@@ -8,7 +8,16 @@
 SCRIPTS := skills/remove-ai-marks/scripts
 PYTHON ?= $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; else echo python3; fi)
 
-check: lint format-check compile test smoke
+check: lint format-check compile test smoke verify
+
+# Same local gates as CI; Bun is required for frontend/packaging checks.
+ci: check tui-check packaging
+
+tui-check:
+	cd skills/remove-ai-marks/tui && bun install --frozen-lockfile && bun run typecheck && bun test
+
+packaging:
+	WM_PACKAGING_E2E=1 $(PYTHON) -m pytest tests/test_packaging.py -q
 
 lint:
 	$(PYTHON) -m ruff check $(SCRIPTS) tests demo.py
@@ -27,6 +36,11 @@ compile:
 
 test:
 	$(PYTHON) -m pytest
+
+# End-to-end residual-zero verification with independent byte-level parsers
+# (needs the Pillow/pypdf from requirements-test.txt; the cleaner is stdlib).
+verify:
+	$(PYTHON) tests/verify_full_clean.py
 
 smoke:
 	-$(PYTHON) $(SCRIPTS)/inspect_text.py tests/fixtures/sample_watermarked.txt
