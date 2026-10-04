@@ -79,7 +79,7 @@ function revealLines(reveal: Reveal, width: number): string[] {
   const budget = Math.max(1, width - GUTTER)
   const clipped = clipReveal(reveal.text, reveal.marks, budget)
   const text = fit(gutter + highlight(clipped.text, clipped.marks), width)
-  const labels = fit(gutter + paint(labelAt(clipped.text, clipped.marks), theme.glow), width)
+  const labels = fit(gutter + paint(labelAt(clipped.text, clipped.marks), theme.muted), width)
   return [text, labels]
 }
 
@@ -146,7 +146,7 @@ export class DetailView implements Component {
       lines.push(fit(paint("Nothing hidden found.", theme.success), width))
       return lines
     }
-    if (hidden) lines.push(fit(paint(`${hidden} hidden character${hidden === 1 ? "" : "s"}`, theme.glow), width))
+    if (hidden) lines.push(fit(paint(`${hidden} hidden character${hidden === 1 ? "" : "s"}`, theme.muted), width))
     for (const excerpt of parsed.reveal.slice(0, 6)) lines.push(...revealLines(excerpt, width))
     for (const line of parsed.lines) lines.push(fit(paint(line, theme.muted), width))
     return lines

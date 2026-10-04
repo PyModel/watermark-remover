@@ -1,6 +1,7 @@
 import { expandHome, mergeFlags, removeFlag } from "./prompt"
 import {
   BridgeError,
+  parseFinding,
   type BridgeLike,
   type Check,
   type CleanResult,
@@ -258,7 +259,7 @@ export function createApp(bridge: BridgeLike, onQuit: () => void, notify: () => 
     try {
       await bridge.request<{ files: Finding[] }>("inspect", { state: snapshot() }, (message) => {
         if (message.event !== "inspected") return
-        const finding = message.data
+        const finding = parseFinding(message.data)
         app.findings[finding.path] = finding
         if (app.run) app.run = { ...app.run, index: app.run.index + 1, display: finding.display }
         touch()

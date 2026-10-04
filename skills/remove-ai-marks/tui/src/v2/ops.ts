@@ -1,12 +1,8 @@
 /**
  * Clipboard, OSC 8 path links, and the terminal title/progress for a running clean.
  *
- * PI_TUI_WRITE_LOG captures the raw ANSI stream pi-tui's ProcessTerminal writes
- * to stdout. Set it to a file path, or to an existing directory (a timestamped
- * `tui-<date>-<pid>.log` is created there). Use it when a rendering bug needs
- * the exact bytes the terminal received. It is not WM_TUI_LOG, which is the
- * Python-side fatal log named on the fatal screen. t06's README pass must
- * surface PI_TUI_WRITE_LOG; this header is the protocol note until then.
+ * PI_TUI_WRITE_LOG is documented in PROTOCOL.md (Frontend operability notes).
+ * It is not WM_TUI_LOG, the Python-side fatal log named on the fatal screen.
  */
 import { isAbsolute, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
@@ -44,9 +40,9 @@ function loadClipboard(deps: CopyDeps): { clipboard?: NativeClipboard; failed: b
 }
 
 /**
- * Place `text` on the native clipboard. When the helper is missing or has no
- * `setText`, write OSC 52 (the library's terminal fallback) and toast — a bare
- * OSC 52 write is not a confirmed copy.
+ * Place `text` on the native clipboard. A helper with no `setText` writes OSC 52
+ * and toasts — a bare OSC 52 write is not a confirmed copy. An undefined helper
+ * toasts only; it does not pretend the terminal accepted the copy.
  */
 export async function copyText(text: string, deps: CopyDeps): Promise<void> {
   const loaded = loadClipboard(deps)
@@ -63,7 +59,7 @@ export async function copyText(text: string, deps: CopyDeps): Promise<void> {
     deps.toast("Copied.", "success")
     return
   }
-  if (deps.terminal) deps.terminal.write(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`)
+  if (clipboard && deps.terminal) deps.terminal.write(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`)
   deps.toast("Clipboard unavailable.", "error")
 }
 
@@ -104,9 +100,16 @@ export function applyCleanChrome(
   if (seen.title !== next.title) {
     seen.title = next.title
     terminal.setTitle(next.title)
+    terminal.write(`\x1b]0;${next.title}\x07`)
   }
   if (seen.progress !== next.progress) {
     seen.progress = next.progress
     terminal.setProgress(next.progress)
+    terminal.write(next.progress ? "\x1b]9;4;3\x07" : "\x1b]9;4;0\x07")
   }
+}
+
+/** Clear title and progress when fatal hides the footer, so chrome is not left set. */
+export function clearTerminalChrome(terminal: Terminal, seen: { title?: string; progress?: boolean } = {}): void {
+  applyCleanChrome(terminal, null, seen)
 }

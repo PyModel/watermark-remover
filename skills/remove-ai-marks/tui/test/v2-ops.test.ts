@@ -1,8 +1,8 @@
 import { readFileSync } from "node:fs"
 import { pathToFileURL } from "node:url"
-import { expect, test } from "bun:test"
-import { hyperlink, stripTerminalSequences, type NativeClipboard } from "@earendil-works/pi-tui"
-import { DetailView } from "../src/v2/components/detail"
+import { afterEach, expect, test } from "bun:test"
+import { hyperlink, isViewportTUI, stripTerminalSequences, TuiAltScreen, type NativeClipboard } from "@earendil-works/pi-tui"
+import { mountApp } from "../src/v2/app"
 import { Footer } from "../src/v2/components/footer"
 import { copyDiffText, copyOutputPath, fileHyperlink, type CopyDeps } from "../src/v2/ops"
 import type { FileDone } from "../src/v2/protocol"
@@ -66,37 +66,21 @@ test("a missing clipboard helper degrades to a toast", async () => {
   }
   await copyOutputPath(done(), deps)
   expect(toasts.some((toast) => toast.tone === "error" && /unavailable/i.test(toast.text))).toBe(true)
-  expect(term.writes.some((chunk) => chunk.startsWith("\x1b]52;c;"))).toBe(true)
+  expect(term.writes.some((chunk) => chunk.startsWith("\x1b]52;c;"))).toBe(false)
   expect(term.titles).toEqual([])
 })
 
-test("file paths in the detail pane are OSC 8 hyperlinks", () => {
-  const ctl = createApp(new FakeBridge(), () => {})
-  const file = { path: "/tmp/drafts/intro.md", display: "drafts/intro.md", kind: "text", size: 12 }
-  ctl.app.plan = {
-    ok: true,
-    error: null,
-    command: "wm drafts/intro.md",
-    files: [file],
-    files_total: 1,
-    discover_error: null,
-    layer: "A",
-    result_class: "Verifiable",
-    output: null,
-    confirm: [],
-    estimate_seconds: 0,
-    warnings: [],
-    preflight_error: null,
-  }
-  const result = done({ display: file.display, output: "/tmp/drafts/intro.out.md" })
-  ctl.app.results[file.path] = result
-  const rendered = new DetailView(ctl).render(80).join("\n")
-  expect(rendered).toContain(fileHyperlink(file.display, file.path))
-  expect(rendered).toContain("\x1b]8;;")
-  expect(rendered).toContain(pathToFileURL(file.path).href)
-  expect(rendered).toContain(pathToFileURL(result.output!).href)
-  expect(stripTerminalSequences(rendered)).toContain(file.display)
-  expect(fileHyperlink("intro.md", file.path)).toBe(hyperlink("intro.md", pathToFileURL(file.path).href))
+test("file paths in the running app are OSC 8 sequences written to the terminal", async () => {
+  const { term, type, press } = await bootCopy(null)
+  await type("drafts")
+  await press("\x12")
+  const written = term.writes.join("")
+  const source = pathToFileURL("/abs/drafts/intro.md").href
+  const output = pathToFileURL("/abs/drafts/intro.cleaned.md").href
+  expect(written).toContain(`\x1b]8;;${source}`)
+  expect(written).toContain(`\x1b]8;;${output}`)
+  expect(stripTerminalSequences(written)).toContain("drafts/intro.md")
+  expect(fileHyperlink("intro.md", "/abs/drafts/intro.md")).toBe(hyperlink("intro.md", source))
 })
 
 test("the terminal title and progress change while a clean runs and clear after", () => {
@@ -120,22 +104,111 @@ test("the terminal title and progress change while a clean runs and clear after"
   ctl.app.run = { kind: "clean", index: 0, total: 2, display: "drafts/intro.md" }
   const footer = new Footer(ctl, term, () => 0)
   footer.render(80)
-  expect(term.titles.at(-1)).toBe("Cleaning 1 of 2: drafts/intro.md")
-  expect(term.progress.at(-1)).toBe(true)
+  expect(term.writes.join("")).toContain("\x1b]0;Cleaning 1 of 2: drafts/intro.md\x07")
+  expect(term.writes.join("")).toContain("\x1b]9;4;3\x07")
   ctl.app.run = null
   footer.render(80)
-  expect(term.titles.at(-1)).toBe("wm")
-  expect(term.progress.at(-1)).toBe(false)
+  expect(term.writes.join("")).toContain("\x1b]0;wm\x07")
+  expect(term.writes.join("")).toContain("\x1b]9;4;0\x07")
   ctl.app.run = { kind: "clean", index: 0, total: 1, display: "bad\u0007name" }
   footer.render(80)
-  expect(term.titles.at(-1)).toBe("Cleaning 1 of 1: badname")
-  expect(term.titles.at(-1)).not.toContain("\u0007")
+  const written = term.writes.join("")
+  expect(written).toContain("\x1b]0;Cleaning 1 of 1: badname\x07")
+  expect(written).not.toContain("bad\u0007name")
 })
 
-test("PI_TUI_WRITE_LOG is documented on the ops module", () => {
-  const src = readFileSync(new URL("../src/v2/ops.ts", import.meta.url), "utf8")
-  const header = src.slice(0, src.indexOf("export"))
-  expect(header).toContain("PI_TUI_WRITE_LOG")
-  expect(header).toContain("WM_TUI_LOG")
-  expect(header).toContain("t06")
+test("PI_TUI_WRITE_LOG is documented in the bridge protocol notes", () => {
+  const notes = readFileSync(new URL("../PROTOCOL.md", import.meta.url), "utf8")
+  const section = notes.slice(notes.indexOf("Frontend operability"))
+  expect(section.length).toBeGreaterThan(40)
+  expect(section).toContain("PI_TUI_WRITE_LOG")
+  expect(section).toContain("WM_TUI_LOG")
+  expect(section).toContain("file path")
+  expect(section).toContain("directory")
+})
+
+let shutdown: (() => void) | undefined
+
+afterEach(() => {
+  shutdown?.()
+  shutdown = undefined
+})
+
+async function bootCopy(clipboard: NativeClipboard | null, columns = 160, rows = 40, bridge = new FakeBridge()) {
+  const term = new FakeTerminal(columns, rows)
+  const tui = new TuiAltScreen(term, false)
+  if (!isViewportTUI(tui)) throw new Error("expected a viewport TUI")
+  const mounted = mountApp(tui, bridge, () => {}, { clipboard })
+  tui.start()
+  await mounted.ctl.start()
+  tui.renderNow()
+  shutdown = () => {
+    mounted.dispose()
+    tui.stop({ preserveScreen: true })
+  }
+  const screen = () => stripTerminalSequences(tui.getScreenLines().join("\n"))
+  const type = async (text: string) => {
+    for (const ch of text) term.input(ch)
+    term.input("\r")
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    tui.renderNow()
+  }
+  const press = async (data: string) => {
+    term.input(data)
+    for (let i = 0; i < 8; i++) await Promise.resolve()
+    tui.renderNow()
+  }
+  return { term, tui, mounted, screen, type, press }
+}
+
+test("copy keys on the running app copy the output path and the diff without touching the editor", async () => {
+  const clip = memoryClipboard()
+  const { term, mounted, screen, type, press } = await bootCopy(clip)
+  await type("drafts")
+  await press("\x12")
+  term.input("z")
+  await press("\x0f")
+  expect(mounted.editor.getText()).toBe("z")
+  expect(clip.texts[0]).toBe("/abs/drafts/intro.cleaned.md")
+  expect(screen()).toContain("Copied.")
+  await press("\x1bOQ")
+  expect(mounted.editor.getText()).toBe("z")
+  expect(clip.texts[0]).toContain("-Hello<U+200B> world")
+  expect(screen()).toContain("Copied.")
+})
+
+test("the running app writes title and progress sequences, and a dying bridge clears them", async () => {
+  let release: () => void = () => {}
+  const bridge = new FakeBridge()
+  bridge.cleanGate = new Promise((resolve) => {
+    release = resolve
+  })
+  const { term, tui, screen, type } = await bootCopy(null, 120, 30, bridge)
+  await type("drafts")
+  term.input("\x12")
+  tui.renderNow()
+  const running = term.writes.join("")
+  expect(running).toContain("\x1b]0;Cleaning 1 of 5: drafts/intro.md\x07")
+  expect(running).toContain("\x1b]9;4;3\x07")
+  bridge.die("bridge exited with code 1")
+  tui.renderNow()
+  const died = term.writes.join("")
+  expect(died.lastIndexOf("\x1b]0;wm\x07")).toBeGreaterThan(died.lastIndexOf("\x1b]0;Cleaning"))
+  expect(died.lastIndexOf("\x1b]9;4;0\x07")).toBeGreaterThan(died.lastIndexOf("\x1b]9;4;3\x07"))
+  expect(screen()).toContain("The Python side stopped")
+  release()
+})
+
+test("an unavailable clipboard helper on the running app toasts and writes no OSC 52", async () => {
+  const { term, screen, type, press } = await bootCopy(null)
+  await type("drafts")
+  await press("\x12")
+  const before = term.writes.length
+  await press("\x0f")
+  expect(screen()).toContain("Clipboard unavailable.")
+  expect(term.writes.slice(before).join("")).not.toContain("\x1b]52;c;")
+  const mid = term.writes.length
+  await press("\x1bOQ")
+  expect(screen()).toContain("Clipboard unavailable.")
+  expect(term.writes.slice(mid).join("")).not.toContain("\x1b]52;c;")
 })

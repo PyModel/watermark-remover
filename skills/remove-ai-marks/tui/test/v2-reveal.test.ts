@@ -1,13 +1,15 @@
 import { readFileSync } from "node:fs"
 import { dirname, resolve } from "node:path"
-import { fileURLToPath } from "node:url"
-import { expect, test } from "bun:test"
-import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui"
+import { fileURLToPath, pathToFileURL } from "node:url"
+import { afterEach, expect, test } from "bun:test"
+import { isViewportTUI, stripTerminalSequences, TuiAltScreen, visibleWidth } from "@earendil-works/pi-tui"
+import { mountApp, type MountedApp } from "../src/v2/app"
 import { DetailView, markTotals } from "../src/v2/components/detail"
 import { convertReveal, parseFinding, type Finding, type Reveal } from "../src/v2/protocol"
 import { createApp } from "../src/v2/store"
 import { paint, theme } from "../src/v2/theme"
 import { FakeBridge } from "./fake-bridge"
+import { FakeTerminal } from "./fake-terminal"
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..")
 const bridgeTest = readFileSync(resolve(repoRoot, "tests/test_tui_bridge.py"), "utf8")
@@ -207,4 +209,84 @@ test("a finished file is labelled by result class and the mark reduction is comp
   expect(effort).not.toContain("cleaned")
   expect(effort.split("\n").some((line) => line.trim() === "error")).toBe(false)
   expect(effort.match(/0 marks removed/g)).toHaveLength(1)
+})
+
+/** Inspect emits the astral wire fixture; clean stays the shared fake. */
+class WireBridge extends FakeBridge {
+  override async request<T>(method: string, params: any = {}, onEvent?: (event: any) => void): Promise<T> {
+    if (method !== "inspect") return super.request(method, params, onEvent)
+    this.calls.push({ method, params })
+    const finding = findingWith(astralReveal(), "/abs/drafts/intro.md")
+    finding.display = "drafts/intro.md"
+    onEvent?.({ event: "inspected", data: finding })
+    return { files: [finding], cancelled: false } as T
+  }
+}
+
+let shutdown: (() => void) | undefined
+
+afterEach(() => {
+  shutdown?.()
+  shutdown = undefined
+})
+
+async function bootApp(columns = 160, rows = 40, bridge = new WireBridge()) {
+  const term = new FakeTerminal(columns, rows)
+  const tui = new TuiAltScreen(term, false)
+  if (!isViewportTUI(tui)) throw new Error("expected a viewport TUI")
+  const mounted = mountApp(tui, bridge, () => {})
+  tui.start()
+  await mounted.ctl.start()
+  tui.renderNow()
+  shutdown = () => {
+    mounted.dispose()
+    tui.stop({ preserveScreen: true })
+  }
+  const screen = () => stripTerminalSequences(tui.getScreenLines().join("\n"))
+  const writes = () => term.writes.join("")
+  const type = async (text: string) => {
+    for (const ch of text) term.input(ch)
+    term.input("\r")
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    tui.renderNow()
+  }
+  const press = async (data: string) => {
+    term.input(data)
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+    tui.renderNow()
+  }
+  return { term, tui, bridge, mounted, screen, writes, type, press }
+}
+
+test("the running app labels a finished file by result class, highlights a converted reveal, and writes OSC 8 paths", async () => {
+  const { screen, writes, type, press, mounted } = await bootApp()
+  await type("drafts")
+  await press("\x05")
+  const revealed = writes()
+  expect(revealed).toContain(paint("\u25C6", theme.glow, true))
+  expect(revealed).not.toContain(paint("x", theme.glow, true))
+  expect(revealed).not.toContain("\uFFFD")
+  expect(revealed).toContain(paint("   ZWSP", theme.muted))
+  expect(revealed).not.toContain(paint("   ZWSP", theme.glow))
+  expect(revealed).not.toContain(paint("ZWSP", theme.glow))
+  expect(revealed).toContain(paint("1 hidden character", theme.muted))
+  expect(revealed).not.toContain(paint("1 hidden character", theme.glow))
+  const stored = mounted.ctl.app.findings["/abs/drafts/intro.md"]!.reveal[0]!
+  expect(stored.text.slice(stored.marks[0]![0], stored.marks[0]![1])).toBe("\u25C6")
+
+  await press("\x12")
+  const frame = screen()
+  const intro = frame.split("\n").find((line) => line.includes("\u2192") && line.includes("drafts/intro.md"))
+  const cover = frame.split("\n").find((line) => line.includes("cover.png"))
+  expect(intro).toContain("Verifiable")
+  expect(intro).not.toMatch(/\bcleaned\b/)
+  expect(intro).not.toMatch(/\berror\b/)
+  expect(cover).toContain("Verifiable")
+  expect(cover).not.toMatch(/\berror\b/)
+  expect(frame).toContain("3 marks removed")
+  expect(frame.split("\n").some((line) => line.trim() === "cleaned" || line.trim() === "error")).toBe(false)
+  const painted = writes()
+  expect(painted).toContain("\x1b]8;;")
+  expect(painted).toContain(pathToFileURL("/abs/drafts/intro.md").href)
+  expect(painted).toContain(pathToFileURL("/abs/drafts/intro.cleaned.md").href)
 })

@@ -286,3 +286,11 @@ in-flight requests to answer first.
 - No API key in any output frame, including under a hostile
   `WATERMARKS_REWRITE_API_KEY`.
 - Results are labelled by layer, never by outcome.
+
+## Frontend operability notes
+
+`PI_TUI_WRITE_LOG` captures the raw ANSI stream the frontend terminal writes
+to stdout. Set it to a file path, or to an existing directory (a timestamped
+`tui-<date>-<pid>.log` is created there). Use it when a rendering bug needs
+the exact bytes the terminal received. It is not `WM_TUI_LOG`, which is the
+bridge stderr log named on the fatal screen.
