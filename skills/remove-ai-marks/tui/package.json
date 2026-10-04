@@ -8,6 +8,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@earendil-works/pi-tui": "1.0.2",
     "@opentui/core": "0.5.12",
     "@opentui/solid": "0.5.12",
     "solid-js": "1.9.12"

@@ -1,0 +1,108 @@
+import { isViewportTUI, matchesKey, type Component, type Editor, type TUI } from "@earendil-works/pi-tui"
+import { runCommand } from "./commands"
+import { buildLayout, SPINNER } from "./components/layout"
+import { createEditor } from "./components/prompt"
+import { parsePrompt } from "./prompt"
+import type { BridgeLike } from "./protocol"
+import { createApp, type AppController } from "./store"
+
+export interface MountedApp {
+  ctl: AppController
+  editor: Editor
+  root: Component
+  dispose(): void
+}
+
+/**
+ * Key routing sits on addInputListener, which runs before the focused editor.
+ * ctrl+j is also the editor's newline default, so selection must consume it.
+ * up/down are not consumed: the editor recalls history only on the first visual
+ * line (or when already browsing). Selection is ctrl+k / ctrl+j. pageup/pagedown
+ * belong to the alt-screen viewport and are not selection keys.
+ */
+export function mountApp(tui: TUI, bridge: BridgeLike, onQuit: () => void): MountedApp {
+  if (!isViewportTUI(tui)) throw new Error("wm-tui requires a fullscreen viewport")
+  const ctl = createApp(bridge, onQuit, () => tui.requestRender())
+  const editor = createEditor(tui)
+  editor.onSubmit = (text) => submitPrompt(ctl, editor, text)
+  let frame = 0
+  const timer = setInterval(() => {
+    if (!ctl.app.run) return
+    frame = (frame + 1) % SPINNER.length
+    tui.requestRender()
+  }, 80)
+  timer.unref?.()
+  const root = buildLayout(ctl, editor, () => frame)
+  tui.setLayoutRoot(root)
+  tui.setFocus(editor)
+  const unsubscribe = tui.addInputListener((data) => routeKeys(data, ctl, editor))
+  return {
+    ctl,
+    editor,
+    root,
+    dispose() {
+      clearInterval(timer)
+      unsubscribe()
+    },
+  }
+}
+
+function submitPrompt(ctl: AppController, editor: Editor, text: string): void {
+  const parsed = parsePrompt(text)
+  if (parsed.kind === "empty") return
+  // submitValue does not record history. The app does, after a successful submit.
+  editor.addToHistory(text)
+  if (parsed.kind === "paths") ctl.addPaths(parsed.tokens)
+  else if (parsed.kind === "flags") ctl.applyFlags(parsed.tokens)
+  else runCommand(ctl, parsed.name, parsed.arg)
+}
+
+function routeKeys(data: string, ctl: AppController, editor: Editor) {
+  if (matchesKey(data, "ctrl+c") || matchesKey(data, "ctrl+d")) {
+    ctl.quit()
+    return { consume: true }
+  }
+  if (ctl.app.dialogs.length > 0) return
+  if (matchesKey(data, "ctrl+j")) {
+    ctl.select(ctl.app.selected + 1)
+    return { consume: true }
+  }
+  if (matchesKey(data, "ctrl+k")) {
+    ctl.select(ctl.app.selected - 1)
+    return { consume: true }
+  }
+  if (matchesKey(data, "ctrl+p")) {
+    ctl.openDialog({ type: "palette" })
+    return { consume: true }
+  }
+  if (matchesKey(data, "ctrl+r")) {
+    void ctl.clean()
+    return { consume: true }
+  }
+  if (matchesKey(data, "ctrl+e")) {
+    void ctl.inspect()
+    return { consume: true }
+  }
+  if (matchesKey(data, "f1")) {
+    ctl.openDialog({ type: "help" })
+    return { consume: true }
+  }
+  if (matchesKey(data, "shift+tab")) {
+    ctl.cyclePreset(-1)
+    return { consume: true }
+  }
+  if (matchesKey(data, "tab")) {
+    ctl.cyclePreset(1)
+    return { consume: true }
+  }
+  if (matchesKey(data, "escape") && !editor.isShowingAutocomplete()) {
+    if (ctl.app.run) {
+      void ctl.cancel()
+      return { consume: true }
+    }
+    if (editor.getText()) {
+      editor.setText("")
+      return { consume: true }
+    }
+  }
+}
