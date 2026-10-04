@@ -31,6 +31,32 @@ def test_normalizes_exotic_spaces():
     assert stats["replaced_count"] >= 2
 
 
+def test_braille_blank_between_letters_is_a_carrier():
+    # U+2800 renders blank-width; between non-braille letters it is an
+    # invisible separator used by AI stego. It must be REMOVED — never
+    # replaced with a visible space, which would re-tokenize the text and
+    # leave a trace of where the carrier sat.
+    cleaned, _stats = clean_text("a\u2800b")
+    assert cleaned == "ab"
+    report = inspect_text("a\u2800b")
+    assert report.suspicious_total >= 1
+    hit = next(h for h in report.to_dict()["hits"] if h["codepoint"] == "U+2800")
+    assert hit["kind"] == "braille_blank"  # probable carrier, not "space"
+    assert hit["confidence"] == "probable"
+
+
+def test_braille_blank_stripped_identically_without_space_normalization():
+    # Same decision in both modes: kind and severity never depend on flags.
+    cleaned, _stats = clean_text("word\u2800word", normalize_spaces=False)
+    assert cleaned == "wordword"
+
+
+def test_braille_blank_inside_braille_run_is_preserved():
+    # Between real braille letters the blank is legitimate braille spacing.
+    cleaned, _stats = clean_text("\u2801\u2800\u2809")
+    assert cleaned == "\u2801\u2800\u2809"
+
+
 def test_inspect_finds_zwsp():
     report = inspect_text("x\u200by")
     assert report.suspicious_total >= 1
