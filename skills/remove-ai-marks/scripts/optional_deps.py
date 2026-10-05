@@ -55,6 +55,22 @@ class BackendAvailability:
             )
 
 
+def module_available(*names: str) -> bool:
+    """True when every named module imports right now.
+
+    The probe optional decoders use to decide "can I run": unlike
+    :func:`check_optional` it names modules, not extras, so a caller can gate
+    on the exact set it will import next (and callers that prefer the
+    user-facing vocabulary still route through :func:`check_optional`).
+    """
+    for name in names:
+        try:
+            importlib.import_module(name)
+        except Exception:
+            return False
+    return True
+
+
 def check_optional(extra: str) -> BackendAvailability:
     """Return availability for a single named extra.
 
