@@ -215,6 +215,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Replace removed provenance with a truthful wmCt marker (PNG output). "
         "Default: strip-without-replacement (frictionless)",
     )
+    p.add_argument(
+        "--humanize",
+        action="store_true",
+        help="Image: humanizing post-stage (film grain, chromatic aberration, unsharp, "
+        "adaptive polish); off by default. Requires PNG output and the pixel extra",
+    )
 
     # Artifact / audit-trail control
     p.add_argument(

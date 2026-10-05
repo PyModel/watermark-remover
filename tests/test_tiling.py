@@ -189,3 +189,126 @@ def test_run_tiled_without_numpy_is_labeled_unavailable(tmp_path):
     result = _run_blocked(probe, tmp_path)
     assert result.returncode == 0, result.stderr
     assert "LABELED:" in result.stdout and "watermark-remover[pixel]" in result.stdout
+
+
+# --- wiring: the auto-tile threshold on the visible clean path ---------------------
+
+
+def _tiled_fixture(tmp_path):
+    """240x64 ramp with a box mark fully inside the first tile's interior."""
+    from morphomod import Raster, encode_png
+
+    w, h = 240, 64
+    px = bytearray(
+        byte
+        for y in range(h)
+        for x in range(w)
+        for byte in ((x * 3) % 256, (y * 9) % 256, ((x + 2 * y) * 5) % 256)
+    )
+    source = tmp_path / "input.png"
+    source.write_bytes(encode_png(Raster(w, h, 3, px)))
+    return source
+
+
+def _visible_plan(tmp_path):
+    from clean_asset import CleanPlan
+    from morphomod import VisiblePlan
+
+    return CleanPlan(
+        forced_kind="image",
+        visible=VisiblePlan(
+            box=(8, 8, 12, 10),
+            backend="texture",
+            mask_output=tmp_path / "mask.pgm",
+            dilation_radius=1,
+        ),
+    )
+
+
+def _visible_plan(tmp_path, backend="texture"):
+    from clean_asset import CleanPlan
+    from morphomod import VisiblePlan
+
+    return CleanPlan(
+        forced_kind="image",
+        visible=VisiblePlan(
+            box=(8, 8, 12, 10),
+            backend=backend,
+            mask_output=tmp_path / "mask.pgm",
+            dilation_radius=1,
+        ),
+    )
+
+
+def test_large_image_cleans_identically_tiled_and_untiled(tmp_path, monkeypatch):
+    """The same-result guarantee, end to end: the simple fill is tile-local
+    (nearest-boundary), so the tiled path reproduces the whole-image clean
+    byte-for-byte when the mark sits inside one tile."""
+    from clean_asset import clean_asset
+
+    source = _tiled_fixture(tmp_path)
+    untiled = tmp_path / "untiled.png"
+    monkeypatch.setenv("WATERMARKS_AUTO_TILE_MAX_DIMENSION", "1000000")
+    clean_asset(source, untiled, _visible_plan(tmp_path, backend="simple"))
+
+    tiled = tmp_path / "tiled.png"
+    monkeypatch.setenv("WATERMARKS_AUTO_TILE_MAX_DIMENSION", "96")
+    monkeypatch.setenv("WATERMARKS_AUTO_TILE_SIZE", "96")
+    monkeypatch.setenv("WATERMARKS_AUTO_TILE_OVERLAP", "24")
+    result = clean_asset(source, tiled, _visible_plan(tmp_path, backend="simple")).to_dict()
+
+    assert tiled.read_bytes() == untiled.read_bytes()
+    assert result["visible"]["tiling"]["engaged"] is True
+
+
+def test_tiling_engagement_appears_in_the_report_with_the_grid(tmp_path, monkeypatch):
+    from clean_asset import clean_asset
+
+    source = _tiled_fixture(tmp_path)
+    monkeypatch.setenv("WATERMARKS_AUTO_TILE_MAX_DIMENSION", "96")
+    monkeypatch.setenv("WATERMARKS_AUTO_TILE_SIZE", "96")
+    monkeypatch.setenv("WATERMARKS_AUTO_TILE_OVERLAP", "24")
+    report = clean_asset(source, tmp_path / "out.png", _visible_plan(tmp_path)).to_dict()
+    tiling_report = report["visible"]["tiling"]
+    assert tiling_report["engaged"] is True
+    assert tiling_report["threshold"] == 96
+    assert tiling_report["tiles"] > 1
+    assert tiling_report["tile_size"] == 96  # the env override, not the default
+    inpaint_details = [
+        detail for detail in report["visible"]["action_details"] if detail["code"] == "inpaint"
+    ]
+    assert inpaint_details and inpaint_details[0]["params"].get("tiles") == tiling_report["tiles"]
+
+
+def test_below_threshold_no_tiling_engagement(tmp_path, monkeypatch):
+    from clean_asset import clean_asset
+
+    source = _tiled_fixture(tmp_path)
+    monkeypatch.setenv("WATERMARKS_AUTO_TILE_MAX_DIMENSION", "1000000")
+    report = clean_asset(source, tmp_path / "out.png", _visible_plan(tmp_path)).to_dict()
+    assert "tiling" not in report["visible"]
+
+
+def test_tiling_without_pixel_deps_falls_back_labeled(tmp_path, monkeypatch):
+    """numpy blocked: the tiled attempt degrades to the whole-image clean with a
+    labeled-unavailable report, never a crash."""
+    import clean_asset as clean_asset_module
+    from clean_asset import clean_asset
+
+    calls = {"tiled": 0}
+
+    def _explode(*args, **kwargs):
+        calls["tiled"] += 1
+        raise clean_asset_module.PixelDependencyUnavailable("stub-blocked: numpy")
+
+    monkeypatch.setattr(clean_asset_module, "_run_tiled_visible", _explode)
+    monkeypatch.setenv("WATERMARKS_AUTO_TILE_MAX_DIMENSION", "96")
+    monkeypatch.setenv("WATERMARKS_AUTO_TILE_SIZE", "96")
+    monkeypatch.setenv("WATERMARKS_AUTO_TILE_OVERLAP", "24")
+    source = _tiled_fixture(tmp_path)
+    report = clean_asset(source, tmp_path / "out.png", _visible_plan(tmp_path)).to_dict()
+    assert calls["tiled"] == 1
+    assert report["visible"]["tiling"]["engaged"] is False
+    assert report["visible"]["tiling"]["status"] == "unavailable"
+    assert "watermark-remover[pixel]" in report["visible"]["tiling"]["hint"]
+    assert Path(tmp_path / "out.png").is_file()

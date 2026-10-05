@@ -12,6 +12,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+import humanizer
+import tiling
 from asset_kind import AssetKind, classify_asset
 from common import (
     atomic_write_bytes,
@@ -19,24 +21,29 @@ from common import (
     backup_path,
     create_backup,
     paths_alias,
+    read_bytes_bounded,
     validate_output_path,
 )
 from container_meta import clean_container
 from dct_frequency import DEGRADE_STRATEGIES, degrade_image
+from image_io import PixelDependencyUnavailable, _import_pixel
 from image_meta import clean_image, detect_format
 from inspect_soft_binding import inspect_soft_binding
 from morpho_perturb import MORPHO_STRATEGIES, MORPHO_STRATEGY_KWARGS, morpho_perturb
 from morphomod import (
     VISIBLE_CLEAN_BACKENDS,
+    Mask,
     Raster,
     VisiblePlan,
     decode_png,
+    decode_to_raster,
     encode_png,
     remove_visible,
+    write_pgm,
 )
 from perturb_text import MODES as PERTURB_MODES
 from perturb_text import perturb_text
-from pipeline_actions import retarget_report
+from pipeline_actions import Action, ActionCode, Effect, retarget_report
 from rewrite_text import RewritePlan, TokenSink, rewrite
 from text_unicode import clean_text
 
@@ -261,6 +268,8 @@ class CleanPlan:
     remove_synthid: bool = False
     synthid_strength: float = 0.6
     wmct_marker: bool = False
+    humanize: bool = False
+    humanize_seed: int | None = None
 
     def __post_init__(self) -> None:
         if self.forced_kind not in ("auto", "text", "image", "container"):
@@ -288,6 +297,12 @@ class CleanPlan:
                 raise ValueError("visible cleaning requires an inpainting backend")
         if self.degrade is not None and not isinstance(self.degrade, ImageDegradePlan):
             raise TypeError("degrade must be an ImageDegradePlan or None")
+        if not isinstance(self.humanize, bool):
+            raise TypeError("humanize must be a bool")
+        if self.humanize_seed is not None and (
+            isinstance(self.humanize_seed, bool) or not isinstance(self.humanize_seed, int)
+        ):
+            raise TypeError("humanize_seed must be an integer or None")
 
 
 @dataclass(frozen=True, slots=True)
@@ -416,8 +431,233 @@ def _apply_image_degrade(raster: Raster, degrade: ImageDegradePlan) -> Any:
     )
 
 
+def _crop_mask(mask: Mask, tile: tiling.Tile) -> Mask:
+    """The whole-image mask cropped to *tile* (pure row slicing)."""
+    data = bytearray(tile.width * tile.height)
+    for row in range(tile.height):
+        source = (tile.y + row) * mask.width + tile.x
+        data[row * tile.width : (row + 1) * tile.width] = mask.data[source : source + tile.width]
+    return Mask(tile.width, tile.height, data)
+
+
+def _probe_dimensions(path: Path) -> tuple[int, int] | None:
+    """Pixel dimensions from the PNG/JPEG header, no decoder involved.
+
+    The visible pipeline's raster decoder (``decode_to_raster``) accepts only
+    PNG and JPEG, so a pure header parse covers every image that could take
+    the tiled path. Returns None for anything else (or a malformed header);
+    the untiled path then produces its own, real, error. Deliberately does
+    not touch numpy/cv2: probing must stay available in pixel-less
+    environments and must not add stub-cv2 surface to the CLI path.
+    """
+    data = read_bytes_bounded(path, limit=256 * 1024, label="image header")
+    data = bytes(data)
+    if data[:8] == b"\x89PNG\r\n\x1a\n" and data[12:16] == b"IHDR" and len(data) >= 24:
+        return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+    if data[:2] == b"\xff\xd8":
+        offset = 2
+        while offset + 9 < len(data):
+            if data[offset] != 0xFF:
+                return None
+            marker = data[offset + 1]
+            if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:  # standalone markers
+                offset += 2
+                continue
+            segment_length = int.from_bytes(data[offset + 2 : offset + 4], "big")
+            if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                if offset + 9 > len(data):
+                    return None
+                height = int.from_bytes(data[offset + 5 : offset + 7], "big")
+                width = int.from_bytes(data[offset + 7 : offset + 9], "big")
+                return width, height
+            offset += 2 + segment_length
+    return None
+
+
+def _run_tiled_visible(
+    path: Path,
+    staged_visible: Path,
+    staged_visible_plan: VisiblePlan,
+    mask_details: dict[str, Mask],
+    staging: Path,
+) -> dict[str, Any]:
+    """Run the visible clean per tile above the auto-tile threshold.
+
+    The mask is computed ONCE on the whole image -- through a ``print-plan``
+    ``remove_visible`` call, so the mask-source logic, the ``mask_details``
+    contract, and the mask actions are the untiled path's own -- then every
+    tile is filled by a plain ``remove_visible`` call on the tile crop with the
+    already-refined mask (radius-0 re-refine is idempotent) and the results are
+    feather-blended (see ``tiling`` for the same-result guarantee). Tile
+    reports are folded into one honest report: the whole-image mask actions
+    plus a single tiled-inpaint action, and the engagement dict.
+    """
+    data = read_bytes_bounded(path, limit=256 * 1024 * 1024, label="source image")
+    fmt = detect_format(bytes(data))
+    raster = decode_to_raster(bytes(data), fmt)
+    width, height, channels = raster.width, raster.height, raster.channels
+
+    mask_report = remove_visible(
+        path,
+        None,
+        replace(staged_visible_plan, backend="print-plan"),
+        mask_details=mask_details,
+    )
+    if mask_report["status"] != "mask-ready":
+        return mask_report
+    refined = mask_details["effective"]
+
+    tile_size = tiling.auto_tile_size()
+    overlap = tiling.auto_tile_overlap()
+    tiles = tiling.plan_tiles(width, height, tile_size, overlap)
+    np = _import_pixel("numpy")
+    arr = np.frombuffer(bytes(raster.data), dtype=np.uint8).reshape(height, width, channels)
+
+    def clean_tile(tile: tiling.Tile, crop: Any) -> Any:
+        tag = f"{tile.x}-{tile.y}"
+        tile_in = staging / f"tile-{tag}-in.png"
+        tile_out = staging / f"tile-{tag}-out.png"
+        tile_mask = staging / f"tile-{tag}-mask.pgm"
+        atomic_write_bytes(
+            tile_in,
+            encode_png(Raster(tile.width, tile.height, channels, bytearray(crop.tobytes()))),
+        )
+        tile_mask_crop = _crop_mask(refined, tile)
+        if tile_mask_crop.marked == 0:
+            # No part of the mark lives in this tile: pass the crop through
+            # unchanged (an identity tile keeps the blend exact).
+            return crop
+        write_pgm(tile_mask_crop, tile_mask)
+        # The whole-image mask is already refined; radius-0 re-refinement is
+        # the identity on it, so tile fills see exactly the untiled mask.
+        tile_plan = replace(
+            staged_visible_plan,
+            mask_path=tile_mask,
+            box=None,
+            detect_command=None,
+            mask_output=staging / f"tile-{tag}-mask-out.pgm",
+            dilation_radius=0,
+        )
+        tile_report = remove_visible(tile_in, tile_out, tile_plan)
+        if tile_report["status"] != "completed":
+            raise RuntimeError(
+                f"tiled visible clean failed on tile ({tag}): {tile_report['status']}"
+            )
+        tile_raster = decode_png(tile_out.read_bytes())
+        return np.frombuffer(bytes(tile_raster.data), dtype=np.uint8).reshape(
+            tile_raster.height, tile_raster.width, tile_raster.channels
+        )
+
+    blended = tiling.run_tiled(
+        clean_tile,
+        arr,
+        tile_size,
+        overlap,
+        set_progress=lambda line: None,
+    )
+    atomic_write_bytes(
+        staged_visible,
+        encode_png(Raster(width, height, channels, bytearray(blended.tobytes()))),
+    )
+
+    details = [
+        detail for detail in mask_report["action_details"] if detail["code"] != "inpaint_skipped"
+    ]
+    inpaint_action = Action(
+        ActionCode.INPAINT,
+        Effect.CHANGE,
+        f"tiled {staged_visible_plan.backend} inpaint over {len(tiles)} "
+        f"{tiles[0].width}x{tiles[0].height} tiles (overlap {overlap}) + feather blend",
+        {
+            "backend": staged_visible_plan.backend,
+            "tiles": len(tiles),
+            "tile_size": tile_size,
+            "overlap": overlap,
+        },
+    )
+    details.append(inpaint_action.to_dict())
+    return {
+        "status": "completed",
+        "input": str(path),
+        "output": str(staged_visible),
+        "format": fmt,
+        "backend": staged_visible_plan.backend,
+        "mask": mask_report["mask"],
+        "initial_mask_pixels": mask_report["initial_mask_pixels"],
+        "refined_mask_pixels": mask_report["refined_mask_pixels"],
+        "dilation_radius": staged_visible_plan.dilation_radius,
+        "actions": [detail["text"] for detail in details],
+        "action_details": details,
+        "tiling": {
+            "engaged": True,
+            "threshold": tiling.auto_tile_threshold(),
+            "tiles": len(tiles),
+            "tile_size": tile_size,
+            "overlap": overlap,
+            "note": (
+                "per-tile fills feather-blended; identical to whole-image processing "
+                "whenever the per-tile results agree across tile seams (see tiling docstring)"
+            ),
+        },
+        "note": mask_report["note"],
+    }
+
+
+def _apply_humanize_stage(
+    staged_final: Path, reference_path: Path, seed: int | None
+) -> dict[str, Any]:
+    """Apply the ``--humanize`` post-stage to the staged PNG output, in place.
+
+    Runs after verification on purpose (upstream order): the verification
+    speaks about the fill, and grain everywhere would fail outside-mask by
+    construction. Requires PNG output (the degrade precedent) so the stage
+    never silently re-encodes a lossy format.
+    """
+    try:
+        np = _import_pixel("numpy")
+        cv2 = _import_pixel("cv2")
+    except PixelDependencyUnavailable as error:
+        return {
+            "status": "unavailable",
+            "hint": f"Install watermark-remover[pixel] to enable the humanize stage. Reason: {error}",
+        }
+    final_data = read_bytes_bounded(staged_final, limit=256 * 1024 * 1024, label="final image")
+    if detect_format(bytes(final_data)) != "png":
+        raise ValueError("--humanize requires PNG output; JPEG/HEIF/AVIF inputs are not supported")
+    raster = decode_png(bytes(final_data))
+    if raster.channels != 3:
+        raise ValueError("--humanize supports 3-channel output; alpha images are not supported")
+    image = np.frombuffer(bytes(raster.data), dtype=np.uint8).reshape(
+        raster.height, raster.width, 3
+    )
+    ref_data = read_bytes_bounded(reference_path, limit=256 * 1024 * 1024, label="source image")
+    ref_raster = decode_to_raster(bytes(ref_data), detect_format(bytes(ref_data)))
+    if ref_raster.channels != 3:
+        raise ValueError("--humanize requires a 3-channel source image")
+    reference = np.frombuffer(bytes(ref_raster.data), dtype=np.uint8).reshape(
+        ref_raster.height, ref_raster.width, 3
+    )
+
+    bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+    ref_bgr = cv2.cvtColor(reference, cv2.COLOR_RGB2BGR)
+    if ref_bgr.shape[:2] != bgr.shape[:2]:
+        ref_bgr = cv2.resize(
+            ref_bgr, (bgr.shape[1], bgr.shape[0]), interpolation=cv2.INTER_LANCZOS4
+        )
+    out_bgr, stage_report = humanizer.humanize_stage(bgr, ref_bgr, seed=seed)
+    out_rgb = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
+    atomic_write_bytes(
+        staged_final,
+        encode_png(
+            Raster(
+                raster.width, raster.height, 3, bytearray(np.ascontiguousarray(out_rgb).tobytes())
+            )
+        ),
+    )
+    return {"status": "applied", **stage_report, "seed": seed}
+
+
 def _clean_image_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
-    from common import read_bytes_bounded
     from domain_types import QualityResult, map_quality_to_status
     from verification import verify_boundary_seam, verify_halo, verify_outside_mask
 
@@ -436,12 +676,44 @@ def _clean_image_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
 
         if plan.visible is not None:
             staged_visible_plan = replace(plan.visible, mask_output=staged_mask)
-            visible_report = remove_visible(
-                path,
-                staged_visible,
-                staged_visible_plan,
-                mask_details=mask_details,
-            )
+            try:
+                dims = _probe_dimensions(path)
+                use_tiled = dims is not None and tiling.should_auto_tile(*dims)
+            except PixelDependencyUnavailable:
+                use_tiled = False
+            if use_tiled:
+                try:
+                    visible_report = _run_tiled_visible(
+                        path,
+                        staged_visible,
+                        staged_visible_plan,
+                        mask_details,
+                        staging,
+                    )
+                except PixelDependencyUnavailable as error:
+                    # The tiled attempt is an optimization: degrade to the
+                    # whole-image clean and say so, never crash.
+                    visible_report = remove_visible(
+                        path,
+                        staged_visible,
+                        staged_visible_plan,
+                        mask_details=mask_details,
+                    )
+                    visible_report["tiling"] = {
+                        "engaged": False,
+                        "status": "unavailable",
+                        "hint": (
+                            "Install watermark-remover[pixel] to enable tiled "
+                            f"processing. Reason: {error}"
+                        ),
+                    }
+            else:
+                visible_report = remove_visible(
+                    path,
+                    staged_visible,
+                    staged_visible_plan,
+                    mask_details=mask_details,
+                )
             if visible_report["status"] != "completed":
                 raise RuntimeError("visible pipeline did not produce an output")
             metadata_source = staged_visible
@@ -541,6 +813,9 @@ def _clean_image_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
                     "error": str(error),
                 }
 
+        if plan.humanize:
+            report["humanize"] = _apply_humanize_stage(staged_final, path, plan.humanize_seed)
+
         mask_data = (
             staged_mask.read_bytes()
             if staged_mask.is_file() and final_mask_output is not None
@@ -628,6 +903,8 @@ def clean_asset(
         raise ValueError("visible cleaning is only valid for image assets")
     if plan.degrade is not None and kind != "image":
         raise ValueError("degradation is only valid for image assets")
+    if plan.humanize and kind != "image":
+        raise ValueError("humanize is only valid for image assets")
     if kind == "text":
         return _clean_text_asset(path, dest, plan, on_token)
     if kind == "image":

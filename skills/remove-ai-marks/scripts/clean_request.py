@@ -154,6 +154,9 @@ class CleanRequest:
     synthid_strength: float = 0.6
     wmct_marker: bool = False
 
+    # --- humanize post-stage ---------------------------------------------
+    humanize: bool = False
+
     # --- reporting -------------------------------------------------------
     keep_artifacts: bool = False
     quiet: bool = False
@@ -244,6 +247,7 @@ class CleanRequest:
             remove_synthid=args.remove_synthid,
             synthid_strength=args.synthid_strength,
             wmct_marker=args.wmct_marker,
+            humanize=args.humanize,
             keep_artifacts=args.keep_artifacts,
             quiet=args.quiet,
             json=args.json,
@@ -309,6 +313,7 @@ class CleanRequest:
             ("--char-perturb", self.char_perturb),
             ("--remove-synthid", self.remove_synthid),
             ("--wmct-marker", self.wmct_marker),
+            ("--humanize", self.humanize),
             ("--keep-artifacts", self.keep_artifacts),
             ("--quiet", self.quiet),
             ("--dry-run", self.dry_run),
@@ -467,6 +472,8 @@ def build_clean_plan(request: CleanRequest, dest: Path, kind: AssetKind) -> Clea
     """Compose the immutable ``CleanPlan`` for one asset."""
     if (request.degrade or request.morpho) and kind != "image":
         raise ValueError("--degrade/--morpho are only valid for image assets")
+    if request.humanize and kind != "image":
+        raise ValueError("--humanize is only valid for image assets")
     if request.dry_run:
         if kind != "image":
             raise ValueError("--dry-run is only valid for image assets")
@@ -534,6 +541,8 @@ def build_clean_plan(request: CleanRequest, dest: Path, kind: AssetKind) -> Clea
         remove_synthid=request.remove_synthid,
         synthid_strength=request.synthid_strength,
         wmct_marker=request.wmct_marker,
+        humanize=request.humanize,
+        humanize_seed=request.seed,
     )
 
 

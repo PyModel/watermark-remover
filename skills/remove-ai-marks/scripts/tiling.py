@@ -74,6 +74,16 @@ def auto_tile_threshold() -> int:
     return int(os.environ.get("WATERMARKS_AUTO_TILE_MAX_DIMENSION", str(AUTO_TILE_MAX_DIMENSION)))
 
 
+def auto_tile_size() -> int:
+    """The effective working tile size for the automatic path."""
+    return int(os.environ.get("WATERMARKS_AUTO_TILE_SIZE", str(AUTO_TILE_SIZE)))
+
+
+def auto_tile_overlap() -> int:
+    """The effective feather overlap for the automatic path."""
+    return int(os.environ.get("WATERMARKS_AUTO_TILE_OVERLAP", str(AUTO_TILE_OVERLAP)))
+
+
 def should_auto_tile(width: int, height: int, threshold: int | None = None) -> bool:
     """Whether a ``width`` x ``height`` image takes the tiled path."""
     limit = auto_tile_threshold() if threshold is None else threshold
@@ -200,6 +210,8 @@ __all__ = [
     "AUTO_TILE_SIZE",
     "PixelDependencyUnavailable",
     "Tile",
+    "auto_tile_overlap",
+    "auto_tile_size",
     "auto_tile_threshold",
     "feather_weights",
     "plan_tiles",
