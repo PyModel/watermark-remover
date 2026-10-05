@@ -847,7 +847,12 @@ class TextMarkEngine:
             np.uint8
         ) * 255
         if dilate > 0:
-            kernel = np.ones((2 * dilate + 1, 2 * dilate + 1), np.uint8)
+            # Clamp the kernel to the frame diagonal: an untrusted radius must not
+            # allocate an unbounded (2r+1)^2 kernel (the same bound region_eraser
+            # .boxes_to_mask applies to its own dilation; any radius at least the
+            # diagonal saturates the ROI, so the clamp changes no result).
+            radius = min(int(dilate), int(max(source.shape[:2])) + 1)
+            kernel = np.ones((2 * radius + 1, 2 * radius + 1), np.uint8)
             local_mask = cv2.dilate(local_mask, kernel)
 
         mask = np.zeros(source.shape[:2], np.uint8)
