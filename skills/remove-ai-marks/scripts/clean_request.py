@@ -135,6 +135,11 @@ class CleanRequest:
     visible_mask: Path | None = None
     visible_box: tuple[int, int, int, int] | None = None
     detect_command: str | None = None
+    #: Registry-driven localization: "auto" or a single mark key. None keeps the
+    #: explicit-mask behavior byte-for-byte.
+    mark: str | None = None
+    #: Trust policy for the registry pass; only consulted when ``mark`` is set.
+    sensitivity: str = "auto"
     dilate: int | None = None
     visible_backend: str = "texture"
     inpaint_command: str | None = None
@@ -172,6 +177,12 @@ class CleanRequest:
             raise ValueError(f"unknown rewrite strength: {self.rewrite}")
         if self.char_mode not in PERTURB_MODES:
             raise ValueError(f"unknown perturb mode: {self.char_mode}")
+        if self.mark is not None:
+            from watermark_registry import mark_keys, validate_sensitivity
+
+            validate_sensitivity(self.sensitivity)
+            if self.mark != "auto" and self.mark not in mark_keys():
+                raise ValueError(f"unknown mark {self.mark!r}; expected 'auto' or a registry key")
         if (
             isinstance(self.timeout, bool)
             or not isinstance(self.timeout, (int, float))
@@ -233,6 +244,8 @@ class CleanRequest:
             visible_mask=args.visible_mask,
             visible_box=args.visible_box,
             detect_command=args.detect_command,
+            mark=getattr(args, "mark", None),
+            sensitivity=getattr(args, "sensitivity", "auto"),
             dilate=args.dilate,
             visible_backend=args.visible_backend,
             inpaint_command=args.inpaint_command,
@@ -275,6 +288,7 @@ class CleanRequest:
                 self.visible_mask,
                 self.visible_box,
                 self.detect_command,
+                self.mark is not None,
                 self.dilate is not None,
                 self.inpaint_command,
                 self.visible_backend != "texture",
@@ -370,6 +384,10 @@ class CleanRequest:
             argv += ["--visible-box", ",".join(str(v) for v in self.visible_box)]
         if self.detect_command:
             argv += ["--detect-command", self.detect_command]
+        if self.mark is not None:
+            argv += ["--mark", self.mark]
+            if self.sensitivity != "auto":
+                argv += ["--sensitivity", self.sensitivity]
         if self.dilate is not None:
             argv += ["--dilate", str(self.dilate)]
         if self.visible_backend != "texture":
@@ -477,9 +495,11 @@ def build_clean_plan(request: CleanRequest, dest: Path, kind: AssetKind) -> Clea
     if request.dry_run:
         if kind != "image":
             raise ValueError("--dry-run is only valid for image assets")
-        if not any((request.visible_mask, request.visible_box, request.detect_command)):
+        if not any(
+            (request.visible_mask, request.visible_box, request.detect_command, request.mark)
+        ):
             raise ValueError(
-                "--dry-run requires --visible-mask, --visible-box, or --detect-command"
+                "--dry-run requires --visible-mask, --visible-box, --detect-command, or --mark"
             )
 
     text_plan = TextCleanPlan()
@@ -506,6 +526,8 @@ def build_clean_plan(request: CleanRequest, dest: Path, kind: AssetKind) -> Clea
             mask_path=request.visible_mask,
             box=request.visible_box,
             detect_command=request.detect_command,
+            mark=request.mark,
+            sensitivity=request.sensitivity,
             backend=backend,
             command=request.inpaint_command,
             dilation_radius=(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shlex
@@ -524,3 +525,181 @@ def test_clean_file_learned_backend_choice_parses_and_fails_soft(
     assert "invalid choice" not in result.stderr
     assert f"watermark-remover[{backend}]" in result.stderr
     assert not dest.exists()
+
+
+# ---------------------------------------------------------------------------
+# Registry auto-mark flags at the wm CLI seam (ticket 09)
+# ---------------------------------------------------------------------------
+
+#: sha256 of the pinned no-flag run over :func:`_pin_fixture` + an explicit mask
+#: with the texture backend, computed on the pre-change tree (ticket 09 base
+#: 96b9061). The pinned contract: absent --mark/--sensitivity, the CLI's output
+#: bytes are exactly what base produced.
+_PIN_SHA256 = "993992de5829684f4d20d4d65f646b9bf46f16cedec27545c4f007a21682cd71"
+
+
+def _pin_fixture(tmp_path: Path) -> tuple[Path, Path]:
+    """The deterministic 64x64 input + mask the pin was computed against."""
+    src = tmp_path / "pin-input.png"
+    bg = bytearray([9, 8, 7] * 64 * 64)
+    for y in (28, 29, 30, 31):
+        for x in (28, 29, 30, 31):
+            i = (y * 64 + x) * 3
+            bg[i : i + 3] = b"\xfa\xfb\xfc"
+    src.write_bytes(encode_png(Raster(64, 64, 3, bg)))
+    mask = tmp_path / "pin.mask.pgm"
+    write_pgm(box_mask(64, 64, (26, 26, 8, 8)), mask)
+    return src, mask
+
+
+def test_no_flag_invocation_is_byte_for_byte_pinned(tmp_path: Path) -> None:
+    """Without --mark/--sensitivity the CLI behaves byte-for-byte like base.
+
+    The run uses the flags base had (--visible-mask + --visible-backend texture)
+    and nothing from ticket 09; the output must hash to the base-computed pin.
+    """
+    src, mask = _pin_fixture(tmp_path)
+    dest = tmp_path / "pin-actual.png"
+
+    result = _run(
+        str(src),
+        "-o",
+        str(dest),
+        "--visible-mask",
+        str(mask),
+        "--visible-backend",
+        "texture",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert dest.is_file()
+    assert hashlib.sha256(dest.read_bytes()).hexdigest() == _PIN_SHA256
+
+
+def _planted_fixture(path: Path, *, marked: bool = True) -> None:
+    """A bottom-right Doubao-class mark composed at the engine's measured geometry.
+
+    Same forward model as the engine vectors: ``out = a*fg + (1-a)*bg`` from the
+    shipped renderer-synthetic silhouette.
+    """
+    import cv2
+    import numpy as np
+
+    asset = cv2.imread(str(SCRIPTS / "assets" / "doubao_outline_alpha.png"), cv2.IMREAD_GRAYSCALE)
+    assert asset is not None
+    at = asset.astype(np.float32) / 255.0
+    w, h, base = 1024, 1365, 1024
+    gw = int(0.1636 * base)
+    gh = int(gw * 77 / 346)
+    ax = w - int(0.015 * base) - gw
+    ay = h - int(0.015 * base) - gh
+    img = np.full((h, w, 3), 100, np.uint8)
+    if marked:
+        amap = np.zeros((h, w), np.float32)
+        amap[ay : ay + gh, ax : ax + gw] = cv2.resize(at, (gw, gh))
+        a3 = amap[:, :, None]
+        img = (a3 * 255 + (1 - a3) * img).clip(0, 255).astype(np.uint8)
+    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    path.write_bytes(encode_png(Raster(w, h, 3, bytearray(rgb.tobytes()))))
+
+
+def test_mark_auto_detects_removes_and_validates(tmp_path: Path) -> None:
+    """``--mark auto`` on a planted fixture: detected, removed, validated, reported
+    best-effort, exit 0."""
+    pytest.importorskip("cv2")
+    src = tmp_path / "marked.png"
+    _planted_fixture(src)
+    dest = tmp_path / "cleaned.png"
+
+    result = _run(str(src), "-o", str(dest), "--mark", "auto", "--json")
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["exit_code"] == 0
+    visible = payload["visible"]
+    assert visible["status"] == "completed"
+    assert visible["mark_status"] == "cleaned"
+    assert visible["mark"] == "auto"
+    assert visible["sensitivity"] == "auto"
+    assert [m["key"] for m in visible["marks"]] == ["doubao"]
+    removal = visible["marks"][0]
+    assert removal["status"] == "cleaned"
+    assert removal["confidence_before"] > removal["confidence_after"]
+    assert removal["note"].startswith("best-effort")
+    codes = [a["code"] for a in visible["action_details"]]
+    assert "mask_source" in codes and "inpaint" in codes
+    assert dest.is_file()
+    # the output actually differs from the input (the mark was filled)
+    assert dest.read_bytes() != src.read_bytes()
+
+
+def test_mark_auto_on_clean_image_reports_no_mark_exit_zero(tmp_path: Path) -> None:
+    """Nothing found under --mark auto: status no_mark, exit 0, output written as
+    an unchanged copy (no new exit codes)."""
+    pytest.importorskip("cv2")
+    src = tmp_path / "clean.png"
+    _planted_fixture(src, marked=False)
+    dest = tmp_path / "cleaned.png"
+
+    result = _run(str(src), "-o", str(dest), "--mark", "auto", "--json")
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["exit_code"] == 0
+    visible = payload["visible"]
+    assert visible["mark_status"] == "no_mark"
+    assert visible["marks"] == []
+    assert [a["code"] for a in visible["action_details"]][-1] == "nothing_removed"
+    assert decode_png(dest.read_bytes()).data == decode_png(src.read_bytes()).data
+
+
+def test_sensitivity_flag_parses_and_rides_the_report(tmp_path: Path) -> None:
+    """``--sensitivity strict`` is accepted with --mark and reported verbatim.
+
+    The strict behavioral gates (never relaxes; relaxation needs same-product
+    evidence) are pinned at the registry seam in test_watermark_registry.py;
+    this pins the flag surface.
+    """
+    pytest.importorskip("cv2")
+    src = tmp_path / "input.png"
+    src.write_bytes(encode_png(Raster(64, 64, 3, bytearray([9, 8, 7] * 64 * 64))))
+    dest = tmp_path / "cleaned.png"
+
+    result = _run(str(src), "-o", str(dest), "--mark", "auto", "--sensitivity", "strict", "--json")
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["visible"]["sensitivity"] == "strict"
+    assert payload["visible"]["mark_status"] == "no_mark"
+
+
+def test_mark_and_explicit_sources_are_mutually_exclusive(tmp_path: Path) -> None:
+    src = tmp_path / "input.png"
+    src.write_bytes(encode_png(Raster(8, 8, 3, bytearray([9, 8, 7] * 64))))
+    dest = tmp_path / "cleaned.png"
+    mask = tmp_path / "mask.pgm"
+    write_pgm(box_mask(8, 8, (3, 3, 1, 1)), mask)
+
+    result = _run(str(src), "-o", str(dest), "--mark", "auto", "--visible-mask", str(mask))
+
+    assert result.returncode == 2
+    assert "not allowed with argument" in result.stderr
+    assert not dest.exists()
+
+
+def test_unknown_mark_is_a_usage_error(tmp_path: Path) -> None:
+    src = tmp_path / "input.png"
+    src.write_bytes(encode_png(Raster(8, 8, 3, bytearray([9, 8, 7] * 64))))
+    result = _run(str(src), "-o", tmp_path / "cleaned.png", "--mark", "bogus")
+    assert result.returncode == 2
+
+
+def test_visible_plan_rejects_unknown_mark() -> None:
+    with pytest.raises(ValueError, match="unknown mark"):
+        VisiblePlan(mark="bogus")
+    with pytest.raises(ValueError, match="unknown sensitivity"):
+        VisiblePlan(mark="auto", sensitivity="aggressive")
+    with pytest.raises(ValueError, match="exactly one localization source"):
+        VisiblePlan(box=(0, 0, 1, 1), mark="auto")
+    plan = VisiblePlan(mark="auto", sensitivity="strict")
+    assert plan.mark == "auto" and plan.sensitivity == "strict"

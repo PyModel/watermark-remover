@@ -78,6 +78,15 @@ class VisiblePlan:
     mask_path: Path | None = None
     box: tuple[int, int, int, int] | None = None
     detect_command: str | None = None
+    #: Registry-driven localization: "auto" scans every registered mark, or a
+    #: single registry key (see watermark_registry.mark_keys). Runs the shared
+    #: localize -> fill -> validate pass; None keeps the explicit-mask behavior
+    #: byte-for-byte.
+    mark: str | None = None
+    #: Trust policy for the registry pass: "auto" relaxes a mark's gate only on
+    #: same-product evidence (TC260 producer metadata, or a strict sibling mark);
+    #: "strict" never relaxes.
+    sensitivity: str = "auto"
     backend: str = "print-plan"
     command: str | None = None
     dilation_radius: int = DEFAULT_DILATION_RADIUS
@@ -93,8 +102,20 @@ class VisiblePlan:
     def __post_init__(self) -> None:
         if self.backend not in VISIBLE_BACKENDS:
             raise ValueError(f"unknown visible backend: {self.backend}")
+        if self.sensitivity not in ("auto", "strict"):
+            raise ValueError(
+                f"unknown sensitivity {self.sensitivity!r}; expected 'auto' or 'strict'"
+            )
+        if self.mark is not None and self.mark != "auto":
+            from watermark_registry import mark_keys
+
+            if self.mark not in mark_keys():
+                raise ValueError(
+                    f"unknown mark {self.mark!r}; expected 'auto' or one of {mark_keys()}"
+                )
         sources = sum(
-            source is not None for source in (self.mask_path, self.box, self.detect_command)
+            source is not None
+            for source in (self.mask_path, self.box, self.detect_command, self.mark)
         )
         if sources > 1:
             raise ValueError("exactly one localization source may be configured")
@@ -948,6 +969,180 @@ def _resolve_fill_backend(name: str) -> Any:
     return inpaint_backends.resolve_backend(name)
 
 
+def _registry_fill_backend(backend: str) -> str:
+    """Map a visible-plan backend to the registry fill vocabulary.
+
+    ``migan``/``lama`` pass through; the cv2 pair maps to the registry's ``cv2``;
+    the pure texture/simple backends mean "no learned model demanded", so the
+    registry resolves its own quality order (lama > migan > cv2, cv2 as floor)."""
+    if backend in ("migan", "lama"):
+        return backend
+    if backend in REGISTRY_FILL_BACKENDS:  # cv2-telea / cv2-ns
+        return "cv2"
+    return "auto"
+
+
+def _remove_visible_marks(
+    path: Path,
+    dest: Path,
+    plan: VisiblePlan,
+    *,
+    data: bytes,
+    fmt: str,
+    raster: Raster,
+    mask_details: dict[str, Mask] | None,
+) -> dict[str, Any]:
+    """The ``--mark`` path: registry localize -> fill -> validate on the decoded frame.
+
+    Always writes ``dest`` (an unchanged copy when nothing was detected -- an
+    idempotent clean) and returns the standard visible report with the mark
+    results riding along under ``mark_status`` / ``marks``. The aggregate status
+    stays ``completed`` (the pipeline produced an output); ``mark_status`` is the
+    honest ``no_mark`` / ``cleaned`` / ``partial`` / ``unvalidated`` verdict and
+    every auto-detected removal is labeled best-effort in the action text.
+    """
+    # Pixel-path imports, lazily: the stdlib core never loads them; only a caller
+    # that passed --mark opted into cv2/numpy through the registry.
+    import cv2
+    import numpy as np
+    import tc260_label
+    import tc260_verify
+    import watermark_registry as reg
+
+    image = (
+        np.frombuffer(bytes(raster.data), dtype=np.uint8)
+        .reshape(raster.height, raster.width, raster.channels)
+        .copy()
+    )
+    if raster.channels == 1:
+        bgr = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    elif raster.channels == 4:
+        bgr = cv2.cvtColor(image, cv2.COLOR_RGBA2BGR)
+    else:
+        bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+
+    # Same-product evidence for the `auto` sensitivity: a TC260 label whose
+    # ContentProducer maps (via tc260_verify) to a registered mark's product.
+    # Unmapped producers never relax a gate.
+    provenance: frozenset[str] = frozenset()
+    label = tc260_label.label_from_metadata(data)
+    if label:
+        producer = tc260_verify.producer_for_code(label.get("ContentProducer", ""))
+        if producer is not None:
+            provenance = frozenset({producer.key})
+
+    fill_backend = _registry_fill_backend(plan.backend)
+    if plan.mark == "auto":
+        report = reg.remove_auto_marks_detailed(
+            bgr,
+            sensitivity=plan.sensitivity,  # type: ignore[arg-type]
+            provenance=provenance,
+            backend=fill_backend,  # type: ignore[arg-type]
+        )
+    else:
+        report = reg.remove_mark_detailed(
+            bgr,
+            plan.mark,  # type: ignore[arg-type]
+            sensitivity=plan.sensitivity,  # type: ignore[arg-type]
+            provenance=provenance,
+            backend=fill_backend,  # type: ignore[arg-type]
+        )
+    out_bgr = report.image
+
+    # The union of the masks actually filled: clean_asset's outside-mask
+    # verification runs against exactly the pixels that changed, never a bbox proxy.
+    union = np.zeros(out_bgr.shape[:2], np.uint8)
+    for removal in report.marks:
+        if removal.mask is not None:
+            union |= removal.mask
+    if mask_details is not None:
+        union_mask = Mask(out_bgr.shape[1], out_bgr.shape[0], bytearray(union.tobytes()))
+        mask_details.update(original=union_mask, effective=union_mask)
+
+    actions: list[Action] = [act.mask_source(f"registry:{plan.mark}")]
+    if report.marks:
+        resolved = report.marks[0].backend
+        labels = ", ".join(m.label for m in report.marks)
+        actions.append(
+            Action(
+                act.ActionCode.INPAINT,
+                act.Effect.CHANGE,
+                f"registry {resolved} fill (best-effort): removed "
+                f"{len(report.marks)} mark(s): {labels}",
+                {"backend": resolved, "marks": [m.key for m in report.marks]},
+            )
+        )
+    else:
+        actions.append(
+            act.nothing_removed(fmt, f"no registered mark detected (--mark {plan.mark})")
+        )
+
+    # Encode back into the source raster's channel layout (alpha preserved: the
+    # original plane is re-attached untouched).
+    if raster.channels == 1:
+        out = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2GRAY)
+        payload = out
+    elif raster.channels == 4:
+        rgba = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGBA)
+        rgba[..., 3] = image[..., 3]
+        payload = rgba
+    else:
+        payload = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
+    atomic_write_bytes(
+        dest,
+        encode_png(
+            Raster(
+                raster.width,
+                raster.height,
+                raster.channels,
+                bytearray(np.ascontiguousarray(payload).tobytes()),
+            )
+        ),
+    )
+
+    provisional = reg.provisional_marks()
+    return {
+        "status": "completed",
+        "input": str(path),
+        "output": str(dest),
+        "format": fmt,
+        "backend": plan.backend,
+        "mask": None,  # frictionless: the effective mask lives in mask_details only
+        "mark": plan.mark,
+        "mark_status": report.status,  # no_mark / cleaned / partial / unvalidated
+        "sensitivity": plan.sensitivity,
+        "provenance": sorted(provenance),
+        "marks": [
+            {
+                "key": m.key,
+                "label": m.label,
+                "location": m.location,
+                "region": list(m.region) if m.region else None,
+                "mask_bbox": list(m.mask_bbox),
+                "backend": m.backend,
+                "confidence_before": round(m.confidence_before, 4),
+                "confidence_after": (
+                    round(m.confidence_after, 4) if m.confidence_after is not None else None
+                ),
+                "status": m.status,
+                "residual_region": list(m.residual_region) if m.residual_region else None,
+                "provisional": m.key in provisional,
+                "note": "best-effort detection and removal; validated by the same detector",
+            }
+            for m in report.marks
+        ],
+        "initial_mask_pixels": int((union > 0).sum()),
+        "refined_mask_pixels": int((union > 0).sum()),
+        "dilation_radius": 0,
+        **report_actions(actions),
+        "note": (
+            "Registry localize -> fill -> validate pass. Auto-detected removal is "
+            "best-effort: the validation step is the same detector re-run, not an "
+            "independent oracle."
+        ),
+    }
+
+
 def remove_visible(
     path: Path,
     dest: Path | None,
@@ -963,7 +1158,7 @@ def remove_visible(
     actions: list[Action] = []
 
     has_source = any(
-        source is not None for source in (plan.mask_path, plan.box, plan.detect_command)
+        source is not None for source in (plan.mask_path, plan.box, plan.detect_command, plan.mark)
     )
     if not has_source:
         return {
@@ -988,6 +1183,19 @@ def remove_visible(
         raise ValueError(
             f"{fmt} input must be written to a PNG destination (.png); "
             "outside-mask guarantee cannot survive a JPEG re-encode"
+        )
+
+    if plan.mark is not None:
+        assert dest is not None
+        assert raster is not None
+        return _remove_visible_marks(
+            path,
+            dest,
+            plan,
+            data=data,
+            fmt=fmt,
+            raster=raster,
+            mask_details=mask_details,
         )
 
     if plan.mask_path is not None:
