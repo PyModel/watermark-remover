@@ -1060,6 +1060,22 @@ def _remove_visible_marks(
         mask_details.update(original=union_mask, effective=union_mask)
 
     actions: list[Action] = [act.mask_source(f"registry:{plan.mark}")]
+    # The registry, not --visible-backend, owns the fill: report the backend
+    # that actually ran (None when nothing was filled) and warn loudly when the
+    # planned backend cannot apply here (the external command template has no
+    # place in the localize -> fill -> validate pass).
+    resolved_report_backend = report.marks[0].backend if report.marks else None
+    if plan.backend == "external":
+        actions.append(
+            Action(
+                act.ActionCode.VISIBLE_PLAN,
+                act.Effect.WARNING,
+                "external backend not applicable to registry marks: the fill ran "
+                f"through the registry ({resolved_report_backend}); --command was "
+                "not invoked",
+                {"planned_backend": "external", "used_backend": resolved_report_backend},
+            )
+        )
     if report.marks:
         resolved = report.marks[0].backend
         labels = ", ".join(m.label for m in report.marks)
@@ -1106,7 +1122,10 @@ def _remove_visible_marks(
         "input": str(path),
         "output": str(dest),
         "format": fmt,
-        "backend": plan.backend,
+        # The backend that actually filled (registry vocabulary), not the
+        # planned --visible-backend; plan.backend stays only when nothing was
+        # filled and no fill resolution ran.
+        "backend": resolved_report_backend if resolved_report_backend is not None else plan.backend,
         "mask": None,  # frictionless: the effective mask lives in mask_details only
         "mark": plan.mark,
         "mark_status": report.status,  # no_mark / cleaned / partial / unvalidated
@@ -1134,6 +1153,9 @@ def _remove_visible_marks(
         "initial_mask_pixels": int((union > 0).sum()),
         "refined_mask_pixels": int((union > 0).sum()),
         "dilation_radius": 0,
+        # The registered engines own their dilation; --dilate is not applied on
+        # this path, so the field states that instead of implying it was.
+        "dilation": "engine-controlled (0 user-applied)",
         **report_actions(actions),
         "note": (
             "Registry localize -> fill -> validate pass. Auto-detected removal is "

@@ -703,3 +703,77 @@ def test_visible_plan_rejects_unknown_mark() -> None:
         VisiblePlan(box=(0, 0, 1, 1), mark="auto")
     plan = VisiblePlan(mark="auto", sensitivity="strict")
     assert plan.mark == "auto" and plan.sensitivity == "strict"
+
+
+# ---------------------------------------------------------------------------
+# Stage 8 fix pass 2: honest mark-path reporting (findings F3 + F7)
+# ---------------------------------------------------------------------------
+
+
+def test_mark_auto_reports_the_actual_fill_backend_not_the_planned_one(tmp_path: Path) -> None:
+    """F3: a mark plan resolves its fill through the registry, so the report's
+    ``backend`` field must name the backend that actually filled, not the
+    ``--visible-backend`` value (whose texture/external choices the registry
+    pass never uses)."""
+    pytest.importorskip("cv2")
+    src = tmp_path / "marked.png"
+    _planted_fixture(src)
+    dest = tmp_path / "cleaned.png"
+
+    result = _run(str(src), "-o", str(dest), "--mark", "auto", "--json")
+
+    assert result.returncode == 0, result.stderr
+    visible = json.loads(result.stdout)["visible"]
+    assert visible["marks"], "fixture must fire a mark for this pin"
+    assert visible["backend"] == visible["marks"][0]["backend"]
+
+
+def test_mark_auto_with_external_backend_reports_the_registry_fill_and_warns(tmp_path: Path) -> None:
+    """F3: `--visible-backend external` cannot drive a registry mark fill (the
+    external command template has no place in the localize->fill->validate
+    pass), so the report must name the registry backend that actually ran and
+    carry a labeled warning that external was not applied."""
+    pytest.importorskip("cv2")
+    src = tmp_path / "marked.png"
+    _planted_fixture(src)
+    dest = tmp_path / "cleaned.png"
+
+    result = _run(
+        str(src),
+        "-o",
+        str(dest),
+        "--mark",
+        "auto",
+        "--visible-backend",
+        "external",
+        "--inpaint-command",
+        'inpainter --image "{input}" --mask "{mask}" --output "{output}"',
+        "--json",
+    )
+
+    assert result.returncode == 0, result.stderr
+    visible = json.loads(result.stdout)["visible"]
+    assert visible["marks"], "fixture must fire a mark for this pin"
+    assert visible["backend"] == visible["marks"][0]["backend"]
+    assert visible["backend"] != "external"
+    warnings = [a for a in visible["action_details"] if a["effect"] == "warning"]
+    assert any("external" in a["text"] and "registry" in a["text"] for a in warnings), (
+        "expected a labeled warning that the external backend was not applied"
+    )
+
+
+def test_mark_auto_reports_dilation_as_engine_controlled(tmp_path: Path) -> None:
+    """F7: the registry engines own their dilation, so the mark report must not
+    imply a user `--dilate` radius applied: it states 0 user-applied pixels and
+    labels the dilation engine-controlled."""
+    pytest.importorskip("cv2")
+    src = tmp_path / "clean.png"
+    _planted_fixture(src, marked=False)
+    dest = tmp_path / "cleaned.png"
+
+    result = _run(str(src), "-o", str(dest), "--mark", "auto", "--dilate", "5", "--json")
+
+    assert result.returncode == 0, result.stderr
+    visible = json.loads(result.stdout)["visible"]
+    assert visible["dilation_radius"] == 0
+    assert visible["dilation"] == "engine-controlled (0 user-applied)"
