@@ -516,6 +516,20 @@ def _run_planned(src: Path, dest: Path, request: CleanRequest) -> dict[str, Any]
     return payload
 
 
+def _plan_preflight(src: Path, dest: Path, request: CleanRequest) -> None:
+    """Run the canonical preflight for one asset without executing it.
+
+    The ``also_layer_a_text=False`` container branch cannot hand the executor
+    the client's value (``CleanPlan`` has no container option yet), but its
+    requests must still clear the same ``plan_work`` refusals — the input
+    size cap, aliased outputs — that ``_run_planned`` gives every other
+    branch. Raises ``ValueError`` with the planner's message, exactly like
+    the executed paths.
+    """
+    item = InputItem(path=src, relative=Path(src.name))
+    plan_work([item], request, batch=False)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = f"watermark-remover/{VERSION}"
 
@@ -792,10 +806,14 @@ class Handler(BaseHTTPRequestHandler):
                 if options.get("also_layer_a_text") is False:
                     # The one whitelisted option the canonical CleanPlan cannot
                     # express yet: skipping the Layer-A text scrub of container
-                    # bodies has no request field, so the executor's own
-                    # clean_container call runs with the client's value. When
-                    # CleanPlan grows a container option, this branch folds
-                    # into _run_planned like every other case.
+                    # bodies has no plan field, so the executor would run the
+                    # scrub the client asked to skip. The request still clears
+                    # the shared preflight — the same refusals _run_planned
+                    # inherits — and only execution falls to clean_container
+                    # with the client's value. When CleanPlan grows a container
+                    # option, this branch folds into _run_planned like every
+                    # other case.
+                    _plan_preflight(src, dest, _compose_clean_request(options, dest, kind))
                     result = clean_container(src, dest, also_layer_a_text=False)
                     report = {"kind": "container", **result}
                 else:
