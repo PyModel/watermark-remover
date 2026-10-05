@@ -616,6 +616,9 @@ def render_to_dir(
     selected = list(ASSET_SPECS)
     if names is not None:
         by_name = {spec.name: spec for spec in ASSET_SPECS}
+        unknown = [n for n in names if n not in by_name]
+        if unknown:
+            raise ValueError(f"unknown asset name(s) {unknown}; known: {sorted(by_name)}")
         selected = [by_name[n] for n in names]
     out = Path(out_dir) if out_dir is not None else ASSETS_DIR
     Image = _import_pixel("PIL.Image")
