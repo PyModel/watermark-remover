@@ -254,6 +254,15 @@ def _bootstrap_registry() -> None:
     import opencv_inpaint
 
     _REGISTRY.extend(opencv_inpaint.get_opencv_backends())
+    # Learned ONNX tiers (ticket 04): same deferred shape, best-quality first
+    # (auto resolves by FILL_RESOLVE_ORDER, so registration order is cosmetic).
+    # Without onnxruntime the fill modules' get_*_backends() return [] and a
+    # named selection takes the labeled-unavailable path.
+    import lama_fill
+    import migan_fill
+
+    _REGISTRY.extend(lama_fill.get_lama_backends())
+    _REGISTRY.extend(migan_fill.get_migan_backends())
 
 
 _bootstrapped = False

@@ -211,6 +211,34 @@ def _install_stub_opencv(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
     return stub
 
 
+def _force_learned_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force the learned-tier gates off so the no-learned-backends registry
+    states stay deterministic on machines where onnxruntime IS installed.
+
+    Ticket 04 registers the MI-GAN/LaMa tiers whenever onnxruntime imports,
+    which turns t03's build-time premises ('no learned backend is registered
+    in this build') into a gate state. Tests pinning those states force the
+    gates by name -- the same environment-independence rule as
+    _install_stub_opencv / _write_broken_opencv.
+    """
+    import lama_fill
+    import migan_fill
+
+    monkeypatch.setattr(migan_fill, "onnxruntime_available", lambda: False)
+    monkeypatch.setattr(lama_fill, "onnxruntime_available", lambda: False)
+
+
+def _force_learned_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force the learned-tier gates on without onnxruntime: the registered
+    adapter objects resolve through the registry; inference itself is reached
+    only through the fake-session tests in test_onnx_fills.py."""
+    import lama_fill
+    import migan_fill
+
+    monkeypatch.setattr(migan_fill, "onnxruntime_available", lambda: True)
+    monkeypatch.setattr(lama_fill, "onnxruntime_available", lambda: True)
+
+
 @pytest.fixture
 def fresh_registry(monkeypatch: pytest.MonkeyPatch):
     """Rebuild the backend registry from scratch, restoring it afterwards."""
@@ -239,12 +267,31 @@ def test_bootstrap_registers_cv2_backends_when_opencv_present(
     assert "cv2-ns" in names
 
 
+def test_bootstrap_registers_learned_backends_when_gates_on(
+    monkeypatch: pytest.MonkeyPatch, fresh_registry
+) -> None:
+    # Ticket 04: the learned ONNX tiers join the registry whenever their
+    # gates pass (onnxruntime importable) — forced here so the registered
+    # path is deterministic on machines without onnxruntime too. Inference
+    # is never reached (fake-session coverage lives in test_onnx_fills.py).
+    _install_stub_opencv(monkeypatch)
+    _force_learned_present(monkeypatch)
+
+    names = [backend.name for backend in fresh_registry.get_backends()]
+
+    assert names == ["texture-patch", "simple", "cv2-telea", "cv2-ns", "lama", "migan"]
+
+
 def test_bootstrap_excludes_cv2_backends_without_opencv(
     monkeypatch: pytest.MonkeyPatch, fresh_registry
 ) -> None:
     # Forced-absent regardless of the ambient environment: the incumbent
     # pair must stay intact and no half-registered cv2 backend may appear.
+    # The learned gates are forced off for the same reason (ticket 04 makes
+    # learned registration environment-driven, and this state pins the
+    # both-extras-absent build).
     monkeypatch.setattr(optional_deps, "cv2", None)
+    _force_learned_absent(monkeypatch)
 
     names = [backend.name for backend in fresh_registry.get_backends()]
 
@@ -287,7 +334,11 @@ class TestResolveBackend:
     def test_auto_skips_unregistered_learned_tiers(
         self, monkeypatch: pytest.MonkeyPatch, fresh_registry
     ) -> None:
+        # Ticket 04 expired the build-time 'learned tiers are unregistered'
+        # premise: with onnxruntime installed they register, so the gates are
+        # forced off to pin the learned-absent state deterministically.
         _install_stub_opencv(monkeypatch)
+        _force_learned_absent(monkeypatch)
 
         assert fresh_registry.resolve_backend("auto").name == "cv2-telea"
 
@@ -295,6 +346,7 @@ class TestResolveBackend:
         self, monkeypatch: pytest.MonkeyPatch, fresh_registry
     ) -> None:
         monkeypatch.setattr(optional_deps, "cv2", None)
+        _force_learned_absent(monkeypatch)
 
         assert fresh_registry.resolve_backend("auto").name == "texture-patch"
 
@@ -322,12 +374,18 @@ class TestResolveBackend:
         assert fresh_registry.resolve_backend("cv2-ns").name == "cv2-ns"
 
     @pytest.mark.parametrize("name", ["migan", "lama"])
-    def test_named_learned_tier_is_labeled_unavailable(self, name: str) -> None:
+    def test_named_learned_tier_is_labeled_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch, fresh_registry, name: str
+    ) -> None:
         from inpaint_backends import resolve_backend
 
-        # Not registered in this build (the migan/lama extras land with ticket 04):
-        # a named selection must fail soft with the canonical install hint, never
+        # Ticket 04 registers the learned tiers when onnxruntime is present,
+        # so the labeled-unavailable path is pinned with the gates forced off
+        # (the registration itself is covered by
+        # test_bootstrap_registers_learned_backends_when_gates_on): a named
+        # selection must fail soft with the canonical install hint, never
         # silently degrade to another tier.
+        _force_learned_absent(monkeypatch)
         with pytest.raises(ValueError, match=rf"watermark-remover\[{name}\]"):
             resolve_backend(name)
 
