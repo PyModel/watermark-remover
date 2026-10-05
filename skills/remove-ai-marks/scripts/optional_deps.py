@@ -94,8 +94,8 @@ def check_optional(extra: str) -> BackendAvailability:
         "detect": ("numpy", "cv2", "pywt"),
         # The aggregate extra joins the registry with a real checker: every
         # member declared in pyproject at this commit (visible + quality + ai
-        # + provenance + detect; source-classify joins when it lands). A
-        # probed-but-unchanged probe order is irrelevant; only the union is.
+        # + provenance + detect; source-classify joins when it lands). Probe
+        # order is irrelevant; the union is what the aggregate promises.
         "all": ("cv2", "skimage", "torch", "c2pa", "numpy", "pywt"),
     }
     pkgs = _checkers.get(extra)
