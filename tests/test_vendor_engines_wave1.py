@@ -34,6 +34,8 @@ from jimeng_engine import _template_match_score as _jimeng_score
 from kling_engine import _LATIN_CONFIG, KlingEngine
 from kling_engine import _glyph_silhouette as _kling_silhouette
 from numpy.typing import NDArray
+from qwen_engine import QwenEngine
+from qwen_engine import _glyph_silhouette as _qwen_silhouette
 from region_eraser import erase as erase_mask
 from yuanbao_engine import YuanbaoEngine
 
@@ -646,6 +648,116 @@ class TestKlingEngine:
     def test_fill_clears_and_leaves_far_region_exact(self):
         wm, _ = self._compose(853, 640)
         eng = KlingEngine()
+        out = _fill(eng, wm)
+        assert not eng.detect(out).detected
+        h, w = wm.shape[:2]
+        assert np.array_equal(out[: h // 2, : w // 2], wm[: h // 2, : w // 2])
+
+
+class TestQwenEngine:
+    """Vectors adapted from upstream test_qwen_engine.py.
+
+    Deviation from upstream: the Qwen Create symbol-only arm is NOT ported — its
+    three-lobe silhouette is a fixture-residual capture solve, forbidden in this
+    tree (see assets/PROVENANCE.md), and upstream's engine constructor hard-raises
+    when that asset is missing. The calibrated text arm is unchanged.
+    """
+
+    def _compose(self, w: int, h: int, mode: float, bg: float = 100.0):
+        return _compose_mark(
+            "qwen_alpha.png",
+            w,
+            h,
+            width_frac=mode,
+            aspect=0.0416 / 0.160,
+            bg=bg,
+            margin_right=0.025,
+            margin_bottom=0.025,
+        )
+
+    def test_locate_anchored_bottom_right_off_the_corner(self):
+        # The measured right margin (~0.025 of short) is wider than Doubao's 0.004;
+        # inheriting Doubao's anchor clipped the first glyph (0.73 -> 0.26 NCC).
+        eng = QwenEngine()
+        img = np.zeros((2048, 2048, 3), np.uint8)
+        loc = eng.locate(img)
+        assert 2048 - (loc.x + loc.w) == pytest.approx(2048 * 0.0203, rel=0.15)
+        assert 2048 - (loc.y + loc.h) == pytest.approx(2048 * 0.0218, rel=0.15)
+
+    def test_locate_scales_with_short_side_not_width(self):
+        eng = QwenEngine()
+        landscape = eng.locate(np.zeros((640, 1280, 3), np.uint8))
+        wider = eng.locate(np.zeros((640, 2560, 3), np.uint8))
+        assert wider.w == landscape.w
+        bigger = eng.locate(np.zeros((1280, 1920, 3), np.uint8))
+        assert bigger.w == pytest.approx(landscape.w * 2, rel=0.05)
+
+    def test_config_pins(self):
+        # The two measured size modes need the per-mark 2-rung ladder; the shared
+        # 3-rung default covers only ~75% of marks. Strict-only: the sub-gate band
+        # is dominated by non-Qwen banners.
+        eng = QwenEngine()
+        assert eng.config.ladder == (0.78, 1.27)
+        assert eng.config.provenance_ncc_factor == 1.0
+
+    def test_clean_gradient_not_detected(self):
+        eng = QwenEngine()
+        ramp = np.tile(np.linspace(0, 255, 1024, dtype=np.uint8), (1024, 1))
+        img = cv2.cvtColor(ramp, cv2.COLOR_GRAY2BGR)
+        assert not eng.detect(img).detected
+
+    def test_solid_blob_corner_not_detected(self):
+        eng = QwenEngine()
+        img = np.zeros((1024, 1024, 3), np.uint8)
+        x, y, bw, bh = eng.locate(img).bbox
+        img[y + bh // 4 : y + bh * 3 // 4, x : x + bw // 2] = 200
+        assert not eng.detect(img).detected
+
+    def test_silhouette_loads_binary(self):
+        sil = _qwen_silhouette()
+        assert sil is not None
+        assert set(np.unique(sil)).issubset({0, 255})
+
+    @pytest.mark.parametrize("mode", [0.203, 0.124])
+    def test_both_size_modes_detected(self, mode: float):
+        # The registration's core claim: a mark at EITHER measured mode scores over
+        # the gate (a single fraction on the shared ladder lost the small mode).
+        wm, _ = self._compose(853, 640, mode)
+        det = QwenEngine().detect(wm)
+        assert det.detected
+        assert det.confidence >= 0.80
+
+    def test_small_image_guarded(self):
+        wm, _ = self._compose(853, 640, 0.203)
+        eng = QwenEngine()
+        assert eng.detect(wm).detected
+        assert not eng.detect(cv2.resize(wm, (150, 112))).detected
+
+    def test_unaccepted_candidate_cannot_hide_detected_text(self):
+        # best_detection prefers an ACCEPTED verdict: a stronger score that the
+        # gates rejected must never mask a detection that passed.
+        from _text_mark_engine import TextMarkDetection, best_detection
+
+        text_detection = TextMarkDetection(detected=True, confidence=0.45)
+        symbol_detection = TextMarkDetection(detected=False, confidence=0.46)
+        assert best_detection(text_detection, symbol_detection) is text_detection
+
+    def test_footprint_mask_in_bottom_right(self):
+        wm, _ = self._compose(853, 640, 0.203)
+        mask = QwenEngine().footprint_mask(wm)
+        assert mask is not None
+        ys, xs = np.where(mask > 0)
+        assert ys.mean() > wm.shape[0] / 2
+        assert xs.mean() > wm.shape[1] / 2
+
+    def test_clean_frame_produces_no_mask(self):
+        clean = cv2.GaussianBlur(np.full((640, 853, 3), 120, np.uint8), (5, 5), 0)
+        assert QwenEngine().footprint_mask(clean, force=False) is None
+
+    @pytest.mark.parametrize("mode", [0.203, 0.124])
+    def test_fill_clears_at_both_modes(self, mode: float):
+        wm, _ = self._compose(853, 640, mode)
+        eng = QwenEngine()
         out = _fill(eng, wm)
         assert not eng.detect(out).detected
         h, w = wm.shape[:2]
