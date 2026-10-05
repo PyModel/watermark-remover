@@ -65,6 +65,21 @@ ai = [
 provenance = [
     "c2pa-python",
 ]
+# The learned ONNX fill tiers (ticket 04). Both probe onnxruntime + the
+# Hugging Face hub client; the model weights download pinned to an audited
+# commit at first use into the user's HF cache and are never bundled:
+#   migan: andraniksargsyan/migan (MIT, ~28 MB)
+#   lama:  Carve/LaMa-ONNX (Apache-2.0, ~200 MB)
+migan = [
+    "watermark-remover[pixel]",
+    "onnxruntime>=1.20,<2",
+    "huggingface-hub>=0.20,<2",
+]
+lama = [
+    "watermark-remover[pixel]",
+    "onnxruntime>=1.20,<2",
+    "huggingface-hub>=0.20,<2",
+]
 all = [
     "watermark-remover[visible]",
     "watermark-remover[quality]",

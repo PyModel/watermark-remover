@@ -14,6 +14,7 @@ from __future__ import annotations
 import importlib
 import sys
 import types
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -475,3 +476,31 @@ class TestExtrasStatus:
         extras = server.capabilities()["extras"]
         assert "migan" in extras
         assert "lama" in extras
+
+
+@pytest.mark.skipif(sys.version_info < (3, 11), reason="tomllib requires Python 3.11+")
+class TestPyprojectExtras:
+    """The guarded pyproject seam (plan Phase 3 C2/C3 authorization)."""
+
+    @staticmethod
+    def _extras() -> dict:
+        import tomllib
+
+        root = Path(__file__).resolve().parents[1]
+        data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        return data["project"]["optional-dependencies"]
+
+    @pytest.mark.parametrize("extra", ["migan", "lama"])
+    def test_onnx_extra_declares_runtime_hub_and_pixel(self, extra) -> None:
+        deps = self._extras()[extra]
+        joined = " ".join(deps)
+        assert "onnxruntime" in joined
+        assert "huggingface-hub" in joined
+        assert "watermark-remover[pixel]" in joined, "pixel deps ride along"
+
+    def test_onnx_extras_not_folded_into_all(self) -> None:
+        # `all` keeps its reviewed membership; learned tiers stay opt-in
+        # (they pull ~28-200 MB model downloads on first use).
+        all_deps = " ".join(self._extras()["all"])
+        assert "[migan]" not in all_deps
+        assert "[lama]" not in all_deps
