@@ -31,6 +31,8 @@ from jimeng_engine import JimengEngine
 from jimeng_engine import _alpha_template as _jimeng_alpha
 from jimeng_engine import _glyph_silhouette as _jimeng_silhouette
 from jimeng_engine import _template_match_score as _jimeng_score
+from kling_engine import _LATIN_CONFIG, KlingEngine
+from kling_engine import _glyph_silhouette as _kling_silhouette
 from numpy.typing import NDArray
 from region_eraser import erase as erase_mask
 from yuanbao_engine import YuanbaoEngine
@@ -530,3 +532,121 @@ class TestDoubaoEngine:
         assert _doubao_score(np.zeros((0, 5), np.uint8), 1000) == 0.0
         assert _doubao_score(np.zeros((10, 3), np.uint8), 1000) == 0.0  # width-1 < min_gw
         assert _doubao_score(np.zeros((3, 200), np.uint8), 1000) == 0.0  # height-1 < 4
+
+
+class TestKlingEngine:
+    """Vectors adapted from upstream test_kling_engine.py."""
+
+    def _compose(self, w: int, h: int, bg: float = 100.0):
+        return _compose_mark(
+            "kling_alpha.png",
+            w,
+            h,
+            width_frac=0.12,
+            aspect=0.0287 / 0.12,
+            bg=bg,
+            margin_right=0.03,
+            margin_bottom=0.023,
+        )
+
+    def test_locate_anchored_bottom_right(self):
+        eng = KlingEngine()
+        img = np.zeros((2048, 2048, 3), np.uint8)
+        loc = eng.locate(img)
+        assert 2048 - (loc.x + loc.w) == pytest.approx(2048 * 0.03, rel=0.15)
+        assert 2048 - (loc.y + loc.h) == pytest.approx(2048 * 0.023, rel=0.15)
+
+    def test_locate_scales_with_short_side_not_width(self):
+        eng = KlingEngine()
+        landscape = eng.locate(np.zeros((640, 1280, 3), np.uint8))
+        wider = eng.locate(np.zeros((640, 2560, 3), np.uint8))
+        assert wider.w == landscape.w  # same short side -> same box
+        bigger = eng.locate(np.zeros((1280, 1920, 3), np.uint8))  # 2x the short side
+        assert bigger.w == pytest.approx(landscape.w * 2, rel=0.05)
+
+    def test_config_pins(self):
+        # The CJK mark is unimodal at 0.12 of the short side, so Kling keeps the
+        # shared 3-rung ladder (Qwen's per-mark ladder is the measured exception).
+        # The sub-gate band overlaps the clean arm's top, so relaxation is disabled.
+        eng = KlingEngine()
+        assert eng.config.ladder == (0.8, 1.0, 1.25)
+        assert eng.config.provenance_ncc_factor == 1.0
+        assert eng.config.detect_ncc_threshold > 0.32
+        # The Latin IMAGE 3.0 variant keeps its own measured narrow ladder + gate.
+        assert _LATIN_CONFIG.asset_name == "kling_latin_alpha.png"
+        assert _LATIN_CONFIG.ladder == (0.9, 1.0, 1.1)
+        assert _LATIN_CONFIG.detect_ncc_threshold == 0.40
+
+    def test_clean_gradient_not_detected(self):
+        eng = KlingEngine()
+        ramp = np.tile(np.linspace(0, 255, 1024, dtype=np.uint8), (1024, 1))
+        img = cv2.cvtColor(ramp, cv2.COLOR_GRAY2BGR)
+        assert not eng.detect(img).detected
+
+    def test_solid_blob_corner_not_detected(self):
+        eng = KlingEngine()
+        img = np.zeros((1024, 1024, 3), np.uint8)
+        x, y, bw, bh = eng.locate(img).bbox
+        img[y + bh // 4 : y + bh * 3 // 4, x : x + bw // 2] = 200
+        assert not eng.detect(img).detected
+
+    def test_silhouette_loads_binary(self):
+        sil = _kling_silhouette()
+        assert sil is not None
+        assert set(np.unique(sil)).issubset({0, 255})
+
+    def test_composed_mark_detected(self):
+        # The registration's core claim: a mark at the measured size scores over the
+        # gate. The floor is deliberately far above the gate: the synthetic mark is
+        # clean, so it scores high when the geometry is right.
+        wm, _ = self._compose(853, 640)
+        det = KlingEngine().detect(wm)
+        assert det.detected
+        assert det.confidence >= 0.80
+
+    def test_latin_variant_detected(self):
+        """The Latin IMAGE 3.0 arm catches its own layout (measured narrow ladder).
+
+        Composed at the 2048-class frame the gate was calibrated on (upstream's
+        evidence is the provider-native export): the thin latin strokes degrade
+        under the fixed background-model blur on sub-native frames, so the
+        synthetic vector pins the native-resolution class only.
+        """
+        wm, _ = _compose_mark(
+            "kling_latin_alpha.png",
+            2048,
+            1536,
+            width_frac=0.14,
+            aspect=0.032 / 0.14,
+            margin_right=0.002,
+            margin_bottom=0.002,
+        )
+        det = KlingEngine().detect(wm)
+        assert det.detected
+        assert det.template_asset == "kling_latin_alpha.png"
+
+    def test_small_image_guarded(self):
+        wm, _ = self._compose(853, 640)
+        eng = KlingEngine()
+        assert eng.detect(wm).detected
+        assert not eng.detect(cv2.resize(wm, (150, 112))).detected
+
+    def test_footprint_mask_in_bottom_right(self):
+        wm, _ = self._compose(853, 640)
+        mask = KlingEngine().footprint_mask(wm)
+        assert mask is not None
+        ys, xs = np.where(mask > 0)
+        assert ys.mean() > wm.shape[0] / 2
+        assert xs.mean() > wm.shape[1] / 2
+
+    def test_clean_frame_produces_no_mask(self):
+        clean = cv2.GaussianBlur(np.full((640, 853, 3), 120, np.uint8), (5, 5), 0)
+        assert KlingEngine().footprint_mask(clean, force=False) is None
+
+    def test_fill_clears_and_leaves_far_region_exact(self):
+        wm, _ = self._compose(853, 640)
+        eng = KlingEngine()
+        out = _fill(eng, wm)
+        assert not eng.detect(out).detected
+        h, w = wm.shape[:2]
+        assert np.array_equal(out[: h // 2, : w // 2], wm[: h // 2, : w // 2])
