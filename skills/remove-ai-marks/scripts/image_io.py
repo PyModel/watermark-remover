@@ -599,6 +599,9 @@ def write_bgr_with_alpha(
     path: str | Path,
     bgr: NDArray[Any],
     alpha: NDArray[Any] | None,
+    *,
+    display_tags_from: str | Path | None = None,
+    orientation_applied: bool | None = None,
 ) -> bool:
     """Write BGR (with optional alpha) to ``path``. Returns :func:`imwrite`'s flag.
 
@@ -609,6 +612,10 @@ def write_bgr_with_alpha(
     (upstream issue #30). Preserving the input alpha keeps genuinely transparent
     backgrounds intact without inventing new holes.
 
+    The display-tag carry (``display_tags_from`` / ``orientation_applied``) threads
+    through to :func:`imwrite` so an alpha-preserving output keeps the source's ICC
+    profile and EXIF orientation exactly like a plain write.
+
     Returning the flag is load-bearing: :func:`imwrite` is contractually
     non-raising, so this is the ONLY signal a caller gets that the file was not
     created.
@@ -616,5 +623,12 @@ def write_bgr_with_alpha(
     np = _import_pixel("numpy")
 
     if alpha is None or Path(path).suffix.lower() not in ALPHA_FORMATS:
-        return imwrite(path, bgr)
-    return imwrite(path, np.dstack([bgr, alpha]))
+        return imwrite(
+            path, bgr, display_tags_from=display_tags_from, orientation_applied=orientation_applied
+        )
+    return imwrite(
+        path,
+        np.dstack([bgr, alpha]),
+        display_tags_from=display_tags_from,
+        orientation_applied=orientation_applied,
+    )

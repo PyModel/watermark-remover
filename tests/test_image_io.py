@@ -188,6 +188,19 @@ class TestAlphaPreservation:
         assert out is not None
         assert np.array_equal(out, bgra)
 
+    def test_write_bgr_with_alpha_carries_display_tags(self, tmp_path: Path) -> None:
+        # The alpha write must thread the tag carry through like imwrite does:
+        # an RGBA source with ICC + orientation re-encodes with both intact.
+        src = TestDisplayTagCarry._source(tmp_path / "src.png")
+        source_icc, _ = TestDisplayTagCarry._tags(src)
+        bgr, alpha = image_io.read_bgr_and_alpha(src)
+        assert bgr is not None
+        path = tmp_path / "rebuilt-tagged.png"
+        assert image_io.write_bgr_with_alpha(path, bgr, alpha, display_tags_from=src) is True
+        icc, orient = TestDisplayTagCarry._tags(path)
+        assert icc == source_icc
+        assert orient == TestDisplayTagCarry.ORIENT
+
     def test_write_bgr_with_alpha_drops_alpha_on_a_flat_ext(self, tmp_path: Path) -> None:
         # JPEG has no alpha plane: the write must still succeed as plain BGR.
         bgra = np.zeros((8, 8, 4), dtype=np.uint8)
