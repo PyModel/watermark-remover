@@ -352,10 +352,7 @@ def inspect_png(data: bytes) -> MetadataScan:
                     if product_hits:
                         parts.append(f"AI generator ({', '.join(product_hits[:8])})")
                     findings.append(f"PNG {name}: {'; '.join(parts)}")
-                label = _tc260_label_of(
-                    payload,
-                    _png_tc260_candidates(payload, ctype) if ctype != b"eXIf" else (),
-                )
+                label = _tc260_label_of(payload, _png_tc260_candidates(payload, ctype))
                 if label:
                     has_ai = True
                     findings.extend(tc260_verify.tc260_label_findings(label, carrier=f"PNG {name}"))
@@ -675,10 +672,7 @@ def strip_png(data: bytes, *, strip_all_text: bool = True) -> tuple[bytes, list[
             if (
                 strip_all_text
                 or _text_chunk_is_ai(payload_bytes, ctype)
-                or _tc260_label_of(
-                    payload_bytes,
-                    _png_tc260_candidates(payload_bytes, ctype) if ctype != b"eXIf" else (),
-                )
+                or _tc260_label_of(payload_bytes, _png_tc260_candidates(payload_bytes, ctype))
                 is not None
             ):
                 drop = True
