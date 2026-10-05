@@ -12,6 +12,7 @@ downloads in the default suite.
 from __future__ import annotations
 
 import importlib
+import os
 import sys
 import types
 from pathlib import Path
@@ -20,7 +21,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from domain_types import InpaintRequest
-from morphomod import Mask, Raster
+from morphomod import Mask, Raster, box_mask, decode_png, encode_png, write_pgm
 
 
 def _make_raster(w: int = 32, h: int = 32, ch: int = 3, fill: int = 128) -> Raster:
@@ -504,3 +505,83 @@ class TestPyprojectExtras:
         all_deps = " ".join(self._extras()["all"])
         assert "[migan]" not in all_deps
         assert "[lama]" not in all_deps
+
+
+def _real_model_tier_armed() -> bool:
+    """The real-model tier needs onnxruntime AND an explicit opt-in env var.
+
+    The default suite never downloads: without the env var the class skips
+    cleanly on every machine, with or without onnxruntime installed.
+    """
+    if os.environ.get("WATERMARK_ONNX_FILL_TEST") != "1":
+        return False
+    import optional_deps
+
+    return optional_deps._import_safe("onnxruntime") is not None
+
+
+@pytest.mark.skipif(
+    not _real_model_tier_armed(),
+    reason="real-model tier: needs onnxruntime installed and WATERMARK_ONNX_FILL_TEST=1 (downloads the pinned models)",
+)
+class TestRealModelTier:
+    """End-to-end tier against the pinned real models (network + onnxruntime).
+
+    Reached only via WATERMARK_ONNX_FILL_TEST=1; point HF_HOME outside the
+    repository before running (the downloads land in the HF cache).
+    """
+
+    @staticmethod
+    def _fixture(tmp_path, backend: str) -> tuple[Path, Path, Path]:
+        src = tmp_path / "input.png"
+        src.write_bytes(encode_png(Raster(64, 64, 3, bytearray([200] * 64 * 64 * 3))))
+        mask = tmp_path / "mask.pgm"
+        write_pgm(box_mask(64, 64, (24, 24, 8, 8)), mask)
+        return src, mask, tmp_path / "cleaned.png"
+
+    @pytest.mark.parametrize("backend", ["migan", "lama"])
+    def test_fill_runs_through_the_registry_on_a_fixture(
+        self, tmp_path: Path, backend: str
+    ) -> None:
+        from morphomod import VisiblePlan, remove_visible
+
+        src, mask, dest = self._fixture(tmp_path, backend)
+
+        report = remove_visible(
+            src,
+            dest,
+            VisiblePlan(
+                mask_path=mask,
+                backend=backend,
+                dilation_radius=0,
+                mask_output=tmp_path / "out.mask.pgm",
+            ),
+        )
+
+        assert report["status"] == "completed"
+        assert report["backend"] == backend
+        assert dest.is_file()
+
+        # Outside-mask end-to-end: with dilation 0 every pixel outside the
+        # box must survive byte-exact (the composite guarantee, verified on
+        # the real model's output).
+        out = decode_png(dest.read_bytes())
+        src_raster = decode_png(src.read_bytes())
+        assert (out.width, out.height, out.channels) == (
+            src_raster.width,
+            src_raster.height,
+            src_raster.channels,
+        )
+        mask_arr = np.frombuffer(bytes(box_mask(64, 64, (24, 24, 8, 8)).data), dtype=np.uint8)
+        outside = mask_arr.reshape(64, 64) == 0
+        out_arr = np.frombuffer(bytes(out.data), dtype=np.uint8).reshape(64, 64, 3)
+        src_arr = np.frombuffer(bytes(src_raster.data), dtype=np.uint8).reshape(64, 64, 3)
+        assert (out_arr[outside] == 200).all()
+        # And the fill actually changed the marked region (the model ran).
+        inside_diff = out_arr[~outside] != src_arr[~outside]
+        assert inside_diff.any(), f"{backend} fill left the marked region untouched"
+
+    def test_auto_prefers_lama_when_both_registered(self) -> None:
+        import inpaint_backends
+
+        assert inpaint_backends.resolve_backend("auto").name == "lama"
