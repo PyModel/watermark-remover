@@ -34,7 +34,9 @@ class TestF1MarkAutoTile:
         import numpy as np
         from morphomod import Raster, encode_png
 
-        asset = cv2.imread(str(SCRIPTS / "assets" / "doubao_outline_alpha.png"), cv2.IMREAD_GRAYSCALE)
+        asset = cv2.imread(
+            str(SCRIPTS / "assets" / "doubao_outline_alpha.png"), cv2.IMREAD_GRAYSCALE
+        )
         assert asset is not None
         at = asset.astype(np.float32) / 255.0
         w = h = 1024
@@ -50,7 +52,9 @@ class TestF1MarkAutoTile:
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         path.write_bytes(encode_png(Raster(w, h, 3, bytearray(rgb.tobytes()))))
 
-    def test_mark_auto_on_tiled_image_completes(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    def test_mark_auto_on_tiled_image_completes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
         """The >2048px vector, with the auto-tile threshold moved to this
         fixture via its policy env: a mark plan must complete untiled and
         report tiling as skipped-for-mark, never crash with an assert."""
@@ -89,6 +93,8 @@ class TestF1MarkAutoTile:
         src.write_bytes(encode_png(Raster(8, 8, 3, bytearray([9, 8, 7] * 64))))
         with pytest.raises(ValueError, match="output required"):
             remove_visible(src, None, VisiblePlan(mark="auto"))
+
+
 # ---------------------------------------------------------------------------
 # F2: migan/lama extras undeclared
 # ---------------------------------------------------------------------------
@@ -114,7 +120,9 @@ class TestF2LearnedInpaintExtras:
         pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         extras = pyproject["project"]["optional-dependencies"]
         assert extra in extras, f"pyproject.toml does not declare the {extra} extra"
-        declared = {req.split(";")[0].split(">=")[0].split("==")[0].strip().lower() for req in extras[extra]}
+        declared = {
+            req.split(";")[0].split(">=")[0].split("==")[0].strip().lower() for req in extras[extra]
+        }
         assert {"onnxruntime", "huggingface-hub"} <= declared
 
     @pytest.mark.skipif(sys.version_info < (3, 11), reason="tomllib requires Python 3.11+")
