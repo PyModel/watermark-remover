@@ -114,7 +114,10 @@ def _scan_label(data: bytes) -> tuple[dict[str, str], tuple[int, int]] | None:
     ``data``'s bytes, so callers can overwrite exactly the label in place."""
     for match in _XMP_AIGC.finditer(data):
         group = 1 if match.group(1) is not None else 2
-        decoded = html.unescape(match.group(group).decode("utf-8", "replace"))
+        raw = match.group(group)
+        if len(raw) > MAX_TC260_VALUE_BYTES:
+            continue  # bounded refusal: never decode or parse an oversized span
+        decoded = html.unescape(raw.decode("utf-8", "replace"))
         result = _parse_wrapped(decoded, require_tc260_field=False)
         if result:
             return result, (match.start(group), match.end(group))

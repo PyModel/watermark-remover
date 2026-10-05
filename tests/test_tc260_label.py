@@ -130,6 +130,19 @@ class TestLabelFromMetadata:
         big = b"<TC260:AIGC>" + b"x" * (MAX_TC260_VALUE_BYTES + 1) + b"</TC260:AIGC>"
         assert label_from_metadata(big) is None
 
+    def test_an_oversized_xmp_label_is_refused_before_parsing(self) -> None:
+        """A valid-JSON XMP span over the 1 MiB cap is a bounded refusal.
+
+        The XMP branch used to json.loads the extracted span before any size
+        check, so a label larger than MAX_TC260_VALUE_BYTES parsed fine where
+        every bounded entry point refuses it.
+        """
+        body = b'{"Label":"' + b"x" * MAX_TC260_VALUE_BYTES + b'"}'
+        assert len(body) > MAX_TC260_VALUE_BYTES
+        assert json.loads(body) == {"Label": "x" * MAX_TC260_VALUE_BYTES}  # parses when unbounded
+        big = b"<TC260:AIGC>" + body + b"</TC260:AIGC>"
+        assert label_from_metadata(big) is None
+
 
 def _png_chunk(kind: bytes, payload: bytes) -> bytes:
     return (
