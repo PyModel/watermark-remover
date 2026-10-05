@@ -8,7 +8,11 @@ Hard-bound metadata stripping (what clean_image/clean_file do) does NOT defeat:
 
 This tool reports their presence so the user knows a strip may be re-linked.
 Stdlib byte-scan always runs; if the optional `c2pa` package is installed, its
-reader is tried first for authoritative manifest JSON.
+reader is tried first for authoritative manifest JSON. Without the wheel, a
+bounded stdlib CBOR/caBX scan (see c2pa_constants) surfaces claim-generator /
+issuer hints for PNGs. The CC BY 4.0 soft-binding algorithm registry is not
+ported: soft-binding algorithms resolve to a labeled-unknown, never a guessed
+name.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from c2pa_constants import scan_c2pa_hints
 from common import eprint, read_bytes_bounded
 from image_meta import C2PA_MARKERS
 
@@ -102,6 +107,39 @@ def _try_c2pa_lib(path: Path) -> dict[str, Any] | None:
     }
 
 
+def _hints_not_scanned(source: str, reason: str) -> dict[str, Any]:
+    """The stable empty `c2pa_hints` shape for when the stdlib scan did not run."""
+    return {
+        "scanned": False,
+        "source": source,
+        "reason": reason,
+        "has_cabx_chunk": None,
+        "found": False,
+        "claim_generator": None,
+        "c2pa_spec": None,
+        "timestamp": None,
+        "issuers": [],
+        "ai_tools": [],
+        "claim_generator_platforms": [],
+        "actions": [],
+        "soft_binding_algorithms": [],
+        "chunk_bytes": None,
+        "cbor": {"status": "skipped", "reason": reason},
+        "rejected_reason": None,
+    }
+
+
+def _c2pa_hints(path: Path, lib: dict[str, Any] | None) -> dict[str, Any]:
+    """C2PA hint evidence: the wheel stays authoritative; the stdlib scan is the fallback."""
+    if lib and "error" not in lib:
+        return _hints_not_scanned(
+            "c2pa-wheel-authoritative", "c2pa wheel is the authoritative reader"
+        )
+    if path.suffix.casefold() != ".png":
+        return _hints_not_scanned("stdlib-fallback", "stdlib caBX scan supports PNG only")
+    return {"scanned": True, "source": "stdlib-fallback", "reason": None, **scan_c2pa_hints(path)}
+
+
 def inspect_soft_binding(path: Path) -> dict[str, Any]:
     data = read_bytes_bounded(path, MAX_SCAN_BYTES, label="soft-binding scan file")
     scan = _scan_bytes(data)
@@ -126,6 +164,7 @@ def inspect_soft_binding(path: Path) -> dict[str, Any]:
             "manifest_urls": scan["urls"],
         },
         "c2pa_lib": lib or {"available": False},
+        "c2pa_hints": _c2pa_hints(path, lib),
         "warning": (
             "Soft binding / remote manifest detected: stripping embedded metadata "
             "may NOT remove provenance — a verifier can re-link the remote manifest "
