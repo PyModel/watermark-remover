@@ -248,6 +248,12 @@ def _bootstrap_registry() -> None:
     """Populate the backend registry."""
     _REGISTRY.append(TexturePatchBackend())
     _REGISTRY.append(SimpleFillBackend())
+    # Deferred import: opencv_inpaint imports this module, so the cycle must
+    # be broken at call time.  Without OpenCV installed this registers nothing
+    # and the incumbent backends stay exactly as they were.
+    import opencv_inpaint
+
+    _REGISTRY.extend(opencv_inpaint.get_opencv_backends())
 
 
 _bootstrapped = False

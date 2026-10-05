@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import shlex
 import sys
+import types
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
+import optional_deps
 import pytest
 from domain_types import InpaintRequest
 from inpaint_backends import (
@@ -186,3 +188,52 @@ class TestExternalCommandBackend:
         backend = ExternalCommandBackend("echo hello")
         with pytest.raises(FrozenInstanceError):
             backend.command = "other"
+
+
+# ---------------------------------------------------------------------------
+# Registry bootstrap: cv2 fill backends join and leave with OpenCV itself
+# ---------------------------------------------------------------------------
+
+
+def _install_stub_opencv(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
+    """Make OpenCV importable process-wide with a minimal cv2 stand-in.
+
+    Mirrors the stub-module prior art (test_stability_server.py ships a real
+    cv2.py; test_opencv_inpaint.py fakes numpy via sys.modules).  Both patch
+    points are needed: ``optional_deps.cv2`` gates registry bootstrap while
+    ``has_visible()`` resolves through ``importlib.import_module``.
+    """
+    stub = types.ModuleType("cv2")
+    stub.INPAINT_TELEA = 1
+    stub.INPAINT_NS = 2
+    monkeypatch.setitem(sys.modules, "cv2", stub)
+    monkeypatch.setattr(optional_deps, "cv2", stub)
+    return stub
+
+
+@pytest.fixture
+def fresh_registry(monkeypatch: pytest.MonkeyPatch):
+    """Rebuild the backend registry from scratch, restoring it afterwards."""
+    import inpaint_backends
+
+    saved = list(inpaint_backends._REGISTRY)
+    saved_flag = inpaint_backends._bootstrapped
+    inpaint_backends._REGISTRY.clear()
+    inpaint_backends._bootstrapped = False
+    try:
+        yield inpaint_backends
+    finally:
+        inpaint_backends._REGISTRY.clear()
+        inpaint_backends._REGISTRY.extend(saved)
+        inpaint_backends._bootstrapped = saved_flag
+
+
+def test_bootstrap_registers_cv2_backends_when_opencv_present(
+    monkeypatch: pytest.MonkeyPatch, fresh_registry
+) -> None:
+    _install_stub_opencv(monkeypatch)
+
+    names = [backend.name for backend in fresh_registry.get_backends()]
+
+    assert "cv2-telea" in names
+    assert "cv2-ns" in names
