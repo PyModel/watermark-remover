@@ -372,12 +372,10 @@ _XMP_CREATOR_RE = re.compile(
 #: shape is required and the finding reads as a hint, never as proof.
 HF_JOB_KEY = b"hf-job-id"
 _HF_JOB_VALUE_RE = re.compile(
-    rb"hf-job-id[\x00=:]\s*([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
+    HF_JOB_KEY
+    + rb"[\x00=:]\s*([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
 )
 
-#: Cap for the whole-data vendor fallback on containers without segment
-#: structure (mirrors upstream's quick-scan window).
-VENDOR_SCAN_CAP_BYTES = 512 * 1024
 #: Tail window for a JPEG so truncated it has no findable EOI: fail closed on
 #: the tail rather than staying silent about a marker past the pixels.
 VENDOR_TAIL_BYTES = 64 * 1024
@@ -408,6 +406,11 @@ def xai_signature_pair(description: str, artist: str) -> bool:
     )
 
 
+def _strip_xmp_tags(raw: bytes) -> bytes:
+    """Remove XML tags from an XMP value, keeping the text content."""
+    return re.sub(rb"<[^>]+>", b"", raw).strip()
+
+
 def _xai_shapes_in(block: bytes) -> tuple[list[bytes], list[bytes]]:
     """Tag-stripped description/creator candidates from one metadata record."""
     descriptions = [
@@ -416,8 +419,7 @@ def _xai_shapes_in(block: bytes) -> tuple[list[bytes], list[bytes]]:
     creators = [
         next(v for v in m.groups() if v is not None) for m in _XMP_CREATOR_RE.finditer(block)
     ]
-    strip_tags = lambda raw: re.sub(rb"<[^>]+>", b"", raw).strip()  # noqa: E731
-    return [strip_tags(d) for d in descriptions], [strip_tags(c) for c in creators]
+    return [_strip_xmp_tags(d) for d in descriptions], [_strip_xmp_tags(c) for c in creators]
 
 
 def _xmp_xai_signature_pair(data: bytes) -> bool:
@@ -1503,6 +1505,7 @@ def inspect_gif(data: bytes) -> MetadataScan:
             elif label == 0xFF:
                 if payload[:11] == b"XMP DataXMP":
                     if hits:
+                        has_ai = True
                         if any(
                             h.lower() in ("c2pa", "contentcredentials", "jumb", "contentauth")
                             for h in hits
