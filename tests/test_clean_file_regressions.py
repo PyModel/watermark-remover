@@ -25,12 +25,13 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "skills" / "remove-ai-marks" / "
 CLEAN_FILE = SCRIPTS / "clean_file.py"
 
 
-def _run(*args: str) -> subprocess.CompletedProcess[str]:
+def _run(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(CLEAN_FILE), *args],
         capture_output=True,
         text=True,
         check=False,
+        env=env,
     )
 
 
@@ -378,7 +379,32 @@ def test_clean_file_cv2_backend_end_to_end_with_stub_opencv(tmp_path: Path, back
     assert decode_png(dest.read_bytes()).data == background
 
 
+def _write_broken_opencv(directory: Path) -> None:
+    """Shadow cv2 with a module that raises on import for the wm subprocess.
+
+    Inverse of _write_stub_opencv: instead of faking a working OpenCV, the
+    stub makes ``import cv2`` fail inside the child, so the availability
+    boundary ``optional_deps._import_safe("cv2")`` (importlib.import_module)
+    observes OpenCV as absent on any machine — the fail-soft path is
+    exercised deterministically instead of assuming environment absence.
+    """
+    (directory / "cv2.py").write_text(
+        "raise ModuleNotFoundError('OpenCV is not installed (blocked by test)')\n",
+        encoding="utf-8",
+    )
+
+
 def test_clean_file_cv2_backend_fails_soft_without_opencv(tmp_path: Path) -> None:
+    # Block the cv2 import at the same boundary backend resolution probes
+    # (optional_deps -> importlib.import_module("cv2")) rather than trusting
+    # the host venv to lack OpenCV: with the stub first on PYTHONPATH the
+    # child sees optional_deps.cv2 as None, no cv2 backend registers, and
+    # _resolve_fill_backend takes the labeled-unavailable path everywhere.
+    stubs = tmp_path / "blocked-opencv"
+    stubs.mkdir()
+    _write_broken_opencv(stubs)
+    env = {**os.environ, "PYTHONPATH": str(stubs)}
+
     src = tmp_path / "input.png"
     src.write_bytes(encode_png(Raster(16, 16, 3, bytearray([9, 8, 7] * 256))))
     mask = tmp_path / "mask.pgm"
@@ -395,6 +421,7 @@ def test_clean_file_cv2_backend_fails_soft_without_opencv(tmp_path: Path) -> Non
         "0",
         "--visible-backend",
         "cv2-telea",
+        env=env,
     )
 
     # The flag parses (choices widened); the failure is the labeled
@@ -418,6 +445,7 @@ def test_clean_file_cv2_backend_fails_soft_without_opencv(tmp_path: Path) -> Non
         "--visible-backend",
         "simple",
         "--json",
+        env=env,
     )
     assert ok.returncode == 0, ok.stderr
     assert json.loads(ok.stdout)["visible"]["status"] == "completed"
