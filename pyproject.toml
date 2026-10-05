@@ -58,6 +58,16 @@ pixel = [
 quality = [
     "scikit-image",
 ]
+# The open DWT-DCT detector (dwt_dct.py + invisible_watermark.py): numpy,
+# headless OpenCV and PyWavelets decode the public invisible-watermark payloads
+# (SD 1.x/2.x, SDXL, FLUX.2) locally with no oracle install. The
+# invisible-watermark library itself is a dev-only fixture-generation tool and
+# must never appear here (see assets/PROVENANCE.md).
+detect = [
+    "numpy",
+    "opencv-python-headless",
+    "PyWavelets",
+]
 ai = [
     "torch",
     "torchvision",
@@ -81,6 +91,7 @@ all = [
     "watermark-remover[quality]",
     "watermark-remover[ai]",
     "watermark-remover[provenance]",
+    "watermark-remover[detect]",
 ]
 
 [project.scripts]

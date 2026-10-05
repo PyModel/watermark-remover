@@ -89,6 +89,14 @@ def check_optional(extra: str) -> BackendAvailability:
         # the hub client that fetches the model on first use.
         "migan": ("onnxruntime", "huggingface_hub"),
         "lama": ("onnxruntime", "huggingface_hub"),
+        # The open DWT-DCT detector (dwt_dct.py + invisible_watermark.py):
+        # the exact module set its is_available() probe names.
+        "detect": ("numpy", "cv2", "pywt"),
+        # The aggregate extra joins the registry with a real checker: every
+        # member declared in pyproject at this commit (visible + quality + ai
+        # + provenance + detect; source-classify joins when it lands). A
+        # probed-but-unchanged probe order is irrelevant; only the union is.
+        "all": ("cv2", "skimage", "torch", "c2pa", "numpy", "pywt"),
     }
     pkgs = _checkers.get(extra)
     if pkgs is None:
@@ -135,7 +143,7 @@ def has_pixel() -> bool:
 
 
 #: Every extra `check_optional` knows about, for capability reporting.
-KNOWN_EXTRAS = ("visible", "quality", "ai", "provenance", "pixel", "migan", "lama")
+KNOWN_EXTRAS = ("visible", "quality", "ai", "provenance", "pixel", "migan", "lama", "detect", "all")
 
 
 def extras_status() -> dict[str, dict[str, object]]:
