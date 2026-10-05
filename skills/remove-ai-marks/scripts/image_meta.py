@@ -22,6 +22,8 @@ from urllib.parse import urlparse
 
 import external_command
 import pipeline_actions as act
+import tc260_label
+import tc260_verify
 from common import atomic_write_bytes, classify_finding_confidence, which
 from pipeline_actions import Action, report_actions
 from png_chunks import iter_png_chunks
@@ -305,6 +307,22 @@ def _text_chunk_is_ai(payload: bytes, ctype: bytes) -> bool:
     return bool(_generator_product_hits(_png_text_entries(payload, ctype)))
 
 
+def _tc260_label_of(payload: bytes, candidates: tuple[str, ...] = ()) -> dict[str, str] | None:
+    """The TC260 AIGC label in a bounded metadata payload, or None.
+
+    Oversized (> ``tc260_label.MAX_TC260_VALUE_BYTES``) and unparseable
+    payloads are findings-free refusals, never a crash.
+    """
+    if not payload or len(payload) > tc260_label.MAX_TC260_VALUE_BYTES:
+        return None
+    return tc260_label.label_from_metadata(payload, candidates)
+
+
+def _png_tc260_candidates(payload: bytes, ctype: bytes) -> tuple[str, ...]:
+    """Decoded text-chunk values a TC260 label can hide among."""
+    return tuple(value for _key, value in _png_text_entries(payload, ctype))
+
+
 def inspect_png(data: bytes) -> MetadataScan:
     findings: list[str] = []
     has_c2pa = False
@@ -334,6 +352,13 @@ def inspect_png(data: bytes) -> MetadataScan:
                     if product_hits:
                         parts.append(f"AI generator ({', '.join(product_hits[:8])})")
                     findings.append(f"PNG {name}: {'; '.join(parts)}")
+                label = _tc260_label_of(
+                    payload,
+                    _png_tc260_candidates(payload, ctype) if ctype != b"eXIf" else (),
+                )
+                if label:
+                    has_ai = True
+                    findings.extend(tc260_verify.tc260_label_findings(label, carrier=f"PNG {name}"))
     except ValueError as error:
         findings.append(str(error))
     whole = _contains_any(data, C2PA_MARKERS)
@@ -418,6 +443,12 @@ def inspect_jpeg(data: bytes) -> MetadataScan:
                 ):
                     has_c2pa = True
                 findings.append(f"JPEG APP{marker - 0xE0}: {', '.join(hits[:8])}")
+            label = _tc260_label_of(payload)
+            if label:
+                has_ai = True
+                findings.extend(
+                    tc260_verify.tc260_label_findings(label, carrier=f"JPEG APP{marker - 0xE0}")
+                )
 
     whole = _contains_any(data, C2PA_MARKERS)
     if whole and not has_c2pa:
@@ -640,7 +671,16 @@ def strip_png(data: bytes, *, strip_all_text: bool = True) -> tuple[bytes, list[
             drop = True
             actions.append(act.drop_png_chunk(name))
         elif ctype == b"eXIf" or ctype in (b"tEXt", b"zTXt", b"iTXt"):
-            if strip_all_text or _text_chunk_is_ai(bytes(payload), ctype):
+            payload_bytes = bytes(payload)
+            if (
+                strip_all_text
+                or _text_chunk_is_ai(payload_bytes, ctype)
+                or _tc260_label_of(
+                    payload_bytes,
+                    _png_tc260_candidates(payload_bytes, ctype) if ctype != b"eXIf" else (),
+                )
+                is not None
+            ):
                 drop = True
                 actions.append(act.drop_png_chunk(name))
         elif ctype == b"tIME":
@@ -787,6 +827,7 @@ def strip_jpeg(data: bytes, *, strip_all_app: bool = True) -> tuple[bytes, list[
         drop = False
         if 0xE0 <= marker <= 0xEF:  # APPn
             hits = _contains_any(payload, AI_META_HINTS + C2PA_MARKERS)
+            carries_tc260 = _tc260_label_of(payload) is not None
             app11_is_c2pa = marker == 0xEB and any(
                 h.lower() in ("c2pa", "contentcredentials", "jumb", "contentauth") for h in hits
             )
@@ -797,11 +838,10 @@ def strip_jpeg(data: bytes, *, strip_all_app: bool = True) -> tuple[bytes, list[
                 # keep APP0 (JFIF) by default
                 drop = True
                 actions.append(act.drop_jpeg_segment(f"APP{marker - 0xE0}"))
-            elif hits:
+            elif hits or carries_tc260:
                 drop = True
-                actions.append(
-                    act.drop_jpeg_segment(f"APP{marker - 0xE0}", reason="AI/C2PA markers")
-                )
+                reason = "TC260 AIGC label" if carries_tc260 else "AI/C2PA markers"
+                actions.append(act.drop_jpeg_segment(f"APP{marker - 0xE0}", reason=reason))
             else:
                 keep = True
         elif marker == 0xFE:  # COM
@@ -882,6 +922,10 @@ def inspect_webp(data: bytes) -> MetadataScan:
                 ):
                     has_c2pa = True
                 findings.append(f"WebP {name}: {', '.join(hits[:8])}")
+            label = _tc260_label_of(payload)
+            if label:
+                has_ai = True
+                findings.extend(tc260_verify.tc260_label_findings(label, carrier=f"WebP {name}"))
     return has_c2pa, has_ai or has_c2pa, findings, []
 
 
@@ -900,7 +944,11 @@ def strip_webp(data: bytes, *, strip_all_metadata: bool = True) -> tuple[bytes, 
     for fourcc, payload, padding in chunks:
         drop = fourcc.upper() == b"C2PA"
         if fourcc in metadata_flags:
-            drop = strip_all_metadata or bool(_contains_any(payload, AI_META_HINTS + C2PA_MARKERS))
+            drop = (
+                strip_all_metadata
+                or bool(_contains_any(payload, AI_META_HINTS + C2PA_MARKERS))
+                or _tc260_label_of(payload) is not None
+            )
         if drop:
             name = fourcc.decode("latin-1", errors="replace")
             actions.append(act.drop_webp_chunk(name))

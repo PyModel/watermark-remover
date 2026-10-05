@@ -279,3 +279,26 @@ def check_tc260_signature(label: Mapping[str, str]) -> Tc260Signature | None:
     if results:
         return Tc260Signature(label="verified" if any(results) else "failed", signer=signer)
     return Tc260Signature(label="unsupported" if unsupported else "absent", signer=None)
+
+
+def tc260_label_findings(label: Mapping[str, str], *, carrier: str) -> list[str]:
+    """Field-aware finding lines for one parsed TC260 AIGC label.
+
+    The first line names the label type and the content producer resolved
+    against the registry; a second line reports the ``SecurityData`` signature
+    verdict when the label carries one. ``carrier`` anchors each line to the
+    metadata placement it was found in, so the lines slot into the existing
+    inspect findings list shape (no new report format).
+    """
+    producer = label.get("ContentProducer", "")
+    row = producer_for_code(producer)
+    producer_text = f"{producer} ({row.vendor})" if row else f"{producer} (not in TC260 registry)"
+    fields = [f"Label={label.get('Label', '')}", f"ContentProducer={producer_text}"]
+    produce_id = label.get("ProduceID", "")
+    if produce_id:
+        fields.append(f"ProduceID={produce_id}")
+    lines = [f"{carrier}: TC260 AIGC label ({', '.join(fields)})"]
+    signature = check_tc260_signature(label)
+    if signature is not None:
+        lines.append(f"{carrier}: {signature.describe()}")
+    return lines
