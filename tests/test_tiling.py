@@ -194,6 +194,12 @@ def test_run_tiled_without_numpy_is_labeled_unavailable(tmp_path):
 # --- wiring: the auto-tile threshold on the visible clean path ---------------------
 
 
+def _encode_raster(width, height, channels, px):
+    from morphomod import Raster, encode_png
+
+    return encode_png(Raster(width, height, channels, px))
+
+
 def _tiled_fixture(tmp_path):
     """240x64 ramp with a box mark fully inside the first tile's interior."""
     from morphomod import Raster, encode_png
@@ -312,3 +318,38 @@ def test_tiling_without_pixel_deps_falls_back_labeled(tmp_path, monkeypatch):
     assert report["visible"]["tiling"]["status"] == "unavailable"
     assert "watermark-remover[pixel]" in report["visible"]["tiling"]["hint"]
     assert Path(tmp_path / "out.png").is_file()
+
+
+def test_large_png_still_tiles_past_the_old_probe_limit(tmp_path, monkeypatch):
+    """Regression: the dimension probe must not trip the bounded-read safety
+    limit — a several-hundred-KB PNG is exactly the tiled-path target."""
+    from clean_asset import clean_asset
+
+    w, h = 3000, 40
+    px = bytearray(
+        byte
+        for y in range(h)
+        for x in range(w)
+        for byte in ((x * 31 + y * 17) % 251, (x * 13 + y * 7) % 241, (x + y * 3) % 253)
+    )
+    source = tmp_path / "big.png"
+    source.write_bytes(_encode_raster(w, h, 3, px))
+    assert source.stat().st_size > 256 * 1024  # the old probe limit
+
+    monkeypatch.setenv("WATERMARKS_AUTO_TILE_MAX_DIMENSION", "1024")
+    from clean_asset import CleanPlan
+    from morphomod import VisiblePlan
+
+    plan = CleanPlan(
+        forced_kind="image",
+        visible=VisiblePlan(
+            box=(100, 10, 20, 12),
+            backend="texture",
+            mask_output=tmp_path / "mask.pgm",
+            dilation_radius=1,
+        ),
+    )
+    report = clean_asset(source, tmp_path / "out.png", plan).to_dict()
+    tiling_report = report["visible"]["tiling"]
+    assert tiling_report["engaged"] is True
+    assert tiling_report["tiles"] == 4  # [0, 896, 1792, 1976] by the upstream layout

@@ -445,13 +445,13 @@ def _probe_dimensions(path: Path) -> tuple[int, int] | None:
 
     The visible pipeline's raster decoder (``decode_to_raster``) accepts only
     PNG and JPEG, so a pure header parse covers every image that could take
-    the tiled path. Returns None for anything else (or a malformed header);
-    the untiled path then produces its own, real, error. Deliberately does
-    not touch numpy/cv2: probing must stay available in pixel-less
-    environments and must not add stub-cv2 surface to the CLI path.
+    the tiled path. Reads at most the first 64 KiB (advisory probe: a header
+    pushed past that yields None and the untiled path runs); deliberately
+    does not touch numpy/cv2 so probing stays available in pixel-less
+    environments and adds no stub-cv2 surface to the CLI path.
     """
-    data = read_bytes_bounded(path, limit=256 * 1024, label="image header")
-    data = bytes(data)
+    with path.open("rb") as stream:
+        data = stream.read(65536)
     if data[:8] == b"\x89PNG\r\n\x1a\n" and data[12:16] == b"IHDR" and len(data) >= 24:
         return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
     if data[:2] == b"\xff\xd8":
@@ -460,13 +460,14 @@ def _probe_dimensions(path: Path) -> tuple[int, int] | None:
             if data[offset] != 0xFF:
                 return None
             marker = data[offset + 1]
+            if marker == 0xFF:  # fill bytes before the real marker
+                offset += 1
+                continue
             if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:  # standalone markers
                 offset += 2
                 continue
             segment_length = int.from_bytes(data[offset + 2 : offset + 4], "big")
             if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
-                if offset + 9 > len(data):
-                    return None
                 height = int.from_bytes(data[offset + 5 : offset + 7], "big")
                 width = int.from_bytes(data[offset + 7 : offset + 9], "big")
                 return width, height
