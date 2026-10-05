@@ -1,0 +1,620 @@
+# Ported from wiltodelta/remove-ai-watermarks src/remove_ai_watermarks/image_io.py, Apache-2.0; modified: flattened into this repo's stdlib script package (no package-internal imports — the JPEG-suffix set and PNG signature are inlined, the EXIF-orientation tag bytes are emitted by a stdlib TIFF writer instead of piexif, and the upstream ISO-BMFF HEIF container-transform reader is not ported), the upstream-specific caller integrations are dropped, and a labeled pixel-extra dependency guard is added at the call boundary.
+"""Unicode-safe, alpha-preserving cv2 image IO.
+
+``cv2.imread`` / ``cv2.imwrite`` pass the path to the platform C runtime, which
+on Windows uses the narrow (ANSI) code-page API and therefore fails on paths
+containing non-ASCII characters (Chinese, Cyrillic, ...). The symptom is a
+``can't open/read file`` warning and a ``None`` decode even though the file
+exists.
+
+These wrappers route through numpy buffers instead: ``np.fromfile`` /
+``ndarray.tofile`` open the path in Python (full Unicode), and
+``cv2.imdecode`` / ``cv2.imencode`` do the codec work. The decoded/encoded
+bytes are byte-for-byte identical to ``imread`` / ``imwrite``. On macOS/Linux
+cv2 already accepts UTF-8 paths, so the wrappers are behavior-neutral there.
+
+cv2/numpy are imported lazily inside the functions so importing this module
+never loads the pixel extra: a stdlib-only caller can import it safely, and a
+call without numpy/cv2 installed raises the labeled
+:class:`PixelDependencyUnavailable` error naming ``watermark-remover[pixel]``.
+Data failures (a missing file, malformed image bytes) are NOT errors: they keep
+the cv2 contract of ``None`` from :func:`imread` and ``False`` from
+:func:`imwrite` so callers branch on the value, never on a crash.
+"""
+
+# cv2 ships no type stubs; keep the type-checker quiet at the boundary only.
+# pyright: reportMissingTypeStubs=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false
+
+from __future__ import annotations
+
+import importlib
+import logging
+import struct
+import zlib
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
+
+log = logging.getLogger(__name__)
+
+#: JPEG extensions cv2 encodes under the single ".jpg" codec name.
+JPEG_SUFFIXES = frozenset({".jpg", ".jpeg", ".jpe", ".jfif"})
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+class PixelDependencyUnavailable(ImportError):
+    """The pixel extra (numpy + OpenCV) is not installed in this environment.
+
+    Environment failure, not data failure: :func:`imread` returns ``None`` and
+    :func:`imwrite` returns ``False`` for undecodable bytes, but a missing
+    dependency is a setup problem the caller must see, labeled with the extra
+    that provides it.
+    """
+
+
+def _import_pixel(name: str) -> Any:
+    """Import a pixel-extra module lazily, or raise the labeled guard error."""
+    try:
+        return importlib.import_module(name)
+    except Exception as exc:
+        raise PixelDependencyUnavailable(
+            "image_io requires the pixel extra; install watermark-remover[pixel]"
+            f" (numpy + opencv-python-headless + Pillow). Reason: {exc}"
+        ) from exc
+
+
+def imread(path: str | Path, flags: int | None = None) -> NDArray[Any] | None:
+    """Unicode-safe ``cv2.imread``.
+
+    ``flags`` defaults to ``cv2.IMREAD_COLOR`` (same as ``cv2.imread``). Returns
+    ``None`` when the file is missing or cannot be decoded, matching ``cv2.imread``
+    semantics so existing ``if img is None`` checks keep working.
+    """
+    cv2 = _import_pixel("cv2")
+    np = _import_pixel("numpy")
+
+    if flags is None:
+        flags = cv2.IMREAD_COLOR
+    try:
+        data = np.fromfile(str(path), dtype=np.uint8)
+    except OSError:
+        return None
+    if data.size == 0:
+        return None
+    # cv2.imdecode returns None on an undecodable container (HEIC/AVIF); the type stub
+    # omits that, hence the ignore.
+    img = cv2.imdecode(data, flags)  # pyright: ignore[reportUnnecessaryComparison]
+    if img is not None:  # pyright: ignore[reportUnnecessaryComparison]
+        return img
+    return _pil_read(path, flags)
+
+
+def _pil_read(path: str | Path, flags: int) -> NDArray[Any] | None:
+    """Decode via Pillow (HEIC/AVIF and any other Pillow-readable container) into the
+    cv2 layout ``flags`` implies: grayscale, 3-channel BGR, or BGRA when the source has
+    alpha and ``IMREAD_UNCHANGED`` was requested. Returns None if Pillow (with the
+    optional HEIF plugin) still cannot open it. This fallback asks for no EXIF
+    auto-rotation, but a container reader can apply it regardless: Pillow's TIFF
+    reader always turns the raster upright. That decode state is reconciled where
+    it matters, in :func:`_read_display_tags`."""
+    cv2 = _import_pixel("cv2")
+    np = _import_pixel("numpy")
+
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+    _register_heif()
+    try:
+        with Image.open(path) as im:
+            im.load()
+            if flags == cv2.IMREAD_GRAYSCALE:
+                return np.asarray(im.convert("L"))
+            has_alpha = im.mode in ("RGBA", "LA", "PA") or "transparency" in im.info
+            if flags == cv2.IMREAD_UNCHANGED and has_alpha:
+                return cv2.cvtColor(np.asarray(im.convert("RGBA")), cv2.COLOR_RGBA2BGRA)
+            return cv2.cvtColor(np.asarray(im.convert("RGB")), cv2.COLOR_RGB2BGR)
+    except Exception:
+        return None
+
+
+def _encode_params(ext: str) -> list[int]:
+    """cv2 encode params that PRESERVE quality. The removal only touches the mark's
+    footprint, so the container re-encode must not degrade the untouched pixels:
+    JPEG at quality 100 with 4:4:4 chroma (no subsampling), WebP lossless.
+    Lossless containers (PNG/BMP/TIFF) need no params. getattr-guarded so an older
+    OpenCV build without the chroma/subsampling flags still gets quality 100."""
+    cv2 = _import_pixel("cv2")
+
+    if ext in JPEG_SUFFIXES:
+        params = [cv2.IMWRITE_JPEG_QUALITY, 100]
+        cq = getattr(cv2, "IMWRITE_JPEG_CHROMA_QUALITY", None)
+        if cq is not None:
+            params += [cq, 100]
+        sf = getattr(cv2, "IMWRITE_JPEG_SAMPLING_FACTOR", None)
+        sf444 = getattr(cv2, "IMWRITE_JPEG_SAMPLING_FACTOR_444", None)
+        if sf is not None and sf444 is not None:
+            params += [sf, sf444]
+        return params
+    if ext == ".webp":
+        # cv2 WebP: quality 1-100 is LOSSY; a value > 100 selects LOSSLESS mode.
+        # A mark-removal re-encode must not degrade the untouched pixels the fill
+        # composites over (upstream regression: q100 round-tripped a random image
+        # at maxdiff ~230, q101 at 0).
+        return [cv2.IMWRITE_WEBP_QUALITY, 101]
+    return []
+
+
+# ── Display-tag carry across re-encodes (upstream issue #98) ───────────────
+#
+# cv2's encoders write no container metadata, so every pixel-path output used to
+# come back without the source's ICC colour profile and EXIF orientation: a
+# Display P3 portrait lost a chunk of its saturation and displayed sideways even
+# though the user never asked the tool to touch metadata. Those two tags are
+# display fidelity, not provenance, so they travel from the decode source to the
+# re-encoded output. Only those two: wholesale EXIF copying would resurrect the
+# AI-provenance tags the metadata strip exists to drop.
+
+_ORIENT_EXIF_TAG = 0x0112  # EXIF ImageIFD.Orientation
+_TIFF_IMAGE_WIDTH = 256  # TIFF ImageWidth, the stored raster's columns
+_TIFF_IMAGE_LENGTH = 257  # TIFF ImageLength, the stored raster's rows
+# Orientations that transpose width and height (the 90-degree rotations). Only these
+# can be detected by comparing the raster's shape with the source's stored size;
+# the mirror/180 values (2, 3, 4) keep the tagless behaviour because no cheap
+# signal distinguishes a rotated decode from a stored one for them.
+_TRANSPOSING_ORIENTATIONS = frozenset({5, 6, 7, 8})
+
+
+_heif_registered = [False]  # one-element holder: registration is process-wide, best-effort
+
+
+def _register_heif() -> None:
+    """Register the HEIF+AVIF Pillow opener/saver via libheif (idempotent, best-effort).
+
+    No-op when pillow-heif is absent: HEIC/AVIF support stays behind the optional
+    plugin, and every caller treats a registration miss as "format unavailable".
+    """
+    if _heif_registered[0]:
+        return
+    _heif_registered[0] = True
+    import contextlib
+
+    with contextlib.suppress(Exception):
+        import pillow_heif
+
+        pillow_heif.register_heif_opener()
+
+
+def _orientation_exif(orient: int | None, *, prefixed: bool) -> bytes | None:
+    """EXIF bytes holding ONLY the orientation tag, in the form a container wants.
+
+    Adaptation: upstream builds this with piexif, which is not a dependency here,
+    so the TIFF structure is emitted directly -- a little-endian TIFF header, one
+    IFD0 entry (Orientation, SHORT). ``piexif.dump``-style output returns the JPEG
+    APP1 payload (``Exif\\x00\\x00`` + TIFF); the PNG ``eXIf`` chunk and the WebP
+    ``EXIF`` chunk carry the bare TIFF structure, so the prefix is stripped there.
+    Orientation 1 (upright) is the absence of a tag.
+    """
+    if orient is None or orient == 1:
+        return None
+    tiff = b"II" + struct.pack("<H", 42) + struct.pack("<I", 8)
+    tiff += struct.pack("<H", 1)  # one IFD entry
+    tiff += struct.pack("<HHI", _ORIENT_EXIF_TAG, 3, 1)  # Orientation, SHORT, count 1
+    tiff += struct.pack("<HH", orient, 0)  # value + padding (SHORT entries pad to 4)
+    tiff += struct.pack("<I", 0)  # no next IFD
+    return b"Exif\x00\x00" + tiff if prefixed else tiff
+
+
+def _stored_size(im: Any) -> tuple[int, int]:
+    """The size the container STORES, which is not always ``Image.size``.
+
+    Pillow's TIFF reader applies the EXIF orientation itself: it hands back a turned
+    raster and reports the upright size. Comparing that against a turned raster says
+    "still in stored orientation" for pixels that are already upright, and the tag
+    rides along into a second rotation. The TIFF IFD keeps the real stored geometry in
+    ImageWidth/ImageLength, and no other Pillow plugin exposes ``tag_v2``.
+    """
+    tags = getattr(im, "tag_v2", None)
+    if tags is not None:
+        width, height = tags.get(_TIFF_IMAGE_WIDTH), tags.get(_TIFF_IMAGE_LENGTH)
+        if isinstance(width, int) and isinstance(height, int):
+            return width, height
+    return im.size
+
+
+def _read_display_tags(
+    source: Path, raster_shape: tuple[int, int], *, orientation_applied: bool | None = None
+) -> tuple[bytes | None, int | None]:
+    """Extract ``(icc_profile, orientation)`` from ``source`` for a raster of ``raster_shape``.
+
+    The contract is that ``source`` is the file whose decode produced the pixels
+    being written, and ``raster_shape`` is that raster's ``(rows, cols)``. Whether the
+    decode turned the raster upright cannot be assumed from the container: cv2
+    applies EXIF orientation under ``IMREAD_COLOR`` depending on the codec and
+    build, including for WebP in newer builds. ``IMREAD_UNCHANGED``, which the
+    pixel paths use, never applies orientation.
+    ``orientation_applied`` carries that decode state explicitly when known.
+    Otherwise the legacy inference uses raster geometry: for the
+    transposing orientations (5-8) the tag is carried exactly when the raster still
+    has the source's STORED dimensions, and dropped when it has the upright ones;
+    anything else (a resized pipeline output, the rare mirror/180 values) drops the
+    tag and keeps the tagless behaviour rather than risk a double rotation. ICC travels
+    in every case: it describes colour, not geometry. Failures read as "no tags":
+    the restore is an enhancement, never a reason to fail a write.
+
+    TIFF is the exception on the explicit state: every reader in this module's
+    stack applies the TIFF orientation tag on decode (cv2's libtiff path under
+    ``IMREAD_UNCHANGED`` too, and Pillow's TIFF plugin, identically), so a caller's
+    blanket ``False`` -- which encodes cv2's JPEG/PNG/WebP contract -- is not true
+    for TIFF. For TIFF sources the parameter is ignored and the geometry check
+    decides against the IFD's stored size: a raster that no longer has the stored
+    dimensions was turned by the decode and must not be tagged again (upstream
+    issue #106).
+
+    Adaptation: upstream overrides the HEIF branch through an ISO-BMFF reader
+    (irot/imir boxes, upstream issue #105) that is not ported here. Without it the
+    container's transform state is unknowable, so HEIF keeps the generic path plus
+    one concession: pillow-heif's opener blanks the EXIF orientation into
+    ``info["original_orientation"]``, and that value is honoured when the raw tag
+    is blank. A transform-baked HEIC may still be re-tagged (the geometry check
+    cannot see the bake); HEIC write/read stays best-effort behind the optional
+    pillow-heif plugin.
+    """
+    _register_heif()
+    try:
+        from PIL import Image
+    except Exception:
+        return None, None
+    try:
+        with Image.open(source) as im:
+            icc = im.info.get("icc_profile")
+            orient = im.getexif().get(_ORIENT_EXIF_TAG)
+            fmt = im.format
+            # pillow-heif's opener rewrites the EXIF orientation to 1 and stashes
+            # the real value here, so `orient` is blanked for every HEIF.
+            heif_original = im.info.get("original_orientation")
+            stored_w, stored_h = _stored_size(im)
+    except Exception:
+        return None, None
+    if not (isinstance(icc, bytes) and icc):
+        icc = None
+    if fmt == "TIFF":
+        orientation_applied = None
+    if fmt == "HEIF" and orient in (None, 1) and isinstance(heif_original, int):
+        orient = heif_original
+    if orientation_applied is True:
+        orient = None
+    elif orientation_applied is False:
+        orient = orient if isinstance(orient, int) and 1 <= orient <= 8 else None
+    elif orient in _TRANSPOSING_ORIENTATIONS:
+        rows, cols = raster_shape
+        # Upright dimensions are the stored ones swapped; only a raster still in
+        # stored orientation may carry the tag.
+        if (cols, rows) != (stored_w, stored_h):
+            orient = None
+    else:
+        orient = None
+    return icc, orient
+
+
+def _png_splice_display_tags(data: bytes, icc: bytes | None, orient: int | None) -> bytes:
+    """Insert ``iCCP`` / ``eXIf`` chunks after IHDR, leaving IDAT verbatim.
+
+    Replaces same-kind chunks rather than duplicating them, so rewriting an
+    already-tagged PNG cannot stack profiles. Returns the input unchanged when the
+    chunk list does not walk cleanly (the file still decodes exactly as written).
+    """
+
+    def _chunk(kind: bytes, payload: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(payload))
+            + kind
+            + payload
+            + struct.pack(">I", zlib.crc32(kind + payload))
+        )
+
+    iccp = _chunk(b"iCCP", b"ICC Profile\x00\x00" + zlib.compress(icc, 9)) if icc else None
+    exif_payload = _orientation_exif(orient, prefixed=False)
+    exif_chunk = _chunk(b"eXIf", exif_payload) if exif_payload else None
+    if iccp is None and exif_chunk is None:
+        return data
+
+    out = bytearray(data[:8])
+    pos, n = 8, len(data)
+    inserted = False
+    while pos + 8 <= n:
+        (length,) = struct.unpack(">I", data[pos : pos + 4])
+        kind = data[pos + 4 : pos + 8]
+        end = pos + 12 + length
+        if end > n:
+            return data  # malformed length: leave the encoded bytes alone
+        replaced = (kind == b"iCCP" and iccp is not None) or (
+            kind == b"eXIf" and exif_chunk is not None
+        )
+        if not replaced:
+            out += data[pos:end]
+        if kind == b"IHDR" and not inserted:
+            out += (iccp or b"") + (exif_chunk or b"")
+            inserted = True
+        if kind == b"IEND":
+            break
+        pos = end
+    if not inserted:
+        return data
+    return bytes(out)
+
+
+def _jpeg_splice_display_tags(data: bytes, icc: bytes | None, orient: int | None) -> bytes:
+    """Insert APP1 (EXIF) and APP2 (ICC) markers without touching the DCT scan.
+
+    The new segments go at the end of the existing APP block (after JFIF APP0, ahead
+    of DQT/SOF), and same-purpose segments are replaced instead of duplicated. A large
+    ICC profile is chunked across APP2 markers per the ICC-in-JPEG spec: one-byte
+    sequence and total counters, the layout Pillow's writer and the spec share.
+    Returns the input unchanged when the marker walk does not reach the scan cleanly.
+    """
+    exif = _orientation_exif(orient, prefixed=True)
+    segments: list[bytes] = []
+    if exif:
+        segments.append(b"\xff\xe1" + struct.pack(">H", len(exif) + 2) + exif)
+    if icc:
+        # 65535 per segment minus the 2-byte length and the 14-byte ICC header
+        # ("ICC_PROFILE\x00" + 1-byte sequence + 1-byte total).
+        part_size = 65535 - 2 - 14
+        parts = [icc[i : i + part_size] for i in range(0, len(icc), part_size)]
+        for seq, part in enumerate(parts, start=1):
+            payload = b"ICC_PROFILE\x00" + bytes((seq, len(parts))) + part
+            segments.append(b"\xff\xe2" + struct.pack(">H", len(payload) + 2) + payload)
+    if not segments:
+        return data
+
+    out = bytearray(data[:2])  # SOI
+    pos, n = 2, len(data)
+    while pos + 4 <= n:
+        if data[pos] != 0xFF:
+            return data  # lost the marker boundary: leave the encoded bytes alone
+        marker = data[pos + 1]
+        if marker not in range(0xE0, 0xF0):
+            break  # first segment outside the APP block: insertion point found
+        (seg_len,) = struct.unpack(">H", data[pos + 2 : pos + 4])
+        end = pos + 2 + seg_len
+        if seg_len < 2 or end > n:
+            return data
+        payload = data[pos + 4 : end]
+        replaced = (marker == 0xE1 and exif and payload.startswith(b"Exif\x00\x00")) or (
+            marker == 0xE2 and icc and payload.startswith(b"ICC_PROFILE\x00")
+        )
+        if not replaced:
+            out += data[pos:end]
+        pos = end
+    out += b"".join(segments)
+    out += data[pos:]
+    return bytes(out)
+
+
+def _webp_restore_display_tags(path: Path, icc: bytes | None, orient: int | None) -> None:
+    """Attach the display tags to a written WebP by re-saving it losslessly.
+
+    A hand-spliced ``ICCP``/``EXIF`` RIFF chunk is invisible to readers: libwebp
+    surfaces metadata only when a ``VP8X`` header announces it, and stitching that
+    header by hand duplicates what Pillow's writer already does correctly (measured
+    upstream: a spliced file fails to open in both Pillow and cv2). Pillow's WebP
+    save in lossless mode is pixel-identical, so the container bytes change and the
+    picture does not.
+    """
+    try:
+        from PIL import Image
+    except Exception:
+        return
+    exif = _orientation_exif(orient, prefixed=True)
+    save_kwargs: dict[str, Any] = {"format": "WEBP", "lossless": True, "exact": True}
+    if icc:
+        save_kwargs["icc_profile"] = icc
+    if exif:
+        save_kwargs["exif"] = exif
+    try:
+        with Image.open(path) as im:
+            im.load()
+            im.save(path, **save_kwargs)
+    except Exception:
+        log.debug("webp display-tag restore failed on %s", path, exc_info=True)
+
+
+def _restore_display_tags(path: Path, icc: bytes | None, orient: int | None) -> None:
+    """Best-effort splice of the display tags into an already-written output.
+
+    Never raises and never re-encodes pixels: a failure leaves the un-tagged (but
+    valid) file the codec wrote, which is exactly the pre-fix behaviour.
+    """
+    if icc is None and (orient is None or orient == 1):
+        return
+    try:
+        data = path.read_bytes()
+    except OSError:
+        log.debug("display-tag restore could not read back %s", path, exc_info=True)
+        return
+    try:
+        if data.startswith(PNG_SIGNATURE):
+            path.write_bytes(_png_splice_display_tags(data, icc, orient))
+        elif data[:2] == b"\xff\xd8":
+            path.write_bytes(_jpeg_splice_display_tags(data, icc, orient))
+        elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            _webp_restore_display_tags(path, icc, orient)
+        # else: a container without a restore path (BMP/TIFF): leave as written
+    except Exception:
+        log.debug("display-tag restore failed on %s", path, exc_info=True)
+
+
+def load_image_bgr(path: str | Path) -> NDArray[Any]:
+    """Read ``path`` as a BGR ndarray, raising instead of returning ``None``.
+
+    :func:`imread` keeps cv2's ``None``-on-failure contract because the removal paths
+    branch on it. Scripts and tests want the opposite -- fail loudly at the read -- so
+    they call this. Each vendor engine used to carry its own verbatim copy.
+    """
+    image = imread(path)
+    if image is None:
+        raise FileNotFoundError(f"Failed to read image: {path}")
+    return image
+
+
+def to_bgr(image: NDArray[Any]) -> NDArray[Any]:
+    """Return a 3-channel BGR view of ``image``, promoting grayscale and BGRA.
+
+    The cv2-based engines (the text-mark detectors/localizers) assume a 3-channel
+    BGR array for their channel reductions. A 2D grayscale or 4-channel BGRA input
+    would otherwise crash or mis-broadcast. Centralizes the shape coercion; a
+    3-channel input is returned unchanged (no copy).
+    """
+    cv2 = _import_pixel("cv2")
+
+    if image.ndim == 2 or image.shape[2] == 1:
+        return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    if image.shape[2] == 4:
+        return cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+    return image
+
+
+# Containers cv2 cannot encode -> written via Pillow (pillow-heif).
+_HEIF_WRITE_EXTS = {".heic", ".heif", ".avif"}
+
+
+def _pil_write(
+    path: str | Path,
+    img: NDArray[Any],
+    *,
+    icc_profile: bytes | None = None,
+    orientation: int | None = None,
+) -> bool:
+    """Encode HEIC/AVIF via Pillow (+pillow-heif) at high quality -- cv2 has no encoder
+    for them. BGR / BGRA in; returns False if Pillow (with the plugin) cannot save.
+    The display tags, when given, ride along in the save call: Pillow's HEIF encoder
+    writes both natively, so this branch needs no post-write splice."""
+    cv2 = _import_pixel("cv2")
+    np = _import_pixel("numpy")
+
+    _register_heif()
+    try:
+        from PIL import Image
+    except Exception:
+        return False
+    if img.ndim == 3 and img.shape[2] == 4:
+        arr, mode = cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA), "RGBA"
+    else:
+        arr, mode = cv2.cvtColor(to_bgr(img), cv2.COLOR_BGR2RGB), "RGB"
+    save_kwargs: dict[str, Any] = {"quality": 100}
+    if icc_profile:
+        save_kwargs["icc_profile"] = icc_profile
+    exif = _orientation_exif(orientation, prefixed=True)
+    if exif:
+        save_kwargs["exif"] = exif
+    try:
+        Image.fromarray(np.ascontiguousarray(arr), mode).save(str(path), **save_kwargs)
+        return True
+    except Exception:
+        return False
+
+
+def imwrite(
+    path: str | Path,
+    img: NDArray[Any],
+    *,
+    display_tags_from: str | Path | None = None,
+    orientation_applied: bool | None = None,
+) -> bool:
+    """Unicode-safe image write that PRESERVES the input format at max quality.
+
+    Format is taken from the path extension. Returns ``True`` on success, ``False``
+    if the codec rejects the image or the path cannot be written (matching
+    ``cv2.imwrite``, never raising).
+
+    When ``display_tags_from`` names the file whose decode produced ``img``'s pixels,
+    the source's ICC profile and EXIF orientation are carried into the re-encoded
+    output (upstream issue #98): cv2's encoders write no container metadata, and
+    colour and geometry are display fidelity, not provenance. The tags are read
+    BEFORE the write so an in-place rewrite (source == output) still finds them.
+    Set ``orientation_applied=False`` for an unchanged/raw decode, or ``True``
+    when EXIF has already been applied, including mirrors and square images.
+    Without that explicit state, orientation is re-tagged only when the raster
+    still has the source's stored dimensions, using the geometry heuristic in
+    :func:`_read_display_tags`. Pass the known decode state to avoid ambiguous
+    geometry, especially square images and mirrors.
+    """
+    cv2 = _import_pixel("cv2")
+
+    icc, orient = (
+        _read_display_tags(
+            Path(display_tags_from),
+            (img.shape[0], img.shape[1]),
+            orientation_applied=orientation_applied,
+        )
+        if display_tags_from is not None
+        else (None, None)
+    )
+    ext = (Path(path).suffix or ".png").lower()
+    if ext in _HEIF_WRITE_EXTS:
+        return _pil_write(path, img, icc_profile=icc, orientation=orient)
+    if ext in JPEG_SUFFIXES:
+        ext = ".jpg"
+    try:
+        ok, buf = cv2.imencode(ext, img, _encode_params(ext))
+    except cv2.error:
+        return False
+    if not ok:
+        return False
+    try:
+        buf.tofile(str(path))
+    except OSError:
+        return False
+    _restore_display_tags(Path(path), icc, orient)
+    return True
+
+
+# Container extensions that carry an alpha channel (for read/write-with-alpha).
+ALPHA_FORMATS = {".png", ".webp", ".heic", ".heif", ".avif"}
+
+
+def read_bgr_and_alpha(path: str | Path) -> tuple[NDArray[Any] | None, NDArray[Any] | None]:
+    """Read an image preserving its alpha channel separately.
+
+    Returns ``(bgr, alpha)`` where ``alpha`` is a single-channel ndarray when the
+    source has transparency, else ``None``. Grayscale inputs are promoted to BGR.
+    Returns ``(None, None)`` if the image cannot be decoded.
+    """
+    cv2 = _import_pixel("cv2")
+
+    image = imread(path, cv2.IMREAD_UNCHANGED)
+    if image is None:
+        return None, None
+    if image.ndim == 2:
+        return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR), None
+    if image.shape[2] == 4:
+        return image[:, :, :3].copy(), image[:, :, 3].copy()
+    return image, None
+
+
+def write_bgr_with_alpha(
+    path: str | Path,
+    bgr: NDArray[Any],
+    alpha: NDArray[Any] | None,
+) -> bool:
+    """Write BGR (with optional alpha) to ``path``. Returns :func:`imwrite`'s flag.
+
+    When ``alpha`` is provided and the output extension supports it, the original
+    alpha plane is rejoined unchanged. The watermark region is NOT made transparent:
+    the fill reconstructs real pixels there, so zeroing alpha would punch a
+    transparent hole that renders as a white box on any non-transparent viewer
+    (upstream issue #30). Preserving the input alpha keeps genuinely transparent
+    backgrounds intact without inventing new holes.
+
+    Returning the flag is load-bearing: :func:`imwrite` is contractually
+    non-raising, so this is the ONLY signal a caller gets that the file was not
+    created.
+    """
+    np = _import_pixel("numpy")
+
+    if alpha is None or Path(path).suffix.lower() not in ALPHA_FORMATS:
+        return imwrite(path, bgr)
+    return imwrite(path, np.dstack([bgr, alpha]))
