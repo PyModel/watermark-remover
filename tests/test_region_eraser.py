@@ -153,6 +153,210 @@ class TestBackendTable:
         assert erase(img, mask=mask, backend="auto").shape == img.shape  # type: ignore[arg-type]
 
 
+class TestLearnedBackendTable:
+    """The learned tiers are dispatched BY NAME so the fallback tests can
+    monkeypatch the probes and erase functions as module attributes -- a table
+    holding bound references would not see those patches."""
+
+    def test_learned_backends_name_real_module_attributes(self):
+        import region_eraser
+
+        for name, row in region_eraser._LEARNED_BACKENDS.items():
+            assert name in FILL_BACKENDS
+            assert callable(getattr(region_eraser, row.available))
+            assert callable(getattr(region_eraser, row.erase))
+
+
+class TestLamaBackend:
+    def test_lama_raises_when_unavailable(self):
+        import region_eraser
+
+        img = np.full((100, 100, 3), 50, np.uint8)
+        if region_eraser.lama_available():
+            pytest.skip("onnxruntime installed; cannot test the unavailable path")
+        with pytest.raises(RuntimeError, match="onnxruntime"):
+            erase(img, boxes=[(10, 10, 20, 20)], backend="lama")
+
+
+class TestMiganBackend:
+    def test_migan_raises_when_unavailable(self):
+        import region_eraser
+
+        img = np.full((100, 100, 3), 50, np.uint8)
+        if region_eraser.migan_available():
+            pytest.skip("onnxruntime installed; cannot test the unavailable path")
+        with pytest.raises(RuntimeError, match="onnxruntime"):
+            erase(img, boxes=[(10, 10, 20, 20)], backend="migan")
+
+
+class TestLamaChannelHandling:
+    """erase_lama must accept grayscale (2D) and BGRA (4-channel) like erase_cv2.
+
+    The real ONNX model is never loaded -- the session is faked to an identity
+    inpaint, so this exercises only the channel promote/split wrapper (the fix for
+    LaMa crashing on grayscale and dropping alpha on BGRA).
+    """
+
+    @pytest.fixture
+    def _fake_lama(self, monkeypatch: pytest.MonkeyPatch):
+        import region_eraser
+
+        class _In:
+            def __init__(self, name: str, shape: list[int]):
+                self.name = name
+                self.shape = shape
+
+        class _FakeSession:
+            def get_inputs(self):
+                return [_In("image", [1, 3, 512, 512]), _In("mask", [1, 1, 512, 512])]
+
+            def run(self, _outputs, feeds):
+                # Identity inpaint: echo the image tensor (1,3,size,size) back.
+                return [feeds["image"]]
+
+        monkeypatch.setattr(region_eraser, "lama_available", lambda: True)
+        monkeypatch.setattr(region_eraser, "_get_lama_session", _FakeSession)
+
+    @pytest.mark.usefixtures("_fake_lama")
+    def test_grayscale_2d_does_not_raise(self):
+        gray = np.full((100, 100), 120, np.uint8)
+        out = erase(gray, boxes=[(40, 40, 20, 20)], backend="lama")
+        assert out.ndim == 2
+        assert out.shape == gray.shape
+
+    @pytest.mark.usefixtures("_fake_lama")
+    def test_bgra_preserves_alpha(self):
+        bgra = np.full((100, 100, 4), 120, np.uint8)
+        bgra[..., 3] = 200  # opaque-ish alpha plane
+        out = erase(bgra, boxes=[(40, 40, 20, 20)], backend="lama")
+        assert out.shape == bgra.shape
+        assert np.array_equal(out[..., 3], bgra[..., 3])  # alpha carried through unchanged
+
+
+class TestMiganWrapper:
+    """erase_migan without the real model: fake session returns a solid-red field
+    and captures the fed mask. Exercises the mask-polarity inversion, masked-only
+    compositing, and grayscale/BGRA channel handling."""
+
+    captured: dict
+
+    @pytest.fixture
+    def _fake_migan(self, monkeypatch: pytest.MonkeyPatch):
+        import region_eraser
+
+        self.captured = {}
+
+        class _In:
+            def __init__(self, name: str):
+                self.name = name
+
+        class _FakeSession:
+            def __init__(self, outer):
+                self.outer = outer
+
+            def get_inputs(self):
+                return [_In("image"), _In("mask")]
+
+            def run(self, _outputs, feeds):
+                self.outer.captured["mask"] = feeds["mask"]
+                self.outer.captured["image_shape"] = feeds["image"].shape
+                img = feeds["image"]  # (1,3,H,W) RGB
+                red = np.zeros_like(img)
+                red[:, 0] = 255  # pure red in RGB
+                return [red]
+
+        monkeypatch.setattr(region_eraser, "migan_available", lambda: True)
+        monkeypatch.setattr(region_eraser, "_get_migan_session", lambda: _FakeSession(self))
+
+    @pytest.mark.usefixtures("_fake_migan")
+    def test_composites_only_masked_region_and_inverts_mask(self):
+        img = np.full((100, 100, 3), 120, np.uint8)  # BGR
+        out = erase(img, boxes=[(40, 40, 20, 20)], backend="migan", dilate=0)
+        # inside the box -> red (BGR (0,0,255)); outside -> untouched
+        assert tuple(int(v) for v in out[50, 50]) == (0, 0, 255)
+        assert np.array_equal(out[:30, :30], img[:30, :30])
+        # mask fed to MI-GAN is inverted: 0 (hole) inside the box, 255 (known) outside
+        m = self.captured["mask"][0, 0]
+        assert m[50, 50] == 0
+        assert m[10, 10] == 255
+
+    @pytest.mark.usefixtures("_fake_migan")
+    def test_crops_around_mask_so_onnx_input_is_bounded(self):
+        # Large frame, small corner mark: the tensor fed to MI-GAN is the padded
+        # CROP (pad = max(256, 2*bbox)), not the full image -- this is what holds the
+        # ONNX working set roughly constant on big uploads instead of scaling with
+        # the image (the memory fix). Untouched pixels stay exact; the mark is filled.
+        img = np.full((2000, 3000, 3), 120, np.uint8)
+        out = erase(img, boxes=[(2900, 1900, 60, 60)], backend="migan", dilate=0)
+        assert out.shape == img.shape
+        _, _, fh, fw = self.captured["image_shape"]
+        assert fh < 700  # crop height, not the 2000px frame
+        assert fw < 700  # crop width, not the 3000px frame
+        assert tuple(int(v) for v in out[1930, 2930]) == (0, 0, 255)  # mark -> red fill
+        assert np.array_equal(out[:100, :100], img[:100, :100])  # far corner untouched
+
+    @pytest.mark.usefixtures("_fake_migan")
+    def test_grayscale_2d_does_not_raise(self):
+        gray = np.full((100, 100), 120, np.uint8)
+        out = erase(gray, boxes=[(40, 40, 20, 20)], backend="migan", dilate=0)
+        assert out.ndim == 2
+        assert out.shape == gray.shape
+
+    @pytest.mark.usefixtures("_fake_migan")
+    def test_bgra_preserves_alpha(self):
+        bgra = np.full((100, 100, 4), 120, np.uint8)
+        bgra[..., 3] = 200
+        out = erase(bgra, boxes=[(40, 40, 20, 20)], backend="migan", dilate=0)
+        assert out.shape == bgra.shape
+        assert np.array_equal(out[..., 3], bgra[..., 3])
+
+    @pytest.mark.usefixtures("_fake_migan")
+    def test_16_bit_bgra_preserves_alpha(self):
+        bgra = np.full((100, 100, 4), 40000, np.uint16)
+        bgra[..., 3] = np.arange(10000, dtype=np.uint16).reshape(100, 100) * 6
+
+        out = erase(bgra, boxes=[(40, 40, 20, 20)], backend="migan", dilate=0)
+
+        assert out.dtype == np.uint16
+        assert np.array_equal(out[..., 3], bgra[..., 3])
+
+
+class TestLamaSixteenBit:
+    """LaMa normalises by the SOURCE's full scale, so 16 bits go through intact."""
+
+    @pytest.fixture
+    def fake_lama(self, monkeypatch: pytest.MonkeyPatch):
+        import region_eraser
+
+        class _In:
+            def __init__(self, name: str, shape: list[int]):
+                self.name = name
+                self.shape = shape
+
+        seen: dict[str, float] = {}
+
+        class _FakeSession:
+            def get_inputs(self):
+                return [_In("image", [1, 3, 512, 512]), _In("mask", [1, 1, 512, 512])]
+
+            def run(self, _outputs, feeds):
+                seen["max"] = float(feeds["image"].max())
+                return [feeds["image"]]
+
+        monkeypatch.setattr(region_eraser, "lama_available", lambda: True)
+        monkeypatch.setattr(region_eraser, "_get_lama_session", _FakeSession)
+        return seen
+
+    def test_the_model_sees_a_normalised_tensor_and_the_output_keeps_its_depth(self, fake_lama):
+        img = np.full((96, 96, 3), 60000, np.uint16)
+        out = erase(img, boxes=[(30, 30, 20, 20)], backend="lama")
+        # Dividing a 16-bit crop by 255 fed the model ~235 instead of ~0.92, and the
+        # uint8 cast on the way out then wrapped it into near-black pixels.
+        assert fake_lama["max"] <= 1.0
+        assert out.dtype == np.uint16
+        assert out[45, 45].max() > 30000
+
+
 class TestSixteenBitInputs:
     """A 16-bit source must survive the fill, whatever the backend can hold.
 
