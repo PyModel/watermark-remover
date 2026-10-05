@@ -25,6 +25,11 @@ import pytest
 from baidu_engine import BaiduEngine
 from doubao_engine import DoubaoEngine
 from doubao_engine import _template_match_score as _doubao_score
+from generic_ai_label_engine import DETECT_NCC_THRESHOLD as _GENERIC_GATE
+from generic_ai_label_engine import GenericAiLabelEngine
+from generic_ai_label_engine import _alpha_template as _generic_alpha
+from generic_ai_label_engine import _glyph_silhouette as _generic_silhouette
+from generic_ai_label_engine import _template_match_score as _generic_score
 from jimeng_engine import _ALPHA_WIDTH_FRAC as _JIMENG_ALPHA_WFRAC
 from jimeng_engine import DETECT_NCC_THRESHOLD as _JIMENG_GATE
 from jimeng_engine import JimengEngine
@@ -762,3 +767,191 @@ class TestQwenEngine:
         assert not eng.detect(out).detected
         h, w = wm.shape[:2]
         assert np.array_equal(out[: h // 2, : w // 2], wm[: h // 2, : w // 2])
+
+
+_RIVAL_COMPOSITES = {
+    # key -> (asset, width_frac, aspect, margin_right, margin_bottom): each rival
+    # mark composed at its own engine's measured geometry (upstream built these
+    # through the registry's example stamp; the registry is a later ticket here,
+    # so the composites are built directly from the tuned geometries).
+    "doubao": ("doubao_outline_alpha.png", 0.1636, 77 / 346, 0.004, 0.004),
+    "qwen": ("qwen_alpha.png", 0.203, 0.0416 / 0.160, 0.025, 0.025),
+    "baidu": ("baidu_alpha.png", 0.090, 187 / 366, 0.099, 0.006),
+    "kling": ("kling_alpha.png", 0.12, 0.0287 / 0.12, 0.03, 0.023),
+    "yuanbao": ("yuanbao_alpha.png", 0.08, 0.0446 / 0.08, 0.028, 0.031),
+}
+
+
+class TestGenericAiLabelEngine:
+    """Vectors adapted from upstream test_generic_ai_label_engine.py."""
+
+    def _compose(self, w: int, h: int, bg: float = 100.0, alpha: float = 1.0):
+        return _compose_mark(
+            "generic_ai_label_alpha.png",
+            w,
+            h,
+            width_frac=0.1724,
+            aspect=0.0625 / 0.1724,
+            bg=bg,
+            basis="width",
+            alpha=alpha,
+        )
+
+    def test_locate_anchored_bottom_right(self):
+        eng = GenericAiLabelEngine()
+        img = np.zeros((2048, 2048, 3), np.uint8)
+        loc = eng.locate(img)
+        assert 2048 - (loc.x + loc.w) < int(2048 * 0.05)
+        assert 2048 - (loc.y + loc.h) < int(2048 * 0.05)
+
+    def test_locate_scales_with_width(self):
+        eng = GenericAiLabelEngine()
+        small = eng.locate(np.zeros((1024, 1024, 3), np.uint8))
+        large = eng.locate(np.zeros((2048, 2048, 3), np.uint8))
+        assert large.w == pytest.approx(small.w * 2, rel=0.1)
+
+    def test_config_pins(self):
+        eng = GenericAiLabelEngine()
+        assert eng.config.detect_ncc_threshold == 0.50
+        # Every rival contains "AI生成" inside its own glyphs -- without the
+        # margins this generic detector would double-fire on their marks.
+        assert set(eng.config.rivals) == {
+            "doubao_outline_alpha.png",
+            "qwen_alpha.png",
+            "baidu_alpha.png",
+            "kling_alpha.png",
+            "yuanbao_alpha.png",
+        }
+
+    def test_provenance_never_relaxes(self):
+        """factor 1.0: no producer identity can confirm a BRAND-LESS label, so the
+        relaxed gate equals the strict gate. A sub-gate mark must stay rejected
+        even when provenance is claimed; a genuine mark stays accepted."""
+        eng = GenericAiLabelEngine()
+        assert eng.config.provenance_ncc_factor == 1.0
+        # The top-hat front-end is contrast-invariant, so FAINTNESS cannot lower the
+        # score; an off-ladder-comb scale does (the measured collapse the ladder
+        # gates on, same mechanism as Qwen's off-mode rungs).
+        off_comb, _ = _compose_mark(
+            "generic_ai_label_alpha.png",
+            2048,
+            2048,
+            width_frac=0.1724 * 0.7,
+            aspect=0.0625 / 0.1724,
+            basis="width",
+        )
+        sub_gate = eng.detect(off_comb).confidence
+        assert 0.0 < sub_gate < eng.config.detect_ncc_threshold
+        assert not eng.detect(off_comb, provenance=True).detected
+        marked, _ = self._compose(2048, 2048)
+        assert eng.detect(marked, provenance=True).detected
+
+    def test_clean_gradient_not_detected(self):
+        eng = GenericAiLabelEngine()
+        ramp = np.tile(np.linspace(0, 255, 1024, dtype=np.uint8), (1024, 1))
+        img = cv2.cvtColor(ramp, cv2.COLOR_GRAY2BGR)
+        assert not eng.detect(img).detected
+
+    def test_solid_blob_corner_not_detected(self):
+        eng = GenericAiLabelEngine()
+        img = np.zeros((1024, 1024, 3), np.uint8)
+        x, y, bw, bh = eng.locate(img).bbox
+        img[y + bh // 4 : y + bh * 3 // 4, x : x + bw // 2] = 200
+        assert not eng.detect(img).detected
+
+    def test_silhouette_loads_binary(self):
+        sil = _generic_silhouette()
+        assert sil is not None
+        assert set(np.unique(sil)).issubset({0, 255})
+
+    def test_match_score_shape_sensitive(self):
+        """The rendered glyph silhouette correlates with itself, not with a filled
+        block (self at the asset's own nominal detection size)."""
+        sil = _generic_silhouette()
+        h, w = sil.shape
+        box = np.zeros((h + 8, w * 3), np.uint8)
+        box[4 : 4 + h, 4 : 4 + w] = sil
+        nominal_base = int(w / 0.1724)
+        assert _generic_score(box, nominal_base) >= _GENERIC_GATE
+        solid = np.full_like(box, 255)
+        assert _generic_score(solid, nominal_base) < _GENERIC_GATE
+
+    def test_detects_synthetic_mark(self):
+        wm, _mark = self._compose(2048, 2048)
+        det = GenericAiLabelEngine().detect(wm)
+        assert det.detected
+        assert det.confidence >= _GENERIC_GATE
+
+    def test_small_image_guarded_from_false_positive(self):
+        wm, _mark = self._compose(2048, 2048)
+        eng = GenericAiLabelEngine()
+        assert eng.detect(wm).detected
+        assert not eng.detect(cv2.resize(wm, (150, 150))).detected
+
+    @pytest.mark.parametrize("key", sorted(_RIVAL_COMPOSITES))
+    def test_does_not_fire_on_rival_brand_mark(self, key: str):
+        """The generic template must not double-fire on a mark already attributed
+        to its own tuned brand engine; every rival's glyphs contain the literal
+        substring "AI生成", which is exactly the collision the rivals guard exists
+        to prevent."""
+        asset, width_frac, aspect, mr, mb = _RIVAL_COMPOSITES[key]
+        marked, _box = _compose_mark(
+            asset,
+            1536,
+            1152,
+            width_frac=width_frac,
+            aspect=aspect,
+            margin_right=mr,
+            margin_bottom=mb,
+        )
+        rival_engine = {
+            "doubao": DoubaoEngine,
+            "qwen": QwenEngine,
+            "baidu": BaiduEngine,
+            "kling": KlingEngine,
+            "yuanbao": YuanbaoEngine,
+        }[key]()
+        assert rival_engine.detect(marked).detected, f"{key}: sanity -- its own engine should fire"
+        assert not GenericAiLabelEngine().detect(marked).detected, f"generic double-fired on {key}"
+
+    def test_alpha_asset_loads(self):
+        at = _generic_alpha()
+        assert at is not None
+        assert at.dtype.kind == "f"
+        assert float(at.min()) >= 0.0 and float(at.max()) <= 1.0
+
+    def test_footprint_mask_in_bottom_right(self):
+        wm, _mark = self._compose(2048, 2048)
+        mask = GenericAiLabelEngine().footprint_mask(wm)
+        assert mask is not None
+        assert mask.shape == wm.shape[:2]
+        ys, xs = np.where(mask > 0)
+        assert ys.mean() > wm.shape[0] / 2
+        assert xs.mean() > wm.shape[1] / 2
+
+    def test_fill_clears_and_leaves_far_region_exact(self):
+        wm, _mark = self._compose(2048, 2048)
+        eng = GenericAiLabelEngine()
+        out = _fill(eng, wm)
+        assert not eng.detect(out).detected
+        h, w = wm.shape[:2]
+        assert np.array_equal(out[: h // 2, : w // 2], wm[: h // 2, : w // 2])
+
+    @pytest.mark.parametrize(("w", "h"), [(2048, 1), (1, 2048), (2048, 8)])
+    def test_wide_short_does_not_raise(self, w: int, h: int):
+        eng = GenericAiLabelEngine()
+        img = np.zeros((h, w, 3), np.uint8)
+        mask = eng.footprint_mask(img, force=True)
+        assert mask is None or mask.shape == (h, w)
+
+    def test_grayscale_2d_does_not_raise(self):
+        eng = GenericAiLabelEngine()
+        gray = np.zeros((2048, 2048), np.uint8)
+        mask = eng.footprint_mask(gray, force=True)
+        assert mask is None or mask.shape == (2048, 2048)
+
+    def test_bgra_4channel_does_not_raise(self):
+        eng = GenericAiLabelEngine()
+        bgra = np.zeros((2048, 2048, 4), np.uint8)
+        mask = eng.footprint_mask(bgra, force=True)
+        assert mask is None or mask.shape == (2048, 2048)
