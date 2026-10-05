@@ -11,7 +11,15 @@ from pathlib import Path
 
 import morphomod
 import pytest
-from morphomod import Raster, VisiblePlan, box_mask, decode_png, encode_png, remove_visible, write_pgm
+from morphomod import (
+    Raster,
+    VisiblePlan,
+    box_mask,
+    decode_png,
+    encode_png,
+    remove_visible,
+    write_pgm,
+)
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills" / "remove-ai-marks" / "scripts"
 CLEAN_FILE = SCRIPTS / "clean_file.py"
@@ -323,9 +331,7 @@ def _write_stub_opencv(directory: Path) -> None:
 
 
 @pytest.mark.parametrize("backend", ["cv2-telea", "cv2-ns"])
-def test_clean_file_cv2_backend_end_to_end_with_stub_opencv(
-    tmp_path: Path, backend: str
-) -> None:
+def test_clean_file_cv2_backend_end_to_end_with_stub_opencv(tmp_path: Path, backend: str) -> None:
     stubs = tmp_path / "opencv-stubs"
     stubs.mkdir()
     _write_stub_opencv(stubs)

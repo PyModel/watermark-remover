@@ -730,7 +730,7 @@ def _install_stub_opencv(monkeypatch: pytest.MonkeyPatch) -> None:
     stub_numpy.uint8 = "uint8"
     stub_numpy.frombuffer = lambda data, dtype=None: _StubArray(data, (len(data),))
 
-    def _inpaint(src, mask, radius, flags):  # noqa: ARG001 - stub signature
+    def _inpaint(src, mask, radius, flags):
         width = src.shape[1]
         channels = src.shape[2]
         data = bytearray(src._data)
