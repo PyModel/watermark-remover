@@ -41,6 +41,7 @@ capture-derived backgrounds that are forbidden in this tree.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -250,6 +251,9 @@ class KnownMark:
     manufacturer: str
     # Which provenance regime this mark's vendor labels under, or None. "tc260" means
     # the vendor stamps the China AIGC label; it does not identify the manufacturer.
+    # DECLARATIVE: this field documents and groups rows (tests and reports read
+    # it); the trust decision itself only ever keys on evidence keys in
+    # ``provenance`` (see ``resolve_trust``).
     label_regime: str | None
     # The sentence a caller reports when THIS mark is the strongest evidence. None
     # for a mark that never names a platform on its own (the weak pills).
@@ -260,13 +264,19 @@ class KnownMark:
     # (e.g. the pill's footprint flatness). None = no extra evidence needed.
     _features: Callable[..., dict[str, float]] | None = None
     # Metadata signal names that confirm this mark's vendor, and platform substrings
-    # that do. Empty means nothing confirms it.
+    # that do. Empty means nothing confirms it. LIVE CONFIG:
+    # :func:`metadata_evidence` applies exactly these probes to the file's
+    # metadata, so a declared signal/token corroborates its mark through
+    # ``resolve_trust``.
     provenance_signals: tuple[str, ...] = ()
     provenance_platform_tokens: tuple[str, ...] = ()
     # TC260 ``ContentProducer`` identities that name THIS mark's vendor (USCCs as
     # normalized by ``tc260_verify.uscc_of``, plus the bare product names a few
     # generators write). Derived from tc260_verify.TC260_PRODUCERS; the registry
     # coverage test prevents a TC260 mark from silently omitting its codes.
+    # DECLARATIVE snapshot for reports/coverage tests: the runtime mapping rides
+    # tc260_verify (``producer_for_code``), and this field must stay in sync
+    # with it (the coverage test enforces that).
     tc260_producer_codes: tuple[str, ...] = ()
     # Optional single-pass dual verdict for the arbiter's perception stage. None =
     # fall back to two ``_detect`` calls.
@@ -829,6 +839,10 @@ def resolve_trust(
     ``strict`` never relaxes. A mark is ``confirmed`` only on same-product evidence
     -- metadata naming any mark of that product, or a confidently strict-detected
     sibling (minus the marks too weak to vouch, :data:`_CANNOT_CORROBORATE`).
+    ``provenance`` carries mark KEYS, which come from two collectors: TC260
+    producer codes (``tc260_label`` + ``tc260_verify``) and the non-TC260
+    metadata evidence of :func:`metadata_evidence` (the rows' own
+    ``provenance_signals`` / ``provenance_platform_tokens`` declarations).
     Without that evidence a mark stays ``strict``: there is no path that relaxes a
     gate on anything less than same-product evidence."""
     if sensitivity == "strict":
@@ -838,6 +852,76 @@ def resolve_trust(
         _PRODUCT_OF[k] == product for k in strict_keys if k != key and k not in _CANNOT_CORROBORATE
     )
     return "confirmed" if confirmed else "strict"
+
+
+_XMP_PACKET_RE = re.compile(rb"<x:xmpmeta[\s\S]{0,262144}?</x:xmpmeta>", re.IGNORECASE)
+
+
+def _metadata_generator_text(data: bytes) -> str:
+    """Generator-bearing metadata text for platform-token matching (bounded).
+
+    Only structured metadata fields are scanned -- the values of PNG
+    tEXt/iTXt/zTXt generator keys (Software/Creator/parameters) and the XMP
+    packet when present -- never the pixel payload or free-text comments, so a
+    caption mentioning a vendor cannot corroborate its mark. Malformed PNG
+    structures contribute nothing instead of raising.
+    """
+    parts: list[str] = []
+    try:
+        import image_meta
+        import png_chunks
+
+        if data[:8] == png_chunks.PNG_SIGNATURE:
+            for chunk in png_chunks.iter_png_chunks(data):
+                if chunk.kind not in (b"tEXt", b"zTXt", b"iTXt"):
+                    continue
+                for key, value in image_meta._png_text_entries(bytes(chunk.payload), chunk.kind):
+                    if key.strip().lower() in image_meta._GENERATOR_TEXT_KEYS:
+                        parts.append(value)
+    except ValueError:
+        pass  # malformed PNG: no generator text to match on
+    packet = _XMP_PACKET_RE.search(data)
+    if packet is not None:
+        parts.append(packet.group(0).decode("latin-1", errors="replace"))
+    return "\n".join(parts)
+
+
+def metadata_evidence(data: bytes) -> frozenset[str]:
+    """Mark keys corroborated by the FILE's own metadata (non-TC260 signals).
+
+    This is the runtime consumer of the rows' ``provenance_signals`` and
+    ``provenance_platform_tokens`` declarations: the fields name the metadata
+    that confirms each vendor, and this function applies exactly those probes.
+
+      * ``samsung_genai`` -- Samsung's genAIType container metadata present
+        (:func:`image_meta.samsung_genai_in`);
+      * platform tokens -- a case-insensitive hit in the generator-bearing
+        metadata text (:func:`_metadata_generator_text`).
+
+    TC260 producer keys are deliberately NOT re-derived here; they ride
+    ``tc260_label`` + ``tc260_verify`` in the caller. The returned keys merge
+    with those to form the ``provenance`` context ``resolve_trust`` decides
+    on, so non-TC260 evidence corroborates through the same trust gate.
+    """
+    if not data:
+        return frozenset()
+    keys: set[str] = set()
+    signals = {mark.key: mark.provenance_signals for mark in _REGISTRY if mark.provenance_signals}
+    if any("samsung_genai" in row_signals for row_signals in signals.values()):
+        import image_meta
+
+        if image_meta.samsung_genai_in(data) is not None:
+            keys.update(
+                key for key, row_signals in signals.items() if "samsung_genai" in row_signals
+            )
+    tokens = {token.casefold() for mark in _REGISTRY for token in mark.provenance_platform_tokens}
+    if tokens:
+        haystack = _metadata_generator_text(data).casefold()
+        if haystack:
+            for mark in _REGISTRY:
+                if any(token.casefold() in haystack for token in mark.provenance_platform_tokens):
+                    keys.add(mark.key)
+    return frozenset(keys)
 
 
 def tc260_producer_mark(code: str) -> KnownMark | None:

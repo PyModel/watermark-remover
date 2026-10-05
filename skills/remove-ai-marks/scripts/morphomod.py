@@ -1021,15 +1021,17 @@ def _remove_visible_marks(
     else:
         bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
-    # Same-product evidence for the `auto` sensitivity: a TC260 label whose
-    # ContentProducer maps (via tc260_verify) to a registered mark's product.
-    # Unmapped producers never relax a gate.
-    provenance: frozenset[str] = frozenset()
+    # Same-product evidence for the `auto` sensitivity: the file's own metadata
+    # (non-TC260 signals declared on the registry rows, e.g. Samsung genAIType
+    # or a Microsoft platform token in generator fields) plus a TC260 label
+    # whose ContentProducer maps (via tc260_verify) to a registered mark's
+    # product. Unmapped producers and undeclared signals never relax a gate.
+    provenance = reg.metadata_evidence(data)
     label = tc260_label.label_from_metadata(data)
     if label:
         producer = tc260_verify.producer_for_code(label.get("ContentProducer", ""))
         if producer is not None:
-            provenance = frozenset({producer.key})
+            provenance = provenance | frozenset({producer.key})
 
     fill_backend = _registry_fill_backend(plan.backend)
     if plan.mark == "auto":

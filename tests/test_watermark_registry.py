@@ -1199,3 +1199,95 @@ class TestEngineImportsStayLazy:
             [sys.executable, "-c", script], capture_output=True, text=True, check=True
         )
         assert json.loads(out.stdout) == []
+
+
+class TestMetadataProvenanceWiring:
+    """F5 (stage 8 fix pass 2): the rows' provenance fields are live config.
+
+    ``metadata_evidence`` reads each row's declared ``provenance_signals`` /
+    ``provenance_platform_tokens`` to map the FILE's metadata to mark keys, and
+    that evidence flows into ``resolve_trust`` exactly like TC260 producer keys
+    do -- so samsung_genai metadata and a Microsoft platform token actually
+    corroborate their marks instead of decorating the registry."""
+
+    @staticmethod
+    def _png_with_text(payload: bytes) -> bytes:
+        import struct
+        import zlib
+
+        def chunk(ctype: bytes, body: bytes) -> bytes:
+            crc = zlib.crc32(ctype)
+            crc = zlib.crc32(body, crc) & 0xFFFFFFFF
+            return struct.pack(">I", len(body)) + ctype + body + struct.pack(">I", crc)
+
+        sig = b"\x89PNG\r\n\x1a\n"
+        ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+        idat = zlib.compress(b"\x00\x00\x00")
+        return (
+            sig
+            + chunk(b"IHDR", ihdr)
+            + chunk(b"tEXt", payload)
+            + chunk(b"IDAT", idat)
+            + chunk(b"IEND", b"")
+        )
+
+    def test_samsung_genai_metadata_confirms_samsung(self):
+        data = b'junk\x00PhotoEditor_Re_Edit_Data {"genAIType": 1} trailing'
+        assert reg.metadata_evidence(data) == frozenset({"samsung"})
+        assert (
+            reg.resolve_trust(
+                "samsung",
+                sensitivity="auto",
+                provenance=reg.metadata_evidence(data),
+                strict_keys=set(),
+            )
+            == "confirmed"
+        )
+
+    def test_platform_token_in_generator_metadata_confirms_microsoft(self):
+        png = self._png_with_text(b"Software\x00Microsoft Capture Tool 1.0")
+        assert reg.metadata_evidence(png) == frozenset({"microsoft"})
+        assert (
+            reg.resolve_trust(
+                "microsoft",
+                sensitivity="auto",
+                provenance=reg.metadata_evidence(png),
+                strict_keys=set(),
+            )
+            == "confirmed"
+        )
+
+    def test_platform_token_never_confirms_an_undeclared_mark(self):
+        """Only the rows that DECLARE a token may be corroborated by it: a
+        'samsung' string in metadata must not confirm a mark that never asked
+        for token evidence."""
+        png = self._png_with_text(b"Software\x00samsung something")
+        assert reg.metadata_evidence(png) == frozenset()
+
+    def test_clean_bytes_confirm_nothing(self):
+        assert reg.metadata_evidence(b"") == frozenset()
+        assert reg.metadata_evidence(b"\x00" * 64) == frozenset()
+        assert (
+            reg.resolve_trust(
+                "samsung", sensitivity="auto", provenance=frozenset(), strict_keys=set()
+            )
+            == "strict"
+        )
+
+    def test_malformed_png_still_confirms_nothing_and_does_not_raise(self):
+        malformed = b"\x89PNG\r\n\x1a\nnot-really-a-png"
+        assert reg.metadata_evidence(malformed) == frozenset()
+
+    def test_non_tc260_signals_do_not_leak_across_products(self):
+        """Samsung metadata confirms samsung only -- never a ByteDance mark."""
+        data = b'PhotoEditor_Re_Edit_Data {"genAIType": 1}'
+        assert reg.metadata_evidence(data) == frozenset({"samsung"})
+        assert (
+            reg.resolve_trust(
+                "doubao",
+                sensitivity="auto",
+                provenance=reg.metadata_evidence(data),
+                strict_keys=set(),
+            )
+            == "strict"
+        )
