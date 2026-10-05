@@ -13,19 +13,18 @@ from __future__ import annotations
 
 from typing import Any
 
+import _text_mark_engine as tme
+import _text_mark_variants as tmv
 import cv2
 import numpy as np
 import pytest
-from numpy.typing import NDArray
-
-import _text_mark_engine as tme
-import _text_mark_variants as tmv
 from _text_mark_engine import (
     TextMarkConfig,
     TextMarkEngine,
     glyph_silhouette,
     load_alpha_template,
 )
+from numpy.typing import NDArray
 
 ASSET = "kling_alpha.png"  # in-tree renderer-synthetic CJK strip (347x83)
 
@@ -84,7 +83,7 @@ def _stamp(
     img = image.copy()
     if textured:
         rng = np.random.default_rng(7)
-        noise = rng.normal(0, 14, img.shape[:2] + (1,)).repeat(3, axis=2)
+        noise = rng.normal(0, 14, (*img.shape[:2], 1)).repeat(3, axis=2)
         img = np.clip(img.astype(np.float32) + noise, 0, 255).astype(np.uint8)
         img = cv2.GaussianBlur(img, (0, 0), sigmaX=1.2)
     loc = engine.locate(img)
@@ -155,7 +154,7 @@ class TestTemplates:
         at = load_alpha_template(ASSET)
         assert at is not None
         assert at.dtype == np.float32
-        assert 0.0 <= float(at.min()) and float(at.max()) <= 1.0
+        assert float(at.min()) >= 0.0 and float(at.max()) <= 1.0
         assert float(at.max()) > 0.9  # real glyph pixels exist
 
     def test_glyph_silhouette_is_binary(self):
@@ -212,7 +211,7 @@ class TestExtractMask:
         box = eng.extract_mask(img, loc)
         # 20 = the engine's minimum-glyph floor (a real strip covers hundreds).
         assert (box > 0).sum() >= 20
-        ys, xs = np.where(box > 0)
+        _ys, xs = np.where(box > 0)
         # the glyph sits mid-box (the fixture centers it), not at the edges
         assert xs.min() > 0 and xs.max() < loc.w - 1
 
@@ -466,7 +465,9 @@ class TestContinuousFrontends:
         assert not pinned.detect(img).detected
 
 
-def _stamp_dark(engine: TextMarkEngine, image: NDArray[np.uint8], *, level: int) -> NDArray[np.uint8]:
+def _stamp_dark(
+    engine: TextMarkEngine, image: NDArray[np.uint8], *, level: int
+) -> NDArray[np.uint8]:
     """Composite the engine's glyph as a DARK overlay (light-on-dark inverted)."""
     tmpl = load_alpha_template(engine.config.asset_name)
     assert tmpl is not None
@@ -758,7 +759,7 @@ class TestBoxFootprint:
         assert det.match_box is not None
         mask = eng.footprint_mask(marked, detection=det)
         assert mask is not None
-        x0, y0, x1, y1 = det.match_box
+        x0, y0, _x1, y1 = det.match_box
         loc = eng.locate(marked)
         gh = y1 - y0 + 1
         # a half-height pad each side is inside the mask
@@ -773,14 +774,18 @@ class TestBottomRightAnchor:
     """The anchor post-gate demotes matches that do not hug the corner."""
 
     def test_corner_hugging_match_is_kept(self):
-        eng = tmv.BottomRightGlyphTextMarkEngine(_config(detect_frontend="tophat", detect_ncc_threshold=0.50))
+        eng = tmv.BottomRightGlyphTextMarkEngine(
+            _config(detect_frontend="tophat", detect_ncc_threshold=0.50)
+        )
         marked = _stamp(eng, _flat(), alpha=0.6, flush=True)
         assert eng.detect(marked).detected
 
     def test_off_anchor_match_is_demoted(self):
         """Stamp the glyph at the TOP of the locate box: same shape, same score, but
         it no longer ends near the corner -- the post-gate must demote it."""
-        eng = tmv.BottomRightGlyphTextMarkEngine(_config(detect_frontend="tophat", detect_ncc_threshold=0.50))
+        eng = tmv.BottomRightGlyphTextMarkEngine(
+            _config(detect_frontend="tophat", detect_ncc_threshold=0.50)
+        )
         plain = TextMarkEngine(eng.config)
         img = _flat()
         marked = _stamp_off_anchor(plain, img)
@@ -789,7 +794,9 @@ class TestBottomRightAnchor:
         assert not eng.detect(marked).detected  # ...the anchored one demotes it
 
     def test_anchored_ladder_only_considers_corner_placements(self):
-        eng = tmv.BottomRightGlyphTextMarkEngine(_config(detect_frontend="tophat", detect_ncc_threshold=0.50))
+        eng = tmv.BottomRightGlyphTextMarkEngine(
+            _config(detect_frontend="tophat", detect_ncc_threshold=0.50)
+        )
         marked = _stamp(eng, _flat(), alpha=0.6, flush=True)
         loc = eng.locate(marked)
         _score, box = eng._ladder_best(marked, loc)
@@ -805,7 +812,9 @@ class TestBottomRightBoxEngine:
     """Anchored detection + solid rectangle footprint compose."""
 
     def test_masks_the_full_rectangle_of_a_corner_stamp(self):
-        eng = tmv.BottomRightBoxTextMarkEngine(_config(detect_frontend="tophat", detect_ncc_threshold=0.50))
+        eng = tmv.BottomRightBoxTextMarkEngine(
+            _config(detect_frontend="tophat", detect_ncc_threshold=0.50)
+        )
         marked = _stamp(eng, _flat(), alpha=0.6, flush=True)
         det = eng.detect(marked)
         assert det.detected

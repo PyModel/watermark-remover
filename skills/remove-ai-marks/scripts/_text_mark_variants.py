@@ -16,12 +16,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import cv2
-
 from _text_mark_engine import (
     BottomRightAnchoredEngine,
     TextMarkConfig,
     TextMarkDetection,
     TextMarkEngine,
+    TextMarkLocation,
     best_detection,
     load_alpha_template,
 )
@@ -36,9 +36,16 @@ class TextMarkVariantsMixin(TextMarkEngine):
     _variants: tuple[TextMarkEngine, ...] = ()
     config: TextMarkConfig
 
-    def detect_both(self, image: NDArray[Any] | None) -> tuple[TextMarkDetection, TextMarkDetection]:
-        pairs = [super().detect_both(image), *(engine.detect_both(image) for engine in self._variants)]
-        return best_detection(*(pair[0] for pair in pairs)), best_detection(*(pair[1] for pair in pairs))
+    def detect_both(
+        self, image: NDArray[Any] | None
+    ) -> tuple[TextMarkDetection, TextMarkDetection]:
+        pairs = [
+            super().detect_both(image),
+            *(engine.detect_both(image) for engine in self._variants),
+        ]
+        return best_detection(*(pair[0] for pair in pairs)), best_detection(
+            *(pair[1] for pair in pairs)
+        )
 
     def detect(self, image: NDArray[Any], *, provenance: bool = False) -> TextMarkDetection:
         return self.detect_both(image)[int(provenance)]

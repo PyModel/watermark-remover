@@ -20,9 +20,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import cv2
-import numpy as np
-
 import image_io
+import numpy as np
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -344,7 +343,9 @@ class TextMarkEngine:
             if rival is None:
                 continue
             if score - template_match_score(box_mask, scale_base, rival) < c.rival_margin:
-                logger.debug("%s detect: loses the %s rival margin; rejecting.", c.name, rival_asset)
+                logger.debug(
+                    "%s detect: loses the %s rival margin; rejecting.", c.name, rival_asset
+                )
                 return False
         return True
 
@@ -389,7 +390,9 @@ class TextMarkEngine:
         """
         return self._residual_response(image, loc, absolute=False)
 
-    def _residual_response(self, image: NDArray[Any], loc: TextMarkLocation, *, absolute: bool) -> NDArray[Any] | None:
+    def _residual_response(
+        self, image: NDArray[Any], loc: TextMarkLocation, *, absolute: bool
+    ) -> NDArray[Any] | None:
         """Max-normalized uint8 local-luma residual in the located box, saturation-weighted.
 
         ``absolute=False`` keeps only the POSITIVE side -- the white top-hat, for a mark
@@ -403,7 +406,9 @@ class TextMarkEngine:
             return None
         luma, sat, local_bg = self._roi_fields(image, loc)
         residual = luma - local_bg
-        resp = (np.abs(residual) if absolute else np.clip(residual, 0, None)) * (sat < c.max_saturation)
+        resp = (np.abs(residual) if absolute else np.clip(residual, 0, None)) * (
+            sat < c.max_saturation
+        )
         peak = float(resp.max())
         # Deadband, not an epsilon: cv2's GaussianBlur leaves a UNIFORM ~1e-5 float
         # bias on a constant ROI (kernel weights sum to 0.99999), so a flat corner
@@ -589,7 +594,9 @@ class TextMarkEngine:
         scan = self._scan(image)
         return self._verdict(scan, provenance=provenance)
 
-    def detect_both(self, image: NDArray[Any] | None) -> tuple[TextMarkDetection, TextMarkDetection]:
+    def detect_both(
+        self, image: NDArray[Any] | None
+    ) -> tuple[TextMarkDetection, TextMarkDetection]:
         """``(strict, relaxed)`` from ONE scan of the image.
 
         ``provenance`` scales the acceptance THRESHOLD and nothing else -- the locate
@@ -639,7 +646,15 @@ class TextMarkEngine:
                 score = None
         else:
             score, match_box = self._ladder_best(image, loc)
-        return TextMarkScan(loc, box, base, frame=image.shape[:2], coverage=coverage, score=score, match_box=match_box)
+        return TextMarkScan(
+            loc,
+            box,
+            base,
+            frame=image.shape[:2],
+            coverage=coverage,
+            score=score,
+            match_box=match_box,
+        )
 
     def _verdict(self, scan: TextMarkScan, *, provenance: bool) -> TextMarkDetection:
         """Apply the trust-level-dependent tail to a scan, as a fresh result object."""
@@ -656,7 +671,9 @@ class TextMarkEngine:
         det.confidence = scan.score
         # Short-circuit is load-bearing: _rival_margin_ok scores every rival template
         # and logs its own rejection line, so it must stay unevaluated below threshold.
-        det.detected = scan.score >= threshold and self._rival_margin_ok(scan.score, scan.box, scan.base)
+        det.detected = scan.score >= threshold and self._rival_margin_ok(
+            scan.score, scan.box, scan.base
+        )
         logger.debug(
             "%s detect (%s): coverage=%.3f ncc=%.2f thr=%.2f detected=%s",
             c.name,
@@ -683,7 +700,9 @@ class TextMarkEngine:
     # to mask. A real strip covers hundreds of pixels.
     _MIN_GLYPH_PIXELS = 20
 
-    def _strict_detection(self, image: NDArray[Any], detection: TextMarkDetection | None) -> TextMarkDetection:
+    def _strict_detection(
+        self, image: NDArray[Any], detection: TextMarkDetection | None
+    ) -> TextMarkDetection:
         """The STRICT detection the footprint is bounded by.
 
         A threaded detection is reused only when it was taken at the same strict level
@@ -700,7 +719,9 @@ class TextMarkEngine:
             return detection
         return self.detect(image)  # polymorphic: a subclass gate must still apply
 
-    def _geometry_rect(self, loc: TextMarkLocation, frame: tuple[int, int]) -> tuple[int, int, int, int]:
+    def _geometry_rect(
+        self, loc: TextMarkLocation, frame: tuple[int, int]
+    ) -> tuple[int, int, int, int]:
         """The whole locate box, clamped to the frame -- the ``force`` footprint."""
         bx, by, bw, bh = loc.bbox
         h, w = frame
@@ -753,7 +774,9 @@ class TextMarkEngine:
         """
         ys, xs = np.where(self.extract_mask(image, loc) > 0)
         blob = (
-            (int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())) if xs.size >= self._MIN_GLYPH_PIXELS else None
+            (int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max()))
+            if xs.size >= self._MIN_GLYPH_PIXELS
+            else None
         )
         frontend = self.config.detect_frontend
         if frontend in ("gray", "contrast"):
@@ -820,7 +843,9 @@ class TextMarkEngine:
         glyph_w, glyph_h = x1 - x0 + 1, y1 - y0 + 1
         aligned = cv2.resize(alpha, (glyph_w, glyph_h), interpolation=cv2.INTER_LINEAR)
         local_mask = np.zeros((loc.h, loc.w), np.uint8)
-        local_mask[y0 : y0 + glyph_h, x0 : x0 + glyph_w] = (aligned > alpha_floor).astype(np.uint8) * 255
+        local_mask[y0 : y0 + glyph_h, x0 : x0 + glyph_w] = (aligned > alpha_floor).astype(
+            np.uint8
+        ) * 255
         if dilate > 0:
             kernel = np.ones((2 * dilate + 1, 2 * dilate + 1), np.uint8)
             local_mask = cv2.dilate(local_mask, kernel)
