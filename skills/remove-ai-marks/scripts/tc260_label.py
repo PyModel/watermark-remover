@@ -11,8 +11,11 @@ JPEG EXIF (UserComment), as a bare ``AIGC{...}`` blob near a JPEG APP segment,
 and as a PNG ``tEXt`` chunk keyed ``AIGC`` carrying the raw JSON.
 
 Every entry point is bounded: payloads over ``MAX_TC260_VALUE_BYTES`` are
-refused before any JSON work, and malformed or non-UTF-8 input is a stable
-rejection (None), never an exception.
+refused before any JSON work, the byte scan reads only the first
+``MAX_TC260_SCAN_WINDOW_BYTES`` of ``data`` (labels ride metadata near the
+head of a file, so a label placed beyond that window is not found), and
+malformed or non-UTF-8 input is a stable rejection (None), never an
+exception.
 """
 
 from __future__ import annotations
@@ -53,6 +56,9 @@ TC260_AIGC_FIELDS: frozenset[str] = frozenset(
 )
 _TC260_CANONICAL_FIELDS: dict[str, str] = {field.casefold(): field for field in TC260_AIGC_FIELDS}
 MAX_TC260_VALUE_BYTES = 1024 * 1024
+# The byte scan reads only this prefix of the payload: labels ride metadata
+# near the head of a file, so a label placed beyond the window is not found.
+MAX_TC260_SCAN_WINDOW_BYTES = 1 << 20
 
 _XMP_AIGC = re.compile(rb'<TC260:AIGC>(.*?)</TC260:AIGC>|TC260:AIGC\s*=\s*"(.*?)"', re.DOTALL)
 
@@ -111,8 +117,14 @@ def _parse_wrapped(text: str, *, require_tc260_field: bool) -> dict[str, str] | 
 def _scan_label(data: bytes) -> tuple[dict[str, str], tuple[int, int]] | None:
     """``(parsed label, byte span of the label JSON)`` from the XMP or generic
     wrapped forms, or None. The span is exclusive at the end and maps 1:1 onto
-    ``data``'s bytes, so callers can overwrite exactly the label in place."""
-    for match in _XMP_AIGC.finditer(data):
+    ``data``'s bytes, so callers can overwrite exactly the label in place.
+
+    Only the first ``MAX_TC260_SCAN_WINDOW_BYTES`` of ``data`` are scanned:
+    labels ride metadata near the head of a file, and the scan must neither
+    decode nor regex-walk a whole (up to ~100 MB) payload.
+    """
+    window = data[:MAX_TC260_SCAN_WINDOW_BYTES]
+    for match in _XMP_AIGC.finditer(window):
         group = 1 if match.group(1) is not None else 2
         raw = match.group(group)
         if len(raw) > MAX_TC260_VALUE_BYTES:
@@ -122,7 +134,7 @@ def _scan_label(data: bytes) -> tuple[dict[str, str], tuple[int, int]] | None:
         if result:
             return result, (match.start(group), match.end(group))
 
-    text = data.decode("latin-1")
+    text = window.decode("latin-1")
     for needle in ('"AIGC"', "AIGC{"):
         start = text.find(needle)
         if start == -1:

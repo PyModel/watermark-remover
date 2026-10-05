@@ -19,7 +19,13 @@ sys.path.insert(0, str(SCRIPTS))
 
 import heif_meta
 import image_meta
-from tc260_label import MAX_TC260_VALUE_BYTES, label_from_metadata, parse_tc260_aigc_json
+from tc260_label import (
+    MAX_TC260_SCAN_WINDOW_BYTES,
+    MAX_TC260_VALUE_BYTES,
+    label_from_metadata,
+    label_span,
+    parse_tc260_aigc_json,
+)
 
 FIXTURES = ROOT / "tests" / "fixtures" / "tc260"
 DOUBAO_USCC = "91110102MACQD9K640"
@@ -142,6 +148,20 @@ class TestLabelFromMetadata:
         assert json.loads(body) == {"Label": "x" * MAX_TC260_VALUE_BYTES}  # parses when unbounded
         big = b"<TC260:AIGC>" + body + b"</TC260:AIGC>"
         assert label_from_metadata(big) is None
+
+    def test_a_label_beyond_the_scan_window_is_not_found(self) -> None:
+        """Only the first MAX_TC260_SCAN_WINDOW_BYTES are scanned (documented).
+
+        _scan_label used to latin-1-decode the whole payload (up to ~100 MB)
+        on every call; the scan is now a bounded prefix window, so a label
+        placed beyond the window is not found, and one inside it still is.
+        """
+        wrapped = b'{"AIGC":' + _label_json().encode() + b"}"
+        assert label_from_metadata(b"\x00" * (MAX_TC260_SCAN_WINDOW_BYTES + 16) + wrapped) is None
+        assert label_span(b"\x00" * (MAX_TC260_SCAN_WINDOW_BYTES + 16) + wrapped) is None
+        inside = b"\x00" * (MAX_TC260_SCAN_WINDOW_BYTES - len(wrapped) - 8) + wrapped
+        found = label_from_metadata(inside)
+        assert found is not None and found["Label"] == "1"
 
 
 def _png_chunk(kind: bytes, payload: bytes) -> bytes:
