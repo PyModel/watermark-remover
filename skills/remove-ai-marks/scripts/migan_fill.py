@@ -58,6 +58,59 @@ def onnxruntime_available() -> bool:
     return optional_deps._import_safe("onnxruntime") is not None
 
 
+def _validate_request(request: InpaintRequest) -> None:
+    """Reject requests the adapter cannot fill meaningfully.
+
+    Unlike the cv2 tier there is no pixel-count ceiling: the padded crop (not
+    the image size) bounds the ONNX working set, which is the point of
+    cropping.
+    """
+    w, h = request.source.width, request.source.height
+    if (request.mask.width, request.mask.height) != (w, h):
+        raise ValueError("mask dimensions do not match the source raster")
+    if request.mask.marked == 0:
+        raise ValueError("mask contains no marked pixels")
+    if request.mask.marked >= w * h:
+        raise ValueError("mask covers the entire image")
+
+
+def _raster_planes(source: Any) -> tuple[Any, Any | None, bool]:
+    """Raster -> (h,w,3) uint8 BGR plus its split-off alpha plane (or None).
+
+    Grayscale is promoted to 3 identical channels (``was_gray`` tells the
+    postprocess to demote again); the alpha plane always bypasses the model.
+    """
+    import numpy as np
+
+    arr = np.frombuffer(bytes(source.data), dtype=np.uint8).reshape(
+        source.height, source.width, source.channels
+    )
+    alpha = np.ascontiguousarray(arr[:, :, 3]) if source.channels == 4 else None
+    bgr = arr[:, :, :3] if source.channels == 4 else arr
+    if source.channels == 1:
+        bgr = np.repeat(bgr, 3, axis=2)
+    return np.ascontiguousarray(bgr), alpha, source.channels == 1
+
+
+def _to_raster(bgr: Any, alpha: Any | None, was_gray: bool, original: Any) -> Any:
+    """Rebuild a morphomod Raster with the ORIGINAL's dims/channels."""
+    import numpy as np
+    from morphomod import Raster
+
+    if was_gray:
+        import cv2
+
+        out = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)[:, :, None]
+    elif alpha is not None:
+        out = np.dstack([bgr, alpha])
+    else:
+        out = bgr
+    data = bytearray(np.ascontiguousarray(out).tobytes())
+    return Raster(
+        width=original.width, height=original.height, channels=original.channels, data=data
+    )
+
+
 class MiganFillBackend:
     """MI-GAN ONNX fill behind the InpaintBackend protocol."""
 
@@ -76,7 +129,48 @@ class MiganFillBackend:
         return request.mask.marked > 0
 
     def inpaint(self, request: InpaintRequest) -> InpaintResult:
-        raise NotImplementedError("MI-GAN fill inference is wired in ticket 04")
+        """Fill the marked region via MI-GAN; everything else stays byte-exact."""
+        import numpy as np
+
+        _validate_request(request)
+        bgr, alpha, was_gray = _raster_planes(request.source)
+        mask = np.frombuffer(bytes(request.mask.data), dtype=np.uint8).reshape(
+            request.source.height, request.source.width
+        )
+        # The padded-crop helper is region_eraser's bounded-box control
+        # (clamped, single-sourced); importing it lazily keeps this module's
+        # import graph free of region_eraser's top-level cv2/numpy.
+        import region_eraser
+
+        h, w = bgr.shape[:2]
+        box = region_eraser._padded_crop_box(mask, h, w, pad_frac=2.0, pad_min=256)
+        if box is None:  # defensive: supports()/validate already reject empty masks
+            return InpaintResult(
+                inpainted=request.source,
+                backend_name=self.name,
+                quality_estimate=0.0,
+                diagnostics={"note": "empty mask"},
+            )
+        cx0, cy0, cx1, cy1 = box
+        crop = np.ascontiguousarray(bgr[cy0:cy1, cx0:cx1])
+        crop_mask = np.ascontiguousarray(mask[cy0:cy1, cx0:cx1])
+
+        filled = _run_migan_crop(_load_session(), crop, crop_mask)
+
+        result = bgr.copy()
+        region = result[cy0:cy1, cx0:cx1]
+        hole = crop_mask > 127
+        region[hole] = filled[hole]
+        result[cy0:cy1, cx0:cx1] = region
+        return InpaintResult(
+            inpainted=_to_raster(result, alpha, was_gray, request.source),
+            backend_name=self.name,
+            quality_estimate=0.85,
+            diagnostics={
+                "crop": [cx0, cy0, cx1, cy1],
+                "model": f"{_MODEL_REPO}@{_MODEL_REVISION[:12]}",
+            },
+        )
 
 
 def get_migan_backends() -> list[MiganFillBackend]:
@@ -84,3 +178,49 @@ def get_migan_backends() -> list[MiganFillBackend]:
     if not onnxruntime_available():
         return []
     return [MiganFillBackend()]
+
+
+def _download_model() -> str:
+    raise NotImplementedError("download seam is wired in ticket 04")
+
+
+def _load_session() -> Any:
+    """Load (once) the MI-GAN ONNX session, downloading pinned on first use."""
+    cached = _sessions.get("migan")
+    if cached is not None:
+        return cached
+
+    import onnxruntime as ort
+
+    model_path = _download_model()
+    logger.info("Loading %s model: %s", _MODEL_LABEL, model_path)
+    session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+    _sessions["migan"] = session
+    return session
+
+
+def _run_migan_crop(session: Any, crop_bgr: Any, crop_mask: Any) -> Any:
+    """Run MI-GAN on one already-bounded uint8 BGR crop; returns filled BGR.
+
+    Preprocess: BGR->RGB, HWC->CHW uint8; the mask is inverted to the shipped
+    model's polarity (255 = known/keep, 0 = hole/erase). Postprocess maps the
+    output back to BGR HWC, resizing if the model returned a different spatial
+    size than it was fed.
+    """
+    import cv2
+    import numpy as np
+
+    ch, cw = crop_bgr.shape[:2]
+    inputs = session.get_inputs()
+    img_name, mask_name = inputs[0].name, inputs[1].name
+
+    rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
+    img_in = np.transpose(rgb, (2, 0, 1))[None].astype(np.uint8)  # (1,3,ch,cw)
+    known = (crop_mask <= 127).astype(np.uint8) * 255  # model polarity
+    mask_in = known[None, None]  # (1,1,ch,cw)
+
+    out = session.run(None, {img_name: img_in, mask_name: mask_in})[0]
+    res = np.transpose(np.asarray(out)[0], (1, 2, 0)).astype(np.uint8)  # (ch',cw',3) RGB
+    if res.shape[:2] != (ch, cw):
+        res = cv2.resize(res, (cw, ch), interpolation=cv2.INTER_LINEAR)
+    return cv2.cvtColor(res, cv2.COLOR_RGB2BGR)
