@@ -682,6 +682,13 @@ def _clean_image_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
                 use_tiled = dims is not None and tiling.should_auto_tile(*dims)
             except PixelDependencyUnavailable:
                 use_tiled = False
+            # Mark plans never tile: the tiled pass computes the mask through a
+            # dest-less remove_visible call, which the registry mark pass cannot
+            # honor (it only runs whole-image and always writes dest). Skipping
+            # keeps the mark pass on the untiled path; the report says so.
+            skipped_for_mark = use_tiled and staged_visible_plan.mark is not None
+            if skipped_for_mark:
+                use_tiled = False
             if use_tiled:
                 try:
                     visible_report = _run_tiled_visible(
@@ -715,6 +722,16 @@ def _clean_image_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
                     staged_visible_plan,
                     mask_details=mask_details,
                 )
+                if skipped_for_mark:
+                    visible_report["tiling"] = {
+                        "engaged": False,
+                        "status": "skipped-for-mark",
+                        "threshold": tiling.auto_tile_threshold(),
+                        "note": (
+                            "registry mark pass runs whole-image; auto-tiling applies "
+                            "only to explicit-mask plans"
+                        ),
+                    }
             if visible_report["status"] != "completed":
                 raise RuntimeError("visible pipeline did not produce an output")
             metadata_source = staged_visible

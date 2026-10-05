@@ -1186,7 +1186,10 @@ def remove_visible(
         )
 
     if plan.mark is not None:
-        assert dest is not None
+        # A labeled error, never an assert: the mark pass always writes dest, so
+        # a dest-less call (e.g. a mask-only probe) is a caller contract breach.
+        if dest is None:
+            raise ValueError("output required for a mark pass")
         assert raster is not None
         return _remove_visible_marks(
             path,
