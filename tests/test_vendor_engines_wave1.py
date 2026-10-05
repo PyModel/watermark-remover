@@ -31,6 +31,7 @@ from jimeng_engine import _glyph_silhouette as _jimeng_silhouette
 from jimeng_engine import _template_match_score as _jimeng_score
 from numpy.typing import NDArray
 from region_eraser import erase as erase_mask
+from yuanbao_engine import YuanbaoEngine
 
 ASSETS = Path(__file__).resolve().parents[1] / "skills" / "remove-ai-marks" / "scripts" / "assets"
 
@@ -314,3 +315,77 @@ class TestBaiduEngine:
         assert not eng.detect(out).detected
         h, w = wm.shape[:2]
         assert np.array_equal(out[: h // 2, : w // 2], wm[: h // 2, : w // 2])
+
+
+class TestYuanbaoEngine:
+    """Vectors adapted from upstream test_yuanbao_engine.py."""
+
+    def _compose(self, w: int, h: int, *, bg: float, foreground: float):
+        return _compose_mark(
+            "yuanbao_alpha.png",
+            w,
+            h,
+            width_frac=0.08,
+            aspect=0.0446 / 0.08,
+            bg=bg,
+            foreground=foreground,
+            margin_right=0.028,
+            margin_bottom=0.031,
+        )
+
+    def test_config_pins(self):
+        eng = YuanbaoEngine()
+        assert eng.config.detect_frontend == "contrast"  # two-polarity mark
+        assert eng.config.provenance_ncc_factor == 1.0  # strict only
+
+    def test_detects_light_mark_on_dark_background(self):
+        watermark, _ = self._compose(1024, 1024, bg=60, foreground=230)
+        detection = YuanbaoEngine().detect(watermark)
+        assert detection.detected
+        assert detection.confidence >= 0.80
+
+    def test_detects_dark_mark_on_light_background(self):
+        """Yuanbao switches mark polarity with the background; a white top-hat alone
+        misses the dark-gray stamp used on pale scenes."""
+        watermark, _ = self._compose(1024, 1024, bg=230, foreground=110)
+        detection = YuanbaoEngine().detect(watermark)
+        assert detection.detected
+        assert detection.confidence >= 0.80
+
+    def test_clean_gradient_stays_quiet(self):
+        ramp = np.tile(np.linspace(40, 220, 1024, dtype=np.uint8), (1024, 1))
+        image = cv2.cvtColor(ramp, cv2.COLOR_GRAY2BGR)
+        assert not YuanbaoEngine().detect(image).detected
+
+    def test_match_must_hug_bottom_right_anchor(self):
+        """Shift the mark 60 px in from the corner: still inside the locate window, so
+        the sweep finds it, but beyond the 0.04 anchor margin, so only the anchor gate
+        can demote it. A far shift would fall outside the window and pass regardless."""
+
+        class Ungated(YuanbaoEngine):
+            def _post_gate(self, det, scan):  # type: ignore[no-untyped-def]
+                return det
+
+        watermark, (ax, ay, gw, gh) = self._compose(1024, 1024, bg=60, foreground=230)
+        assert YuanbaoEngine().detect(watermark).detected
+        shifted = np.full_like(watermark, 60)
+        shifted[ay - 60 : ay - 60 + gh, ax - 60 : ax - 60 + gw] = watermark[
+            ay : ay + gh, ax : ax + gw
+        ]
+        assert Ungated().detect(shifted).detected
+        assert not YuanbaoEngine().detect(shifted).detected
+
+    def test_mask_uses_detector_box_for_dark_mark(self):
+        watermark, (ax, ay, gw, gh) = self._compose(1024, 1024, bg=230, foreground=110)
+        mask = YuanbaoEngine().footprint_mask(watermark)
+        assert mask is not None
+        ys, xs = np.where(mask > 0)
+        assert xs.min() <= ax + int(0.05 * gw)
+        assert xs.max() >= ax + gw - int(0.05 * gw)
+        assert ys.min() <= ay + gh // 2 <= ys.max()
+
+    def test_fill_clears_detector(self):
+        watermark, _ = self._compose(1024, 1024, bg=60, foreground=230)
+        eng = YuanbaoEngine()
+        out = _fill(eng, watermark)
+        assert not eng.detect(out).detected
