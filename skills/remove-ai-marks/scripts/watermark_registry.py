@@ -170,8 +170,22 @@ class Decision:
     relax: bool
 
 
-VisibleRemovalStatus = Literal["no_mark", "cleaned", "partial", "unvalidated"]
+VisibleRemovalStatus = Literal["no_mark", "cleaned", "partial", "unvalidated", "error"]
 MarkValidationStatus = Literal["cleaned", "partial", "unvalidated"]
+
+
+@dataclass(frozen=True)
+class MarkError:
+    """One mark the auto pass could not process: its localize/fill raised.
+
+    The pass contains the failure to this mark and continues; the aggregate
+    status becomes ``error`` so the caller never mistakes a half-pass for a
+    clean one."""
+
+    key: str
+    label: str
+    stage: Literal["localize", "fill"]
+    message: str
 
 
 @dataclass(frozen=True)
@@ -204,6 +218,9 @@ class VisibleRemovalResult:
 
     image: NDArray[Any] = field(compare=False, repr=False)
     marks: tuple[MarkRemovalResult, ...]
+    #: Marks whose localize/fill raised, contained per mark (see
+    # :class:`MarkError`). Empty on a full pass.
+    errors: tuple[MarkError, ...] = ()
 
     @property
     def labels(self) -> list[str]:
@@ -212,11 +229,13 @@ class VisibleRemovalResult:
 
     @property
     def status(self) -> VisibleRemovalStatus:
-        """Aggregate status; a known residual takes precedence over unknown, and
-        nothing found is ``no_mark`` (exit codes are the caller's business; this
-        module introduces none)."""
-        if not self.marks:
+        """Aggregate status; an engine failure outranks a known residual, which
+        outranks unknown, and nothing found is ``no_mark`` (exit codes are the
+        caller's business; this module introduces none)."""
+        if not self.marks and not self.errors:
             return "no_mark"
+        if self.errors:
+            return "error"
         if any(mark.status == "partial" for mark in self.marks):
             return "partial"
         if any(mark.status == "unvalidated" for mark in self.marks):
@@ -422,19 +441,41 @@ def inpaint_model_available() -> bool:
 _warned_cv2_fallback = False
 
 
-def preferred_inpaint_backend() -> Literal["lama", "migan", "cv2"]:
-    """Backend the ``auto`` fill resolves to, best-first: LaMa > MI-GAN > cv2.
+#: The registry's fill tiers as tiers of the SHARED backend stack
+#: (``inpaint_backends.FILL_RESOLVE_ORDER``) -- the single source of order.
+#: A stack tier absent here (the pure texture/simple backends) is not a fill
+#: this registry executes; the cv2 floor precedes it.
+_FILL_STACK_TIERS: dict[str, Literal["lama", "migan", "cv2"]] = {
+    "lama": "lama",
+    "migan": "migan",
+    "cv2-telea": "cv2",
+    "cv2-ns": "cv2",
+}
 
-    LaMa is the highest-quality inpaint; MI-GAN the lighter learned model; cv2 the
-    classical no-deps floor and last resort. A one-time quality warning fires when
-    ``auto`` falls back to cv2."""
+
+def preferred_inpaint_backend() -> Literal["lama", "migan", "cv2"]:
+    """Backend the ``auto`` fill resolves to: the shared backend-stack order,
+    filtered to the tiers this registry executes (LaMa > MI-GAN > cv2).
+
+    The order comes from ``inpaint_backends.FILL_RESOLVE_ORDER`` projected
+    through :data:`_FILL_STACK_TIERS` -- there is no second hardcoded ladder.
+    LaMa is the highest-quality inpaint; MI-GAN the lighter learned model; cv2
+    the classical no-deps floor and last resort. A one-time quality warning
+    fires when ``auto`` falls back to cv2."""
     global _warned_cv2_fallback  # noqa: PLW0603 - deliberate one-shot warning latch (upstream parity)
+    import inpaint_backends
     import region_eraser
 
-    if region_eraser.lama_available():
-        return "lama"
-    if region_eraser.migan_available():
-        return "migan"
+    for tier in inpaint_backends.FILL_RESOLVE_ORDER:
+        mapped = _FILL_STACK_TIERS.get(tier)
+        if mapped is None:
+            continue
+        if mapped == "lama" and region_eraser.lama_available():
+            return "lama"
+        if mapped == "migan" and region_eraser.migan_available():
+            return "migan"
+        if mapped == "cv2":
+            break  # the classical floor: the stack's first cv2 slot decides
     if not _warned_cv2_fallback:
         _warned_cv2_fallback = True
         logger.warning(
@@ -1088,10 +1129,17 @@ def remove_auto_marks_detailed(
 
     The first selected mark reuses the exact detection from perception; later marks
     re-detect on the progressively modified image, so overlapping/co-firing marks
-    cannot act on stale evidence."""
+    cannot act on stale evidence.
+
+    Failure containment is per mark: a localize/fill raise yields a
+    :class:`MarkError` row and the pass continues with the remaining marks; the
+    aggregate status is ``error`` whenever any mark was contained. The returned
+    image is always a fresh array (a no-mark pass never aliases the caller's
+    input)."""
     context = Context(sensitivity=sensitivity, provenance=provenance)
-    result = image
+    result = image.copy()
     removals: list[MarkRemovalResult] = []
+    errors: list[MarkError] = []
     resolved_backend: Literal["cv2", "migan", "lama"] | None = None
     for d in decide(_build_candidates(image), context):
         mark = get_mark(d.candidate.key)
@@ -1100,24 +1148,43 @@ def remove_auto_marks_detailed(
             cached_detection = (
                 d.candidate.relaxed_detection if d.relax else d.candidate.strict_detection
             )
-        localization = mark.localize(
-            result,
-            provenance=d.relax,
-            force=False,
-            detection=cached_detection,
-        )
-        mask = localization.mask
-        if mask is None:
-            continue
-        bbox = _mask_bbox(mask)
-        if bbox is None:
+        try:
+            localization = mark.localize(
+                result,
+                provenance=d.relax,
+                force=False,
+                detection=cached_detection,
+            )
+            mask = localization.mask
+            bbox = _mask_bbox(mask) if mask is not None else None
+            if mask is None or bbox is None:
+                continue
+        except Exception as exc:
+            logger.warning(
+                "Auto-pass localize failed for %s; the mark is skipped and the pass continues: %s",
+                mark.key,
+                exc,
+                exc_info=True,
+            )
+            errors.append(MarkError(mark.key, mark.label, "localize", str(exc)))
             continue
 
         if resolved_backend is None:
             resolved_backend = resolve_backend(backend)
         region = localization.region
         confidence_before = localization.confidence
-        result = fill(result, mask, backend=resolved_backend)
+        try:
+            result = fill(result, mask, backend=resolved_backend)
+        except Exception as exc:
+            logger.warning(
+                "Auto-pass fill failed for %s (%s); the mark is skipped and the pass continues: %s",
+                mark.key,
+                resolved_backend,
+                exc,
+                exc_info=True,
+            )
+            errors.append(MarkError(mark.key, mark.label, "fill", str(exc)))
+            continue
         filled_mask = mask  # carried on the result for outside-mask verification
         del localization, mask
 
@@ -1159,7 +1226,7 @@ def remove_auto_marks_detailed(
             )
         )
 
-    return VisibleRemovalResult(result, tuple(removals))
+    return VisibleRemovalResult(result, tuple(removals), tuple(errors))
 
 
 def remove_auto_marks(

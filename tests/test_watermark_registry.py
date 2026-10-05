@@ -1291,3 +1291,172 @@ class TestMetadataProvenanceWiring:
             )
             == "strict"
         )
+
+
+class TestNoMarkResultsDoNotAliasTheCaller:
+    """F8 (stage 8 fix pass 2): a pass that removes nothing returns a COPY of
+    the caller's array -- mutating the result must never edit the input."""
+
+    def test_auto_pass_no_mark_returns_a_copy(self):
+        img = np.zeros((512, 512, 3), np.uint8)
+        report = reg.remove_auto_marks_detailed(img, backend="cv2")
+        assert report.status == "no_mark"
+        report.image[0, 0] = 255
+        assert img[0, 0, 0] == 0
+
+    def test_named_mark_no_hit_returns_a_copy(self):
+        img = np.zeros((512, 512, 3), np.uint8)
+        report = reg.remove_mark_detailed(img, "doubao", backend="cv2")
+        assert report.status == "no_mark"
+        report.image[0, 0] = 255
+        assert img[0, 0, 0] == 0
+
+
+class TestPerMarkErrorContainment:
+    """F9 (stage 8 fix pass 2): one raising mark must not abort the auto pass.
+
+    A mark whose localize/fill raises yields a per-mark error row; the pass
+    continues with the remaining marks and reports the aggregate error."""
+
+    @staticmethod
+    def _install_two_marks(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+        calls = {"fill": 0, "mask": 0}
+        before_a = reg.MarkDetection("mark_a", "Mark A", "top-left", True, 0.9, (2, 2, 4, 4))
+        after_a = reg.MarkDetection("mark_a", "Mark A", "top-left", False, 0.1, (0, 0, 0, 0))
+        before_b = reg.MarkDetection("mark_b", "Mark B", "bottom-right", True, 0.8, (10, 10, 4, 4))
+
+        def detect_both_a(_image):
+            return before_a, before_a
+
+        def detect_a(_image, *, provenance=False):
+            return after_a
+
+        def mask_a(_image, *, force=False, detection=None):
+            calls["mask"] += 1
+            result = np.zeros((20, 20), np.uint8)
+            result[2:6, 2:6] = 255
+            return result
+
+        def detect_both_b(_image):
+            return before_b, before_b
+
+        def detect_b(_image, *, provenance=False):
+            return before_b
+
+        def mask_b(_image, *, force=False, detection=None):
+            calls["mask"] += 1
+            raise RuntimeError("poisoned engine")
+
+        def make(key, label, product, det_pair, det, mask_fn):
+            return reg.KnownMark(
+                key=key,
+                label=label,
+                location="top-left",
+                in_auto=True,
+                product=product,
+                manufacturer=key,
+                label_regime=None,
+                platform=label,
+                _detect=det,
+                _mask=mask_fn,
+                _detect_both=det_pair,
+            )
+
+        marks = (
+            make("mark_a", "Mark A", "a", detect_both_a, detect_a, mask_a),
+            make("mark_b", "Mark B", "b", detect_both_b, detect_b, mask_b),
+        )
+
+        def fill(image, selected_mask, *, backend="auto"):
+            del backend
+            calls["fill"] += 1
+            result = image.copy()
+            result[selected_mask > 0] = 123
+            return result
+
+        monkeypatch.setattr(reg, "_REGISTRY", marks)
+        monkeypatch.setattr(reg, "_PRODUCT_OF", {"mark_a": "a", "mark_b": "b"})
+        monkeypatch.setattr(reg, "fill", fill)
+        return calls
+
+    def test_poisoned_mark_yields_error_row_and_the_pass_continues(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        calls = self._install_two_marks(monkeypatch)
+
+        report = reg.remove_auto_marks_detailed(np.zeros((20, 20, 3), np.uint8), backend="cv2")
+
+        assert [e.key for e in report.errors] == ["mark_b"]
+        assert "poisoned engine" in report.errors[0].message
+        assert [m.key for m in report.marks] == ["mark_a"]
+        assert report.marks[0].status == "cleaned"
+        assert report.status == "error"
+        # the healthy mark was still localized, filled and validated
+        assert calls["fill"] == 1 and calls["mask"] == 2
+        assert int(report.image[4, 4, 0]) == 123
+
+    def test_error_and_partial_precedence(self, monkeypatch: pytest.MonkeyPatch):
+        """A residual elsewhere does not mask the error: error outranks partial."""
+        calls = self._install_two_marks(monkeypatch)
+        # make mark_a's post-check report a residual
+        marks = reg._REGISTRY
+        a = marks[0]
+
+        def detect_a(_image, *, provenance=False):
+            return reg.MarkDetection("mark_a", "Mark A", "top-left", True, 0.5, (2, 2, 4, 4))
+
+        object.__setattr__(a, "_detect", detect_a)
+        del calls
+        report = reg.remove_auto_marks_detailed(np.zeros((20, 20, 3), np.uint8), backend="cv2")
+        assert report.status == "error"
+
+
+class TestFillOrderSingleSource:
+    """F10 (stage 8 fix pass 2): the registry's auto-fill preference is derived
+    from the shared backend-stack constant, not a second hardcoded ladder."""
+
+    @staticmethod
+    def _both_available(monkeypatch: pytest.MonkeyPatch) -> None:
+        import region_eraser
+
+        monkeypatch.setattr(region_eraser, "lama_available", lambda: True)
+        monkeypatch.setattr(region_eraser, "migan_available", lambda: True)
+
+    def test_projection_of_the_default_stack_is_the_registry_ladder(self):
+        """For the shipped stack, the mapped projection is lama > migan > cv2."""
+        import inpaint_backends
+
+        projected = [
+            mapped
+            for tier in inpaint_backends.FILL_RESOLVE_ORDER
+            if (mapped := reg._FILL_STACK_TIERS.get(tier)) is not None
+        ]
+        deduped = list(dict.fromkeys(projected))
+        assert deduped == ["lama", "migan", "cv2"]
+
+    def test_reordering_the_stack_constant_reorders_the_registry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        import inpaint_backends
+
+        self._both_available(monkeypatch)
+        monkeypatch.setattr(
+            inpaint_backends,
+            "FILL_RESOLVE_ORDER",
+            ("migan", "lama", "cv2-telea", "texture-patch", "simple"),
+        )
+        assert reg.preferred_inpaint_backend() == "migan"
+
+    def test_cv2_floor_when_no_learned_backend_is_available(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ):
+        import logging
+
+        import region_eraser
+
+        monkeypatch.setattr(region_eraser, "lama_available", lambda: False)
+        monkeypatch.setattr(region_eraser, "migan_available", lambda: False)
+        monkeypatch.setattr(reg, "_warned_cv2_fallback", False)
+        with caplog.at_level(logging.WARNING):
+            assert reg.preferred_inpaint_backend() == "cv2"
+        assert any("cv2 classical inpaint" in r.message for r in caplog.records)
