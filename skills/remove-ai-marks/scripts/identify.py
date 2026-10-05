@@ -300,6 +300,39 @@ def _judge(evidence: dict[str, Any]) -> ProvenanceVerdict:
     )
 
 
+def invisible_watermark_signal(scheme: str | None) -> dict[str, Any]:
+    """Map a decoded open DWT-DCT payload onto the evidence vocabulary.
+
+    Pure mapping: callers that run the pixel decoder (the ``detect`` extra's
+    ``invisible_watermark.detect_invisible_watermark``) hand in the scheme
+    name it reported, or ``None``, and get the finding line, whether the
+    signal asserts AI provenance, and the fragility caveat. The judge itself
+    stays metadata-only — this adapter exists so pixel-evidence surfaces and
+    the verdict vocabulary speak the same words. A decoded scheme is strong
+    generation evidence (the watermarker runs inside the generator); a miss
+    is only "nothing decoded", never a clean bill.
+    """
+    if not scheme:
+        return {
+            "scheme": None,
+            "asserts_ai": False,
+            "finding": None,
+            "note": (
+                "no known open DWT-DCT payload decoded — absence is never "
+                "clean (the payload does not survive re-encoding or resizing)"
+            ),
+        }
+    return {
+        "scheme": scheme,
+        "asserts_ai": True,
+        "finding": f"invisible-watermark DWT-DCT payload matches {scheme} (open watermarker, no key)",
+        "note": (
+            "pristine-output signal: re-encoding or resizing destroys the "
+            "payload, so absence is never proof of cleanliness"
+        ),
+    }
+
+
 def identify_file(path: Path) -> ProvenanceVerdict:
     """Collect once from ``path`` and judge — the file-side entry point.
 
@@ -331,5 +364,6 @@ __all__ = [
     "identify_file",
     "identify_from_json",
     "identify_from_record",
+    "invisible_watermark_signal",
     "unknown_verdict",
 ]

@@ -362,7 +362,7 @@ _OPENAPI_PATHS: dict[str, dict[str, Any]] = {
     },
     "/detect": {
         "post": {
-            "summary": "Run watermark detectors on a file (text: vendor/statistical; image: SynthID score)",
+            "summary": "Run watermark detectors on a file (text: vendor/statistical; image: SynthID score + open DWT-DCT payload)",
             "requestBody": _schema(
                 required=True,
                 content={"application/json": _schema(schema=_file_request())},
@@ -560,6 +560,38 @@ def _identify_query(target: str) -> bool:
     return parsed.get("identify", [""])[0].strip().lower() in ("true", "1", "yes")
 
 
+def _invisible_watermark_detection(path: Path) -> dict[str, Any]:
+    """The open DWT-DCT detector entry for ``/detect`` images: fail-soft.
+
+    Runs ``invisible_watermark.detect_invisible_watermark`` when the
+    ``detect`` extra is installed and reports what it found through the
+    identify signal vocabulary. Every failure mode is an explicit entry — an
+    absent extra or a crashed decoder never produces a negative finding, and
+    a clean-looking decode carries the "absence is never clean" note.
+    """
+    import invisible_watermark
+    from identify import invisible_watermark_signal
+
+    entry: dict[str, Any] = {"detector": "invisible_watermark"}
+    try:
+        if not invisible_watermark.is_available():
+            entry["available"] = False
+            entry["error"] = (
+                "detect extra not installed (numpy/cv2/pywt); "
+                "install watermark-remover[detect] to decode open DWT-DCT payloads"
+            )
+            return entry
+        entry["available"] = True
+        scheme = invisible_watermark.detect_invisible_watermark(path)
+    except Exception as exc:
+        entry["available"] = True
+        entry["error"] = f"invisible-watermark detection failed: {exc!r}"
+        return entry
+    entry.update(invisible_watermark_signal(scheme))
+    entry["found"] = scheme is not None
+    return entry
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = f"watermark-remover/{VERSION}"
 
@@ -752,7 +784,7 @@ class Handler(BaseHTTPRequestHandler):
                     }
                 else:
                     score.setdefault("detector", "synthid")
-                detections = [score]
+                detections = [score, _invisible_watermark_detection(path)]
             else:
                 detections = []
                 report = inspect_container(path).to_dict()
