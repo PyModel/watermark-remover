@@ -336,6 +336,68 @@ def test_oversized_body_413(conn, monkeypatch):
     assert status == 413
 
 
+def test_clean_refuses_oversized_input_like_the_cli(conn, monkeypatch):
+    """The plan path's input cap gates /clean exactly as it gates the CLI.
+
+    A body under the HTTP cap can still decode to a file the planner refuses;
+    the direct-cleaning path this endpoint used to run had no size check, so a
+    request like this cleaned fine where ``wm`` would have refused.
+    """
+    import clean_request
+
+    monkeypatch.setattr(clean_request, "MAX_INPUT_BYTES", 64)
+    data = b"x" * 200
+    status, body = _post(conn, "/clean", {"file": _b64(data), "name": "x.txt"})
+    assert status == 400
+    assert "refusing input larger than 64 bytes" in body["error"]
+
+
+def test_clean_text_report_key_order(conn):
+    status, body = _post(
+        conn, "/clean", {"file": _b64("Hello\u200bWorld\u00ad!".encode()), "name": "note.txt"}
+    )
+    assert status == 200
+    assert list(body["report"]) == ["kind", "stats", "length"]
+
+
+def test_clean_image_report_key_order(conn):
+    status, body = _post(conn, "/clean", {"file": _b64(_watermarked_png()), "name": "shot.png"})
+    assert status == 200
+    assert list(body["report"]) == [
+        "kind",
+        "format",
+        "actions",
+        "action_details",
+        "bytes_in",
+        "bytes_out",
+        "still_has_c2pa",
+        "still_has_ai_metadata",
+        "post_findings",
+        "synthid_before",
+        "synthid_after",
+        "synthid_removal",
+        "wmct_marker",
+    ]
+
+
+def test_clean_container_report_key_order(conn):
+    data = (ROOT / "tests" / "fixtures" / "sample_ai.md").read_bytes()
+    status, body = _post(conn, "/clean", {"file": _b64(data), "name": "note.md"})
+    assert status == 200
+    assert list(body["report"]) == [
+        "kind",
+        "format",
+        "actions",
+        "action_details",
+        "bytes_in",
+        "bytes_out",
+        "still_has_c2pa",
+        "still_has_ai_metadata",
+        "post_findings",
+        "meta",
+    ]
+
+
 def test_auth_required(conn, monkeypatch):
     monkeypatch.setattr(server, "API_KEY", "sekret")
     status, _ = _post(conn, "/health", {"anything": 1})

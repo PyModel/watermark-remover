@@ -37,6 +37,9 @@ from urllib.parse import urlparse
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from asset_kind import classify_bytes
+from batch_inputs import InputItem
+from clean_file import run_clean_item
+from clean_request import CleanRequest, plan_work
 from common import (
     MAX_INPUT_BYTES,
     eprint,
@@ -45,12 +48,12 @@ from common import (
     which,
 )
 from container_meta import clean_container, inspect_container
-from image_meta import clean_image, inspect_image, run_synthid_score
+from image_meta import inspect_image, run_synthid_score
 from layer_b_discovery import layer_b_status
 from optional_deps import extras_status
 from score_stylometry import score_text_stylometry
 from text_detectors import detector_status, run_all_text_detectors, run_text_detectors
-from text_unicode import clean_text, inspect_text
+from text_unicode import inspect_text
 
 VERSION = os.environ.get("WATERMARKS_SERVER_VERSION", "dev")
 
@@ -461,6 +464,58 @@ def _decode_input(body: dict[str, Any]) -> tuple[bytes, str]:
     return data, _safe_name(name or "")
 
 
+# Payload keys the canonical executor adds to its payload for the CLI/TUI
+# that the /clean response has never exposed: the executor's input/output
+# paths, its exit_code, and the note naming text-only options a non-text
+# asset skips. Dropping exactly these (and nothing else) keeps the
+# endpoint's report byte-identical to the pre-plan shape.
+_PAYLOAD_BOOKKEEPING = frozenset({"input", "output", "exit_code", "skipped_text_transforms"})
+
+
+def _compose_clean_request(options: dict[str, Any], dest: Path, kind: str) -> CleanRequest:
+    """Map the whitelisted /clean options onto the canonical ``CleanRequest``.
+
+    The whitelist above is the whole accepted option surface, so the request
+    built here is the same object ``clean_file`` would build for these flags;
+    every other field stays at its CLI default. ``strip_all_metadata`` keeps
+    its historical meaning of an explicit override of
+    ``keep_non_ai_metadata`` (the endpoint has always let it win), expressed
+    through the single canonical field the planner derives strip-all from.
+    ``force_type`` carries the router's decision so the planner re-classifies
+    nothing and cannot disagree with ``classify_bytes`` above.
+    """
+    keep = bool(options.get("keep_non_ai_metadata"))
+    if "strip_all_metadata" in options:
+        keep = not bool(options["strip_all_metadata"])
+    return CleanRequest(
+        output=dest,
+        force_type=kind,
+        nfkc=bool(options.get("nfkc")),
+        aggressive_homoglyphs=bool(options.get("aggressive_homoglyphs")),
+        keep_non_ai_metadata=keep,
+        remove_synthid=bool(options.get("remove_synthid")),
+        wmct_marker=bool(options.get("wmct_marker")),
+        json=True,  # the HTTP handler owns presentation; the executor stays silent
+    )
+
+
+def _run_planned(src: Path, dest: Path, request: CleanRequest) -> dict[str, Any]:
+    """Preflight and clean one asset through the canonical plan executor.
+
+    ``plan_work`` resolves the destination and refuses oversized inputs,
+    aliased outputs, and binary-as-text before the first write — the same
+    refusals the CLI gets, now inherited here. The executor reports failures
+    as error payloads; the direct calls this replaced raised ``ValueError``
+    into the handler's 400 mapping, so the message is re-raised unchanged.
+    """
+    item = InputItem(path=src, relative=Path(src.name))
+    ((_, output, plan),) = plan_work([item], request, batch=False)
+    payload = run_clean_item(item.path, output, request, plan)
+    if "error" in payload:
+        raise ValueError(payload["error"])
+    return payload
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = f"watermark-remover/{VERSION}"
 
@@ -681,52 +736,45 @@ class Handler(BaseHTTPRequestHandler):
             tmpdir = Path(tmp)
             src = _tmp_path(tmpdir, name or "input")
             src.write_bytes(data)
+            # The cleaned output is staged in its own directory so a client
+            # filename can never alias it, whatever the asset kind.
+            outdir = Path(tempfile.mkdtemp(dir=tmpdir, prefix="out-"))
             if kind == "text":
                 if looks_binary(data):
                     raise ValueError(
                         "refusing to clean bytes that look like a binary container as text"
                     )
                 text = data.decode("utf-8", errors="surrogateescape")
-                detect_before = bool(options.get("detect_before"))
-                detect_after = bool(options.get("detect_after"))
                 detector_reports: dict[str, Any] = {}
-                if detect_before:
+                if bool(options.get("detect_before")):
                     detector_reports["before"] = run_text_detectors(text)
-                cleaned, stats = clean_text(
-                    text,
-                    nfkc=bool(options.get("nfkc")),
-                    aggressive_homoglyphs=bool(options.get("aggressive_homoglyphs")),
-                )
-                if detect_after:
+                dest = outdir / "out.txt"
+                request = _compose_clean_request(options, dest, kind)
+                payload = _run_planned(src, dest, request)
+                cleaned = dest.read_text(encoding="utf-8", errors="surrogateescape")
+                report: dict[str, Any] = {
+                    "kind": "text",
+                    "stats": payload["stats"],
+                    "length": len(cleaned),
+                }
+                if bool(options.get("detect_after")):
                     detector_reports["after"] = run_text_detectors(cleaned)
-                cleaned_bytes = cleaned.encode("utf-8", errors="surrogateescape")
-                report: dict[str, Any] = {"kind": "text", "stats": stats, "length": len(cleaned)}
                 if detector_reports:
                     report["text_detectors"] = detector_reports
+                cleaned_bytes = dest.read_bytes()
             elif kind == "image":
-                dest = tmpdir / "out.png"
-                strip_all = not bool(options.get("keep_non_ai_metadata"))
-                if "strip_all_metadata" in options:
-                    strip_all = bool(options["strip_all_metadata"])
                 remove_pixel = options.get("remove_pixel")
                 if remove_pixel not in (None, "ctrlregen", "diffusion"):
                     raise ValueError("remove_pixel must be one of: ctrlregen, diffusion")
-                # OURS clean_image doesn't expose remove_pixel yet; it does
-                # expose remove_synthid + wmct_marker as additive keys (Phase 9
-                # plan). Pixel backends (ctrlregen / diffusion) are wired
-                # through a future image_meta port; mark unavailable in the
-                # report rather than failing the request.
-                remove_synthid = bool(options.get("remove_synthid"))
-                wmct_marker = bool(options.get("wmct_marker"))
-                result = clean_image(
-                    src,
-                    dest,
-                    strip_all_metadata=strip_all,
-                    remove_synthid=remove_synthid,
-                    wmct_marker=wmct_marker,
-                )
+                dest = outdir / "out.png"
+                request = _compose_clean_request(options, dest, kind)
+                payload = _run_planned(src, dest, request)
+                report = {k: v for k, v in payload.items() if k not in _PAYLOAD_BOOKKEEPING}
                 if remove_pixel:
-                    result["pixel_removal"] = {
+                    # Pixel backends (ctrlregen / diffusion) are wired through
+                    # the image_meta port; mark unavailable in the report
+                    # rather than failing the request.
+                    report["pixel_removal"] = {
                         "available": False,
                         "error": (
                             f"remove_pixel={remove_pixel!r} is reserved for the future "
@@ -734,19 +782,27 @@ class Handler(BaseHTTPRequestHandler):
                             "clean_image"
                         ),
                     }
-                if bool(options.get("detect_before")) and result.get("synthid_before") is None:
-                    result["synthid_before"] = run_synthid_score(src)
-                if bool(options.get("detect_after")) and result.get("synthid_after") is None:
-                    result["synthid_after"] = run_synthid_score(dest)
+                if bool(options.get("detect_before")) and report.get("synthid_before") is None:
+                    report["synthid_before"] = run_synthid_score(src)
+                if bool(options.get("detect_after")) and report.get("synthid_after") is None:
+                    report["synthid_after"] = run_synthid_score(dest)
                 cleaned_bytes = dest.read_bytes()
-                report = {"kind": "image", **result}
             else:
-                dest = _tmp_path(tmpdir, f"out{Path(name).suffix}")
-                result = clean_container(
-                    src, dest, also_layer_a_text=bool(options.get("also_layer_a_text", True))
-                )
+                dest = outdir / f"out{Path(name).suffix}"
+                if options.get("also_layer_a_text") is False:
+                    # The one whitelisted option the canonical CleanPlan cannot
+                    # express yet: skipping the Layer-A text scrub of container
+                    # bodies has no request field, so the executor's own
+                    # clean_container call runs with the client's value. When
+                    # CleanPlan grows a container option, this branch folds
+                    # into _run_planned like every other case.
+                    result = clean_container(src, dest, also_layer_a_text=False)
+                    report = {"kind": "container", **result}
+                else:
+                    request = _compose_clean_request(options, dest, kind)
+                    payload = _run_planned(src, dest, request)
+                    report = {k: v for k, v in payload.items() if k not in _PAYLOAD_BOOKKEEPING}
                 cleaned_bytes = dest.read_bytes()
-                report = {"kind": "container", **result}
             report.pop("input", None)
             report.pop("output", None)
         self._respond(
