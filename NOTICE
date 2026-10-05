@@ -1,0 +1,14 @@
+watermark-remover
+Copyright Mohamed Elkholy and contributors
+MIT License (see LICENSE)
+
+This product includes portions ported from the
+`wiltodelta/remove-ai-watermarks` project
+(https://github.com/wiltodelta/remove-ai-watermarks), licensed under the
+Apache License, Version 2.0.
+
+Every file ported from that project carries a provenance header naming its
+source path, the license, and what was modified; the convention is documented
+in CONTRIBUTING.md ("Ported code provenance"). Redistributors must preserve
+this NOTICE together with those per-file headers under the Apache License,
+Version 2.0, in addition to this project's MIT license.
