@@ -405,7 +405,13 @@ class TextMarkEngine:
         residual = luma - local_bg
         resp = (np.abs(residual) if absolute else np.clip(residual, 0, None)) * (sat < c.max_saturation)
         peak = float(resp.max())
-        if peak <= 1e-6:
+        # Deadband, not an epsilon: cv2's GaussianBlur leaves a UNIFORM ~1e-5 float
+        # bias on a constant ROI (kernel weights sum to 0.99999), so a flat corner
+        # can carry a tiny positive peak whose sign depends on the box size -- with a
+        # 1e-6 epsilon that normalized to an all-255 response (measured in this
+        # tree). Any real glyph response is several luma levels; anything below half
+        # a level is numerical noise and means "no signal".
+        if peak < 0.5:
             return None
         return (resp / peak * 255).astype(np.uint8)
 
@@ -566,3 +572,340 @@ class TextMarkEngine:
         glyph = cv2.morphologyEx(glyph, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
         k = c.morph_open_size
         return cv2.morphologyEx(glyph, cv2.MORPH_OPEN, np.ones((k, k), np.uint8))
+
+    # ── Detect ──────────────────────────────────────────────────────
+
+    def detect(self, image: NDArray[Any], *, provenance: bool = False) -> TextMarkDetection:
+        """Detect the mark by matching the alpha-template glyph silhouette against
+        the corner candidate (``TM_CCOEFF_NORMED``); keys on glyph SHAPE, not coverage.
+
+        ``provenance`` signals that external metadata already confirms this vendor; the
+        NCC gate exists to keep a corner texture on an UNRELATED image from matching
+        the glyph silhouette, so when provenance confirms the vendor it is relaxed by
+        the mark's own ``provenance_ncc_factor`` to recover a faint or slightly
+        re-rendered mark (per-mark, not shared -- see
+        :data:`_DEFAULT_PROVENANCE_NCC_FACTOR`).
+        """
+        scan = self._scan(image)
+        return self._verdict(scan, provenance=provenance)
+
+    def detect_both(self, image: NDArray[Any] | None) -> tuple[TextMarkDetection, TextMarkDetection]:
+        """``(strict, relaxed)`` from ONE scan of the image.
+
+        ``provenance`` scales the acceptance THRESHOLD and nothing else -- the locate
+        box, the glyph mask, the coverage and the front-end ladder score are computed
+        identically at either trust level. Two ``detect`` calls therefore ran the same
+        expensive sweep twice to reach two verdicts. Returns two DISTINCT objects:
+        subclasses demote a verdict by mutating it.
+        """
+        scan = self._scan(image)
+        return self._verdict(scan, provenance=False), self._verdict(scan, provenance=True)
+
+    def _scan(self, image: NDArray[Any] | None) -> TextMarkScan:
+        """Everything in detection that does not depend on the trust level.
+
+        Per-CALL only, never memoized on ``self``: the removal path re-invokes each
+        engine on a progressively cleaned frame inside one process, so a cached scan
+        would answer for the wrong pixels.
+        """
+        c = self.config
+        if image is None or image.size == 0:
+            return TextMarkScan(None, None, 0)
+        # Guard against the small-image NCC-noise false positive (see
+        # _MIN_DETECT_SHORT_SIDE): an icon/thumbnail is too small to carry a real
+        # text label, and the degraded few-pixel template spuriously correlates.
+        if min(image.shape[:2]) < _MIN_DETECT_SHORT_SIDE:
+            logger.debug(
+                "%s detect: image short side %d < %d; too small to carry the mark, skipping.",
+                c.name,
+                min(image.shape[:2]),
+                _MIN_DETECT_SHORT_SIDE,
+            )
+            return TextMarkScan(None, None, 0)
+        loc = self.locate(image)
+        box = self.extract_mask(image, loc)  # box-sized mask (== full-frame cropped to bbox)
+        _x, _y, bw, bh = loc.bbox
+        coverage = float((box > 0).sum()) / float(max(1, bw * bh))
+        base = self.scale_base(image)
+        match_box: tuple[int, int, int, int] | None = None
+        if c.detect_frontend == "binary":
+            # The coverage gate is a blob-AREA heuristic, so it applies only to the
+            # front-end that binarizes; the continuous ones never build a blob. Below
+            # the gate the detection stays at confidence 0.0 and the rival margin is
+            # never consulted, so the score stays None here.
+            if coverage >= c.detect_min_coverage:
+                score, match_box = _template_match_best(box, base, c)
+            else:
+                score = None
+        else:
+            score, match_box = self._ladder_best(image, loc)
+        return TextMarkScan(loc, box, base, frame=image.shape[:2], coverage=coverage, score=score, match_box=match_box)
+
+    def _verdict(self, scan: TextMarkScan, *, provenance: bool) -> TextMarkDetection:
+        """Apply the trust-level-dependent tail to a scan, as a fresh result object."""
+        c = self.config
+        det = TextMarkDetection(provenance=provenance, template_asset=c.asset_name)
+        if scan.loc is None or scan.box is None:
+            return det
+        det.region = scan.loc.bbox
+        det.coverage = scan.coverage
+        det.match_box = scan.match_box
+        if scan.score is None:  # binary front-end below the coverage gate
+            return det
+        threshold = c.detect_ncc_threshold * (c.provenance_ncc_factor if provenance else 1.0)
+        det.confidence = scan.score
+        # Short-circuit is load-bearing: _rival_margin_ok scores every rival template
+        # and logs its own rejection line, so it must stay unevaluated below threshold.
+        det.detected = scan.score >= threshold and self._rival_margin_ok(scan.score, scan.box, scan.base)
+        logger.debug(
+            "%s detect (%s): coverage=%.3f ncc=%.2f thr=%.2f detected=%s",
+            c.name,
+            c.detect_frontend,
+            scan.coverage,
+            scan.score,
+            threshold,
+            det.detected,
+        )
+        return self._post_gate(det, scan)
+
+    def _post_gate(self, det: TextMarkDetection, scan: TextMarkScan) -> TextMarkDetection:
+        """Per-mark demotion applied after the shared threshold, for both trust levels.
+
+        OVERRIDABLE. It lives here rather than in a ``detect`` override so a mark's
+        gate cannot be silently skipped by the single-pass ``detect_both`` path.
+        """
+        return det
+
+    # ── Inpaint footprint (for the shared region-eraser fill path) ────────
+
+    # Minimum glyph pixels for a template-free footprint. Below this the corner has
+    # no real wordmark (a few top-hat specks), so without ``force`` there is nothing
+    # to mask. A real strip covers hundreds of pixels.
+    _MIN_GLYPH_PIXELS = 20
+
+    def _strict_detection(self, image: NDArray[Any], detection: TextMarkDetection | None) -> TextMarkDetection:
+        """The STRICT detection the footprint is bounded by.
+
+        A threaded detection is reused only when it was taken at the same strict level
+        this method would have used itself. A provenance-RELAXED detection is NOT
+        reused: a strict re-detect can demote a mark the relaxed gate accepted, which
+        for a continuous front-end means no mask at all. That is a MEASURED upstream
+        difference, so the strict semantics stay.
+
+        Reuse is safe against marks chaining on a progressively cleaned frame: the
+        registry re-detects on that same cleaned array before threading, so a threaded
+        detection is never stale.
+        """
+        if detection is not None and not detection.provenance:
+            return detection
+        return self.detect(image)  # polymorphic: a subclass gate must still apply
+
+    def _geometry_rect(self, loc: TextMarkLocation, frame: tuple[int, int]) -> tuple[int, int, int, int]:
+        """The whole locate box, clamped to the frame -- the ``force`` footprint."""
+        bx, by, bw, bh = loc.bbox
+        h, w = frame
+        return (bx, by, min(w, bx + bw), min(h, by + bh))
+
+    def _extend_match_box(
+        self, box: tuple[int, int, int, int], loc: TextMarkLocation, frame: tuple[int, int]
+    ) -> tuple[int, int, int, int]:
+        """Grow an ROI-local box into the absolute fill rectangle by a symmetric pad.
+
+        OVERRIDABLE, and the override contract is specifically the DETECTOR'S MATCH
+        BOX: a mark whose removable footprint reaches beyond what the NCC localizes
+        supplies its own extension here and inherits the rest of the footprint path.
+        The blob-bbox branch never routes through an override.
+        """
+        gx0, gy0, gx1, gy1 = box
+        bx, by, _bw, bh = loc.bbox
+        h, w = frame
+        pad = max(4, int(0.10 * bh))
+        return (
+            max(0, bx + gx0 - pad),
+            max(0, by + gy0 - pad),
+            min(w, bx + gx1 + 1 + pad),
+            min(h, by + gy1 + 1 + pad),
+        )
+
+    def _footprint_rect(
+        self,
+        image: NDArray[Any],
+        loc: TextMarkLocation,
+        *,
+        force: bool,
+        detection: TextMarkDetection | None,
+    ) -> tuple[int, int, int, int] | None:
+        """Default footprint policy: the binary glyph blob's bbox, else the detector's
+        own match box for the front-ends that under-segment, else the geometry box
+        under ``force``.
+
+        The gray front-end exists for marks the top-hat under-segments, so the binary
+        blob is NOT authoritative there: trusting it first bounds the fill by a PARTIAL
+        blob (upstream RunningHub left the leftmost glyphs unremoved). A dark-on-light
+        mark has no WHITE top-hat blob at all, so the contrast front-end is bounded by
+        the polarity-independent detector's match box too. A tophat mark found only by
+        the CONTINUOUS front-end has no binary glyph blob to bound, so the mask came
+        back empty and removal was a silent no-op while ``identify`` still reported the
+        mark -- use the DETECTOR'S OWN best-match box, gated on an actual detection (on
+        a clean corner the box would be spurious; an earlier upstream fix that
+        thresholded the response instead filled ~120% of the corner on textured
+        frames).
+        """
+        ys, xs = np.where(self.extract_mask(image, loc) > 0)
+        blob = (
+            (int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())) if xs.size >= self._MIN_GLYPH_PIXELS else None
+        )
+        frontend = self.config.detect_frontend
+        if frontend in ("gray", "contrast"):
+            det = self._strict_detection(image, detection)
+            box = det.match_box if det.detected else blob
+        elif blob is not None:
+            box = blob
+        elif frontend == "tophat":
+            det = self._strict_detection(image, detection)
+            box = det.match_box if det.detected else None
+        else:
+            box = None
+        if box is not None:
+            return self._extend_match_box(box, loc, image.shape[:2])
+        return self._geometry_rect(loc, image.shape[:2]) if force else None
+
+    def _match_box_rect(
+        self,
+        image: NDArray[Any],
+        loc: TextMarkLocation,
+        *,
+        force: bool,
+        detection: TextMarkDetection | None,
+    ) -> tuple[int, int, int, int] | None:
+        """Footprint policy for a mark whose fill must be bounded by the DETECTOR's
+        match box and never by the binary glyph blob (upstream Baidu/LiblibAI: the
+        blob bbox is measurably wrong and the NCC match box is right). ``force`` takes
+        priority here, unlike the default policy: a ``--no-detect`` caller named the
+        mark, so the whole geometry box is the honest footprint.
+        """
+        if force:
+            return self._geometry_rect(loc, image.shape[:2])
+        det = self._strict_detection(image, detection)
+        if not det.detected or det.match_box is None:
+            return None
+        return self._extend_match_box(det.match_box, loc, image.shape[:2])
+
+    def _aligned_alpha_mask(
+        self,
+        image: NDArray[Any],
+        detection: TextMarkDetection,
+        alpha: NDArray[Any],
+        *,
+        alpha_floor: float,
+        dilate: int,
+    ) -> NDArray[Any] | None:
+        """Place an alpha footprint on the detector's winning template box.
+
+        Continuous front ends locate faint glyphs that the thresholded pixel response
+        can only partly recover. The winning match already fixes the template's
+        position and scale, so engines with a trustworthy alpha asset can reuse that
+        alignment for their removal mask instead of running another search.
+        """
+        if not detection.detected or detection.match_box is None:
+            return None
+        source = image_io.to_bgr(image)
+        loc = self.locate(source)
+        x0, y0, x1, y1 = detection.match_box  # inclusive ROI-local coordinates
+        x0, y0 = max(0, x0), max(0, y0)
+        x1, y1 = min(loc.w - 1, x1), min(loc.h - 1, y1)
+        if x1 < x0 or y1 < y0:
+            return None
+
+        glyph_w, glyph_h = x1 - x0 + 1, y1 - y0 + 1
+        aligned = cv2.resize(alpha, (glyph_w, glyph_h), interpolation=cv2.INTER_LINEAR)
+        local_mask = np.zeros((loc.h, loc.w), np.uint8)
+        local_mask[y0 : y0 + glyph_h, x0 : x0 + glyph_w] = (aligned > alpha_floor).astype(np.uint8) * 255
+        if dilate > 0:
+            kernel = np.ones((2 * dilate + 1, 2 * dilate + 1), np.uint8)
+            local_mask = cv2.dilate(local_mask, kernel)
+
+        mask = np.zeros(source.shape[:2], np.uint8)
+        mask[loc.y : loc.y + loc.h, loc.x : loc.x + loc.w] = local_mask
+        return mask
+
+    def footprint_mask(
+        self,
+        image: NDArray[Any] | None,
+        *,
+        force: bool = False,
+        dilate: int | None = None,
+        detection: TextMarkDetection | None = None,
+    ) -> NDArray[Any] | None:
+        """Full-frame uint8 mask (255 = mark) of the mark footprint, for the shared
+        fill removal path (cv2 / MI-GAN / LaMa), or None if no glyph is found.
+
+        Template-FREE: localize the glyph blob with the top-hat :meth:`extract_mask`,
+        take its bounding box in the corner, and fill that box solid (plus a small
+        margin + dilation). Filling the enclosing rectangle -- not the sparse glyph
+        strokes -- is what makes it robust: the top-hat under-segments individual
+        strokes, but the inpaint reconstructs the whole wordmark rectangle from its
+        surroundings, so a stroke missed by the top-hat is still covered. Engines with
+        measured alpha footprints override this method.
+
+        With ``force`` and no glyph found, falls back to the whole geometry box (the
+        ``--no-detect`` path). The caller gates on detection.
+
+        ``detection`` is the caller's already-computed detection, threaded in so the
+        footprint does not re-run a sweep the detector already ran. See
+        :meth:`_strict_detection` for when it is reused.
+        """
+        if image is None or image.size == 0:
+            return None  # guard before to_bgr (cvtColor raises on an empty Mat); mirror detect()
+        image = image_io.to_bgr(image)
+        h, w = image.shape[:2]
+        if h < 32 or w < 64:
+            return None
+        loc = self.locate(image)
+        rect = self._footprint_rect(image, loc, force=force, detection=detection)
+        if rect is None:
+            return None
+        rx1, ry1, rx2, ry2 = rect
+        if rx1 >= rx2 or ry1 >= ry2:
+            return None
+        # Rectangular footprint + dilation is exactly region_eraser.boxes_to_mask (the
+        # same primitive the shared fill uses); reuse it instead of re-inlining the
+        # zeros/fill/MORPH_ELLIPSE-dilate here.
+        import region_eraser
+
+        d = dilate if dilate is not None else max(3, int(0.02 * loc.w))
+        return region_eraser.boxes_to_mask((h, w), [(rx1, ry1, rx2 - rx1, ry2 - ry1)], dilate=d)
+
+
+class BottomRightAnchoredEngine(TextMarkEngine):
+    """A text mark that must end within ``_ANCHOR_MAX_RIGHT`` / ``_ANCHOR_MAX_BOTTOM`` of the corner.
+
+    Both margins are fractions of the short side. A shared post-gate rather than a
+    ``detect`` override, so the single-pass perception path (``detect_both``) cannot
+    skip it.
+    """
+
+    _ANCHOR_MAX_RIGHT: float
+    _ANCHOR_MAX_BOTTOM: float
+
+    def _post_gate(self, det: TextMarkDetection, scan: TextMarkScan) -> TextMarkDetection:
+        if not det.detected or scan.loc is None:
+            return det
+        box = det.match_box  # the sweep the scan already ran on this same loc
+        if box is None:
+            det.detected = False
+            return det
+        h, w = scan.frame
+        base = min(h, w)
+        right = (w - (scan.loc.x + box[2] + 1)) / base
+        bottom = (h - (scan.loc.y + box[3] + 1)) / base
+        if not (0 <= right <= self._ANCHOR_MAX_RIGHT and 0 <= bottom <= self._ANCHOR_MAX_BOTTOM):
+            logger.debug(
+                "%s detect: score %.3f but match off-anchor (right=%.3f bottom=%.3f); demoting.",
+                self.config.name,
+                det.confidence,
+                right,
+                bottom,
+            )
+            det.detected = False
+        return det

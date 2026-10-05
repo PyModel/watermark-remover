@@ -254,3 +254,226 @@ class TestTemplateMatch:
         assert score == 0.0
         assert match is not None
         assert match[2] < 200 and match[3] < 40
+
+
+class TestDetect:
+    """detect() gates on NCC + (for the binary front-end) the coverage gate."""
+
+    def test_detects_the_stamped_mark(self):
+        eng = _engine()
+        img = _stamp(eng, _flat())
+        det = eng.detect(img)
+        assert det.detected
+        assert det.confidence > 0.5
+        assert det.region == eng.locate(img).bbox
+        assert det.coverage > eng.config.detect_min_coverage
+        assert det.match_box is not None
+        assert det.template_asset == ASSET
+        assert det.provenance is False
+
+    def test_rejects_the_clean_frame(self):
+        eng = _engine()
+        det = eng.detect(_flat())
+        assert not det.detected
+        assert det.confidence == 0.0  # below the coverage gate: no score consulted
+
+    def test_provenance_relaxes_only_the_threshold(self):
+        """The relaxed gate is threshold * provenance_ncc_factor; the scan is shared.
+
+        A partially-erased stamp scores mid-range: pick the gate pair around the
+        measured score so strict rejects and provenance accepts, with the SAME
+        confidence either way (the trust level scales the threshold, nothing else).
+        """
+        eng = _engine()
+        img = _stamp(eng, _flat())
+        strict = eng.detect(img, provenance=False)
+        relaxed = eng.detect(img, provenance=True)
+        assert strict.confidence == relaxed.confidence > 0.5
+        assert strict.detected and relaxed.detected
+        # Now a config gated strictly above the fixture's score, with a relaxation
+        # factor that brings the gate back under it.
+        score = strict.confidence
+        tight = _engine(detect_ncc_threshold=score + 0.05, provenance_ncc_factor=0.5)
+        assert not tight.detect(img, provenance=False).detected
+        assert tight.detect(img, provenance=True).detected
+
+    def test_small_images_are_skipped_stably(self):
+        """Below the 200px short-side floor, detection skips instead of correlating
+        an 8px template (the upstream icon/thumbnail false-positive band)."""
+        eng = _engine()
+        img = _stamp(eng, _flat(w=160, h=120))
+        det = eng.detect(img)
+        assert not det.detected
+        assert det.region == (0, 0, 0, 0)
+        assert det.confidence == 0.0
+        assert det.match_box is None
+
+    def test_empty_and_none_inputs_reject_stably(self):
+        eng = _engine()
+        for bad in (None, np.zeros((0, 0, 3), np.uint8)):
+            det = eng.detect(bad)
+            assert not det.detected
+            assert det.region == (0, 0, 0, 0)
+        assert eng.footprint_mask(None) is None
+        assert eng.footprint_mask(np.zeros((0, 0, 3), np.uint8)) is None
+
+    def test_sliver_frames_reject_stably(self):
+        """h < 32 or w < 64 cannot carry the mark; footprint must say None, not
+        feed cv2 a degenerate Mat."""
+        eng = _engine()
+        assert eng.footprint_mask(_flat(w=200, h=16)) is None
+        assert eng.footprint_mask(_flat(w=48, h=400)) is None
+
+
+class TestRivalMargin:
+    """Same-corner detection is competitive: the rival's template scores the same blob."""
+
+    def test_a_rival_shaped_blob_loses_the_margin(self):
+        """The decisive case: a blob matching the RIVAL at least as well as this mark
+        must not be booked as this mark, however high the absolute score. The compact
+        yuanbao pair is byte-identical (per assets/PROVENANCE.md), so both templates
+        score ~1.0 and the margin always rejects."""
+        engine_asset, rival_asset = "yuanbao_compact_alpha.png", "yuanbao_compact_gray_alpha.png"
+        rival_cfg = _config(
+            name="Rival",
+            asset_name=rival_asset,
+            alpha_width_frac=0.1636,
+            alpha_height_frac=0.1636 * 222 / 329,  # the compact stamp's own aspect
+        )
+        tme.register_rival_config(rival_asset, rival_cfg)
+        try:
+            eng = _engine(
+                asset_name=engine_asset,
+                rivals=(rival_asset,),
+                rival_margin=0.10,
+                alpha_height_frac=0.1636 * 222 / 329,
+            )
+            blob = glyph_silhouette(engine_asset)
+            assert blob is not None
+            canvas = np.zeros((blob.shape[0] + 20, blob.shape[1] + 20), np.uint8)
+            canvas[10 : 10 + blob.shape[0], 10 : 10 + blob.shape[1]] = blob
+            width = int(blob.shape[1] / eng.config.alpha_width_frac)
+            score = eng._template_match_score(canvas, width)
+            assert score > 0.5  # a strong ABSOLUTE match...
+            assert not eng._rival_margin_ok(score, canvas, width)  # ...that loses the margin
+        finally:
+            tme._RIVAL_CONFIGS.pop(rival_asset, None)
+
+    def test_no_rivals_declared_means_unaffected(self):
+        eng = _engine(rivals=())
+        assert eng._rival_margin_ok(0.42, np.zeros((10, 10), np.uint8), 100)
+
+    def test_unresolvable_rival_degrades_to_accept(self):
+        """A rival asset with no registered config and no module is skipped, not a
+        raise (a missing/renamed engine must not break detection)."""
+        eng = _engine(rivals=("no_such_asset.png",))
+        assert eng._rival_margin_ok(0.42, np.zeros((10, 10), np.uint8), 100)
+
+    def test_registered_rival_beats_the_module_table(self):
+        """Registration wins over the lazy module lookup, so a vendor engine can pin
+        its exact config without this module knowing vendor layout."""
+        rival_asset = "kling_latin_alpha.png"
+        rival_cfg = _config(name="Pinned", asset_name=rival_asset)
+        tme.register_rival_config(rival_asset, rival_cfg)
+        try:
+            assert tme._rival_config(rival_asset) is rival_cfg
+        finally:
+            tme._RIVAL_CONFIGS.pop(rival_asset, None)
+
+
+class TestContinuousFrontends:
+    """The tophat/gray/contrast front-ends sweep the ladder on the continuous response."""
+
+    def test_tophat_response_is_contrast_invariant(self):
+        """A faint mark and a bold one produce the same max-normalized response."""
+        eng = _engine(detect_frontend="tophat")
+        img = _flat(w=2048, h=1536)
+        loc = eng.locate(img)
+        out = []
+        for amplitude in (12, 90):  # a barely-there overlay and a bold one
+            probe = img.copy()
+            x, y, bw, bh = loc.bbox
+            probe[y + bh // 3 : y + 2 * bh // 3, x + bw // 4 : x + 3 * bw // 4] = 100 + amplitude
+            resp = eng.tophat_response(probe, loc)
+            assert resp is not None
+            out.append(resp)
+        assert abs(int(out[0].max()) - int(out[1].max())) <= 1
+
+    def test_flat_input_yields_no_response(self):
+        eng = _engine(detect_frontend="tophat")
+        img = _flat()
+        assert eng.tophat_response(img, eng.locate(img)) is None
+
+    def test_binary_frontend_never_builds_a_ladder_response(self):
+        eng = _engine(detect_frontend="binary")
+        with pytest.raises(ValueError, match="no ladder response"):
+            eng._detect_response(_flat(), eng.locate(_flat()))
+
+    def test_faint_mark_found_only_by_the_continuous_frontend(self):
+        """The upstream RunningHub story, config-driven: a faint stamp shatters under
+        the binary coverage gate but scores through the continuous tophat response."""
+        faint_alpha = 0.08
+        binary = _engine()
+        tophat = _engine(detect_frontend="tophat", detect_ncc_threshold=0.50)
+        img = _stamp(binary, _flat(), alpha=faint_alpha)
+        loc = binary.locate(img)
+        # Premise: the binarizing path cannot segment it.
+        assert (binary.extract_mask(img, loc) > 0).sum() < 20
+        assert not binary.detect(img).detected
+        # The continuous front-end still finds it.
+        det = tophat.detect(img)
+        assert det.detected
+        assert det.match_box is not None
+
+    def test_contrast_frontend_sees_the_dark_on_light_polarity(self):
+        """A dark glyph on a bright corner has no WHITE top-hat; the absolute
+        residual front-end must still find it (config-driven renderer polarity)."""
+        bright_bg = _flat(level=220)
+        tophat = _engine(detect_frontend="tophat", logo_min_luma=0)
+        contrast = _engine(detect_frontend="contrast", detect_ncc_threshold=0.50)
+        dark = _stamp_dark(tophat, bright_bg, level=60)
+        assert not tophat.detect(dark).detected
+        assert contrast.detect(dark).detected
+
+    def test_gray_frontend_is_polarity_dependent_where_contrast_is_not(self):
+        """The gray front-end correlates the RAW grayscale, so its sign tracks the
+        mark's polarity: it accepts the light-on-dark stamp and rejects the dark-on-
+        light inversion of the same silhouette. The contrast front-end (absolute
+        residual) accepts both. Upstream's per-mark gray-arm precision numbers were
+        capture-corpus measurements; the port pins the mechanism, and per-mark
+        calibration belongs to the vendor tickets."""
+        gray = _engine(detect_frontend="gray", detect_ncc_threshold=0.40)
+        contrast = _engine(detect_frontend="contrast", detect_ncc_threshold=0.50)
+        light_mark = _stamp(gray, _flat(), alpha=0.6)  # bright glyph on dark bg
+        dark_mark = _stamp_dark(gray, _flat(level=220), level=60)  # inverted polarity
+        assert gray.detect(light_mark).detected
+        assert not gray.detect(dark_mark).detected
+        assert contrast.detect(light_mark).detected
+        assert contrast.detect(dark_mark).detected
+
+    def test_ladder_sweep_finds_the_off_nominal_scale(self):
+        """The ladder is config-driven: a stamp rendered 25% off the nominal size is
+        found by the default 3-rung comb and missed by a single 1.0 rung."""
+        img = _stamp(_engine(detect_frontend="tophat"), _flat(), alpha=0.6, scale=1.25)
+        swept = _engine(detect_frontend="tophat", detect_ncc_threshold=0.50)
+        pinned = _engine(detect_frontend="tophat", detect_ncc_threshold=0.50, ladder=(1.0,))
+        assert swept.detect(img).detected
+        assert not pinned.detect(img).detected
+
+
+def _stamp_dark(engine: TextMarkEngine, image: NDArray[np.uint8], *, level: int) -> NDArray[np.uint8]:
+    """Composite the engine's glyph as a DARK overlay (light-on-dark inverted)."""
+    tmpl = load_alpha_template(engine.config.asset_name)
+    assert tmpl is not None
+    img = image.copy()
+    loc = engine.locate(img)
+    base = engine.scale_base(img)
+    gw = max(engine.config.min_gw, int(engine.config.alpha_width_frac * base))
+    gh = max(4, int(engine.config.alpha_height_frac * base))
+    a = cv2.resize(tmpl, (gw, gh), interpolation=cv2.INTER_AREA).astype(np.float32)
+    x = loc.x + (loc.w - gw) // 2
+    y = loc.y + (loc.h - gh) // 2
+    roi = img[y : y + gh, x : x + gw].astype(np.float32)
+    a3 = a[..., None]
+    img[y : y + gh, x : x + gw] = np.clip(roi * (1 - a3) + level * a3, 0, 255).astype(np.uint8)
+    return img
