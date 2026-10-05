@@ -527,15 +527,16 @@ def _run_planned(src: Path, dest: Path, request: CleanRequest) -> dict[str, Any]
 
     ``plan_work`` resolves the destination and refuses oversized inputs,
     aliased outputs, and binary-as-text before the first write — the same
-    refusals the CLI gets, now inherited here. The executor reports failures
-    as error payloads; the direct calls this replaced raised ``ValueError``
-    into the handler's 400 mapping, so the message is re-raised unchanged.
+    refusals the CLI gets, now inherited here. Only that preflight is a
+    client-visible 400: the executor reports internal failures as error
+    payloads, and those re-raise as non-ValueError so the handler maps them
+    back to the sanitized 500 the direct calls this replaced produced.
     """
     item = InputItem(path=src, relative=Path(src.name))
     ((_, output, plan),) = plan_work([item], request, batch=False)
     payload = run_clean_item(item.path, output, request, plan)
     if "error" in payload:
-        raise ValueError(payload["error"])
+        raise RuntimeError(payload["error"])
     return payload
 
 
