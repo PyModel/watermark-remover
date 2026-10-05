@@ -21,6 +21,7 @@ from asset_kind import SUPPORTED_EXTENSIONS, classify_asset
 from batch_inputs import select_inputs
 from common import EXIT_PARTIAL, MAX_INPUT_BYTES, emit_json, eprint, looks_binary
 from container_meta import inspect_container
+from identify import ProvenanceVerdict, identify_file, unknown_verdict
 from image_meta import inspect_image
 from inspect_soft_binding import inspect_soft_binding
 from text_unicode import human_report, inspect_text
@@ -32,6 +33,13 @@ def main() -> int:
     p.add_argument("--json", action="store_true")
     p.add_argument("--aggressive", action="store_true", help="Text: flag confusables")
     p.add_argument("--soft-binding", action="store_true")
+    p.add_argument(
+        "--identify",
+        action="store_true",
+        help="Print one provenance verdict (tri-state AI-ness, platform, source "
+        "kind, integrity clashes, C2PA validation) built from a single metadata "
+        "collection pass; classifiers are never run",
+    )
     p.add_argument(
         "--as", dest="force_type", choices=("text", "image", "container", "auto"), default="auto"
     )
@@ -49,6 +57,16 @@ def main() -> int:
     except ValueError as error:
         eprint(f"invalid input selection: {error}")
         return 2
+    if args.identify:
+        results = [_identify_single(item.path, args) for item in selection.items]
+        batch = selection.batch
+        if args.json:
+            emit_json({"total": len(results), "results": results} if batch else results[0])
+        elif batch:
+            eprint(f"identified {len(results)} file(s)")
+        if any(r.get("unscanned") for r in results):
+            return EXIT_PARTIAL
+        return 0
     results = [_inspect_single(item.path, args) for item in selection.items]
     batch = selection.batch
     if args.json:
@@ -176,6 +194,61 @@ def _inspect_asset(
         },
         None,
     )
+
+
+def _identify_single(path: Path, args) -> dict:
+    """The identify surface: collect once, judge, present. Prints nothing in JSON."""
+    try:
+        kind = classify_asset(path)
+    except OSError:
+        kind = "unknown"
+    if kind in ("text", "unknown", "refused"):
+        if kind != "text":
+            result = {
+                "kind": kind,
+                "path": str(path),
+                "note": "These bytes match no supported text, image or container format.",
+                "suspicious": False,
+                "unscanned": True,
+            }
+            if not args.json:
+                print(f"Kind: {kind}")
+                print(f"Path: {path}")
+                print(f"Note: {result['note']}")
+            return result
+        # Provenance identification is a metadata question about binary
+        # assets; a text asset carries none, so it is unknown — never clean.
+        verdict = unknown_verdict()
+    else:
+        verdict = identify_file(path)
+    result = {"kind": kind, "path": str(path), "identify": verdict.to_dict()}
+    if not args.json:
+        print(f"Kind: {kind}")
+        print(f"Path: {path}")
+        _print_verdict(verdict)
+    return result
+
+
+def _print_verdict(verdict: ProvenanceVerdict) -> None:
+    """Human rendering of the six-field verdict."""
+    ai = verdict.is_ai_generated
+    print("Identify:")
+    print(f"  AI generated: {'yes' if ai else 'unknown' if ai is None else 'no'}")
+    print(f"  Platform: {verdict.platform or 'unknown'}")
+    print(f"  Source kind: {verdict.ai_source_kind or 'unknown'}")
+    print(f"  AI from metadata: {'yes' if verdict.ai_from_metadata else 'no'}")
+    if verdict.integrity_clashes:
+        print("  Integrity clashes:")
+        for clash in verdict.integrity_clashes:
+            print(f"    - {clash}")
+    else:
+        print("  Integrity clashes: none")
+    if verdict.c2pa_validation is not None:
+        import json as _json
+
+        print(f"  C2PA validation: {_json.dumps(verdict.c2pa_validation, ensure_ascii=False)}")
+    else:
+        print("  C2PA validation: none")
 
 
 def _inspect_single(path: Path, args) -> dict:

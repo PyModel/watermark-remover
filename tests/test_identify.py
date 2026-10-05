@@ -232,6 +232,102 @@ class TestClassifiersNeverAutoRun:
         assert "run_optional_tools" not in source
 
 
+class TestInspectCliSurface:
+    """`inspect_file.py --identify` — the CLI identify surface.
+
+    Without the flag the CLI behaves exactly as today
+    (tests/test_inspect_file_partial.py + tests/test_json_exit_code.py pin
+    that); these tests pin the flag's own behavior.
+    """
+
+    def _run(self, *args: str) -> tuple[int, str, str]:
+        import subprocess
+
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPTS / "inspect_file.py"), *args],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return proc.returncode, proc.stdout, proc.stderr
+
+    def test_identify_prints_the_verdict_for_a_clean_file(self) -> None:
+        code, out, err = self._run(str(FIXTURES / "clean_camera_exif.jpg"), "--identify")
+        assert code == 0, (code, out, err)
+        assert "AI generated: unknown" in out
+        assert "Platform: unknown" in out
+        assert "Integrity clashes: none" in out
+        assert "C2PA validation: none" in out
+
+    def test_identify_prints_the_verdict_for_a_tc260_file(self) -> None:
+        code, out, _err = self._run(str(FIXTURES / "tc260_labeled.jpg"), "--identify")
+        assert code == 0
+        assert "AI generated: yes" in out
+        assert "Platform: ByteDance" in out
+        assert "AI from metadata: yes" in out
+
+    def test_identify_json_carries_the_six_field_verdict(self) -> None:
+        code, out, _err = self._run(
+            str(FIXTURES / "tc260_signature_clash.jpg"), "--identify", "--json"
+        )
+        assert code == 0
+        payload = json.loads(out)
+        assert payload["kind"] == "image"
+        verdict = payload["identify"]
+        assert verdict["is_ai_generated"] is True
+        assert len(verdict["integrity_clashes"]) == 1
+        assert set(verdict) == {
+            "schema_version",
+            "is_ai_generated",
+            "platform",
+            "ai_source_kind",
+            "ai_from_metadata",
+            "integrity_clashes",
+            "c2pa_validation",
+        }
+
+    def test_identify_without_the_flag_has_no_identify_key(self) -> None:
+        code, out, _err = self._run(str(FIXTURES / "tc260_labeled.jpg"), "--json")
+        assert code == 1  # today's suspicious exit
+        assert "identify" not in json.loads(out)
+
+    def test_identify_malformed_image_still_verdicts_unknown(self) -> None:
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as handle:
+            handle.write(b"\xff\xd8not really a jpeg")
+            path = Path(handle.name)
+        try:
+            code, out, _err = self._run(str(path), "--identify", "--json")
+            # A .jpg suffix classifies as image, so the file IS scanned —
+            # same as today's inspect; the verdict is unknown, never clean.
+            assert code == 0
+            payload = json.loads(out)
+            assert payload["kind"] == "image"
+            assert payload["identify"]["is_ai_generated"] is None
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_identify_on_an_unknown_container_reports_unscanned(self) -> None:
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".xyz", delete=False) as handle:
+            handle.write(b"mysterious bytes")
+            path = Path(handle.name)
+        try:
+            code, out, _err = self._run(str(path), "--identify", "--json")
+            assert code == 3  # EXIT_PARTIAL: the input was not scanned
+            payload = json.loads(out)
+            assert payload["unscanned"] is True
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_identify_refuses_a_missing_input_like_the_cli(self) -> None:
+        code, _out, err = self._run(str(FIXTURES / "does_not_exist.jpg"), "--identify")
+        assert code == 2
+        assert "not a regular file" in err
+
+
 class TestVerdictShape:
     def test_to_dict_is_json_safe_and_versioned(self) -> None:
         verdict = verdict_of("mixed_signals.jpg")
