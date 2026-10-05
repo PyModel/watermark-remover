@@ -227,6 +227,23 @@ def _objects(value: object) -> list[dict[str, Any]]:
     return [cast("dict[str, Any]", item) for item in items if isinstance(item, dict)]
 
 
+# Entries past this combined size skip the bounded cache: a label payload
+# carrying megabytes of key/signature hex must not pin them as cache keys.
+_MAX_CACHED_VERIFY_BYTES = 64 * 1024
+
+
+def _verify_cached(point: Point, message: bytes, signature: bytes) -> bool:
+    """``_verified`` with a per-entry size bound on the cache.
+
+    ``inspect`` and ``strip`` re-read the same label, so small (key, message,
+    signature) triples are cached; anything oversized verifies directly and
+    stays out of the cache entirely.
+    """
+    if len(message) + len(signature) > _MAX_CACHED_VERIFY_BYTES:
+        return verify(point, message, signature)
+    return _verified(point, message, signature)
+
+
 @functools.lru_cache(maxsize=256)
 def _verified(point: Point, message: bytes, signature: bytes) -> bool:
     # inspect and strip re-read the same label; the pure-Python curve math
@@ -272,7 +289,7 @@ def check_tc260_signature(label: Mapping[str, str]) -> Tc260Signature | None:
             signature = bytes.fromhex(str(entry.get("Signature", "")))
         except ValueError:
             signature = b""
-        verified = any(_verified(point, message, signature) for point in points)
+        verified = any(_verify_cached(point, message, signature) for point in points)
         results.append(verified)
         if verified:
             signer = signer or key_signer

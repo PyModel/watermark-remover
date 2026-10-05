@@ -214,6 +214,37 @@ class TestCheckTc260Signature:
         assert result is not None
         assert result.label == "verified"
 
+    def test_huge_verify_inputs_bypass_the_signature_cache(self) -> None:
+        """Oversized (message, signature) pairs skip the bounded lru_cache.
+
+        The cache admitted every (key, message, signature) triple up to its
+        256-entry count with no per-entry size bound, so one multi-megabyte
+        label payload pinned megabytes of curve-math inputs in memory.
+        Entries past a small threshold verify directly; the cache must not
+        grow, and the verdict must not change.
+        """
+        tc260_verify._verified.cache_clear()
+        pub = EMBEDDED_KEY
+        huge_pad = "x" * (64 * 1024 + 1)
+        label = _signed_label(pub, CHOSEN_K, _label(ProduceID=huge_pad))
+        assert len(label_message(label)) > 64 * 1024
+        before = tc260_verify._verified.cache_info()
+        result = check_tc260_signature(label)
+        after = tc260_verify._verified.cache_info()
+        assert result is not None and result.label == "verified"
+        assert (after.hits, after.misses) == (before.hits, before.misses)
+
+    def test_a_huge_bad_signature_still_fails_without_caching(self) -> None:
+        tc260_verify._verified.cache_clear()
+        huge_pad = "x" * (64 * 1024 + 1)
+        security = _security_data(EMBEDDED_KEY, b"\x00" * (64 * 1024 + 1))
+        label = _label(ProduceID=huge_pad, ReservedCode1=_security_json(security))
+        before = tc260_verify._verified.cache_info()
+        result = check_tc260_signature(label)
+        after = tc260_verify._verified.cache_info()
+        assert result is not None and result.label == "failed"
+        assert (after.hits, after.misses) == (before.hits, before.misses)
+
 
 def test_verify_only_surface() -> None:
     assert not hasattr(tc260_verify, "sign")
