@@ -31,6 +31,41 @@ committed file. The system fonts render the glyphs but are **never shipped**.
 | openart_alpha.png | render_vendor_silhouettes.py (`draw_openart`) | scripts/build_openart_alpha.py | Apache-2.0 (ported portions) | openart (3, provisional) | Procedural reconstruction of the public OpenArt mark (bowtie icon + Hershey wordmark, peak alpha 173). Upstream pinned OpenCV 4.x for Hershey glyph parity; this tree regenerates with the pixel extra's OpenCV 5 and ships that rendering. |
 | jimeng_pill.png | render_pill_silhouette.py (`render_silhouette`) | scripts/render_pill_silhouette.py | Apache-2.0 (ported portions) | jimeng_pill, liblib_pill (1) | 320x160 rounded-pill outline + AI生成 (STHeiti Medium); top-left pill class. |
 
+## Watermarked synthetic-carrier fixtures (`watermarked_fixtures/`)
+
+Four 512x512 PNGs produced by the DWT-DCT oracle (the `invisible-watermark`
+library, PyPI 0.2.0 — a **dev-only fixture-generation tool** that is never a
+project dependency, enforced by `tests/test_detect_wiring.py`) embedding known
+fixed bit patterns into a deterministic synthetic carrier: a seeded
+gradient-plus-noise field (`numpy.random.default_rng(20211012)`, gradient 90x +
+140y + uniform 0–60 noise, replicated to BGR), so the pixels are
+renderer-synthetic with zero captured content. These files are pinned by
+**decode-to-expected-bits**, NOT by byte regeneration: the determinism test
+decodes each committed PNG and requires the exact pattern below, so a
+re-encode with a different PNG encoder would not break the pin — a changed
+decode would.
+
+- `plain.png` — the un-watermarked control; the detector must report no
+  finding. SHA256 `7b87acbc6d568b51489c0e3ef98a25c6ddcf9fb09a134ddc2f0b537672839e51`.
+- `sdxl_48bit.png` — 48-bit payload `0b101100111110110010010000011110111011000110011110`
+  (diffusers `StableDiffusionXLWatermarker` `WATERMARK_MESSAGE`). SHA256
+  `f5ddabae97bb48b4a5b0010547548e2405743b0c92f0d4ec21e3fe8e5d524e03`.
+- `flux2_48bit.png` — 48-bit payload `0b001010101111111010000111100111001111010100101110`
+  (Black Forest Labs FLUX.2 `watermark.py`). SHA256
+  `4a981314c6e7b577a8cfa24f4e867fef622b3c7af6d68c542c55bf5c24bc74e9`.
+- `sd_v1_136bit.png` — the 136-bit pattern of the ASCII bytes
+  `StableDiffusionV1` (the invisible-watermark `"StableDiffusionV1"` default).
+  SHA256 `062f6fd18b365d28ed9cf6f526335568cdc2c327ababc2953a7d48267128e713`.
+
+Each embed was verified at generation time three ways (oracle pre-PNG decode,
+in-tree `dwt_dct` parity on the float array, post-PNG re-decode through the
+in-tree decoder). Oracle version at generation: `invisible-watermark 0.2.0`
+with OpenCV 5.0.0 / PyWavelets 1.10.0 / numpy 2.x, Python 3.13. Regeneration
+recipe: seeded carrier as above, `WatermarkEncoder.set_by_bits` (48-bit
+schemes) or `set_by_bytes(b"StableDiffusionV1")`, `encode(..., method="dwtDct")`,
+PNG compression 9. The commit is the provenance record; the SHA256s above are
+integrity pins, not regeneration targets.
+
 ## Upstream attribution
 
 Upstream source: `wiltodelta/remove-ai-watermarks` (Apache-2.0), ported from the

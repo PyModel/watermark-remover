@@ -22,6 +22,11 @@ SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
 FIXTURES = SCRIPTS / "assets" / "watermarked_fixtures"
 sys.path.insert(0, str(SCRIPTS))
 
+#: The decoder's own dependency floor. numpy + cv2 ship with the ``pixel``
+#: extra (the contract install); PyWavelets is ``detect``-tier, so without it
+#: this whole file skips cleanly instead of erroring at collection.
+pytest.importorskip("pywt")
+
 from dwt_dct import decode_dwt_dct, decode_dwt_dct_lengths
 
 #: 48-bit ``bits`` watermarks embedded by the known generators (module-level
@@ -111,3 +116,44 @@ def test_degenerate_plane_raises_like_upstream() -> None:
     image = np.zeros((1, 70000, 3), dtype=np.uint8)
     with pytest.raises(ValueError, match="data_len must be greater than zero"):
         decode_dwt_dct_lengths(image, (48,))
+
+
+#: Committed fixture -> expected payload (independent constants, mirrored in
+#: PROVENANCE.md). The pin is decode-to-expected-bits: byte regeneration is
+#: explicitly NOT required of the PNGs.
+_FIXTURE_EXPECTATIONS = [
+    ("sdxl_48bit.png", SDXL_BITS, 48),
+    ("flux2_48bit.png", FLUX2_BITS, 48),
+    ("sd_v1_136bit.png", int.from_bytes(SD1_STRING, "big"), 8 * len(SD1_STRING)),
+]
+
+
+def test_committed_fixtures_exist() -> None:
+    for name, _bits, _nbits in _FIXTURE_EXPECTATIONS:
+        assert (FIXTURES / name).is_file(), f"missing committed fixture {name}"
+
+
+@pytest.mark.parametrize(
+    ("name", "bits", "nbits"), _FIXTURE_EXPECTATIONS, ids=lambda v: v if isinstance(v, str) else ""
+)
+def test_committed_fixture_decodes_to_expected_bits(name: str, bits: int, nbits: int) -> None:
+    """The committed PNGs decode to their exact known patterns."""
+    cv2 = pytest.importorskip("cv2")
+    path = FIXTURES / name
+    image = cv2.imread(str(path))
+    assert image is not None
+    decoded = decode_dwt_dct_lengths(image, (48, 8 * len(SD1_STRING)))[nbits]
+    assert _bits_to_int(decoded) == bits
+
+
+def test_provenance_records_match_the_committed_fixtures() -> None:
+    """PROVENANCE.md's SHA256 pins describe exactly the committed bytes."""
+    import hashlib
+    import re
+
+    provenance = (SCRIPTS / "assets" / "PROVENANCE.md").read_text(encoding="utf-8")
+    for name, _bits, _nbits in _FIXTURE_EXPECTATIONS:
+        match = re.search(re.escape(name) + r".*?`([0-9a-f]{64})`", provenance, re.DOTALL)
+        assert match, f"PROVENANCE.md does not record a SHA256 for {name}"
+        digest = hashlib.sha256((FIXTURES / name).read_bytes()).hexdigest()
+        assert digest == match.group(1), f"{name} does not match its PROVENANCE.md SHA256"

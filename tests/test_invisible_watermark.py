@@ -81,14 +81,25 @@ def test_undecodable_image_yields_no_finding_not_a_crash() -> None:
     assert iw.detect_invisible_watermark(Path("unused.png"), image=_carrier(24, 24)) is None
 
 
+@pytest.mark.skipif(not iw.is_available(), reason="detect extra (numpy/cv2/pywt) not installed")
+def test_committed_plain_fixture_yields_no_finding() -> None:
+    """The committed control image carries no known open payload."""
+    import cv2
+
+    plain = SCRIPTS / "assets" / "watermarked_fixtures" / "plain.png"
+    image = cv2.imread(str(plain))
+    assert image is not None
+    assert iw.detect_invisible_watermark(plain, image=image) is None
+
+
 def test_missing_file_yields_no_finding(tmp_path: Path) -> None:
     assert iw.detect_invisible_watermark(tmp_path / "nope.png") is None
 
 
 def test_is_available_follows_the_numeric_modules(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert iw.is_available() is True
     import optional_deps
 
+    assert iw.is_available() == optional_deps.module_available("cv2", "numpy", "pywt")
     monkeypatch.setattr(optional_deps, "module_available", lambda *names: False)
     assert iw.is_available() is False
 
