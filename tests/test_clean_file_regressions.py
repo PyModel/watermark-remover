@@ -449,3 +449,78 @@ def test_clean_file_cv2_backend_fails_soft_without_opencv(tmp_path: Path) -> Non
     )
     assert ok.returncode == 0, ok.stderr
     assert json.loads(ok.stdout)["visible"]["status"] == "completed"
+
+
+# ---------------------------------------------------------------------------
+# Learned fill tiers at the plan + CLI seam (ticket 03)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("backend", ["migan", "lama"])
+def test_visible_plan_accepts_learned_backend_names(backend: str) -> None:
+    plan = VisiblePlan(
+        mask_path=Path("mask.pgm"),
+        backend=backend,
+        mask_output=Path("out.mask.pgm"),
+    )
+    assert plan.backend == backend
+
+    with pytest.raises(ValueError, match="unknown visible backend"):
+        VisiblePlan(mask_path=Path("mask.pgm"), backend="bogus")
+
+
+@pytest.mark.parametrize("backend", ["migan", "lama"])
+def test_remove_visible_learned_backend_fails_soft_labeled(tmp_path, backend: str) -> None:
+    # No learned backend is registered in this build (the migan/lama ONNX
+    # backends land with ticket 04), so resolution must take the labeled-
+    # unavailable path deterministically -- registration is code-driven, not
+    # environment-driven.
+    src = tmp_path / "input.png"
+    src.write_bytes(encode_png(Raster(16, 16, 3, bytearray([9, 8, 7] * 256))))
+    mask = tmp_path / "mask.pgm"
+    write_pgm(box_mask(16, 16, (7, 7, 1, 1)), mask)
+    dest = tmp_path / "cleaned.png"
+
+    with pytest.raises(ValueError, match=rf"watermark-remover\[{backend}\]"):
+        remove_visible(
+            src,
+            dest,
+            VisiblePlan(
+                mask_path=mask,
+                backend=backend,
+                dilation_radius=0,
+                mask_output=tmp_path / "out.mask.pgm",
+            ),
+        )
+    assert not dest.exists()
+
+
+@pytest.mark.parametrize("backend", ["migan", "lama"])
+def test_clean_file_learned_backend_choice_parses_and_fails_soft(
+    tmp_path: Path, backend: str
+) -> None:
+    # The flag parses (choices widened for the learned tiers); the failure is
+    # the labeled unavailability on the normal runtime error path -- exit code
+    # unchanged (FAILED -> 1), install hint in stderr, no output written.
+    src = tmp_path / "input.png"
+    src.write_bytes(encode_png(Raster(16, 16, 3, bytearray([9, 8, 7] * 256))))
+    mask = tmp_path / "mask.pgm"
+    write_pgm(box_mask(16, 16, (7, 7, 1, 1)), mask)
+    dest = tmp_path / "cleaned.png"
+
+    result = _run(
+        str(src),
+        "-o",
+        str(dest),
+        "--visible-mask",
+        str(mask),
+        "--dilate",
+        "0",
+        "--visible-backend",
+        backend,
+    )
+
+    assert result.returncode == 1
+    assert "invalid choice" not in result.stderr
+    assert f"watermark-remover[{backend}]" in result.stderr
+    assert not dest.exists()

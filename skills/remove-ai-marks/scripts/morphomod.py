@@ -56,10 +56,21 @@ MAX_COMMAND_DIAGNOSTIC_BYTES = 64 * 1024
 EXTERNAL_COMMAND_TIMEOUT_SECONDS = 1800
 PNG_SIG = b"\x89PNG\r\n\x1a\n"
 
-VISIBLE_BACKENDS = ("print-plan", "texture", "simple", "external", "cv2-telea", "cv2-ns")
-VISIBLE_CLEAN_BACKENDS = ("texture", "simple", "external", "cv2-telea", "cv2-ns")
-#: Fill backends resolved through the inpaint backend registry (OpenCV-backed).
-CV2_FILL_BACKENDS = ("cv2-telea", "cv2-ns")
+VISIBLE_BACKENDS = (
+    "print-plan",
+    "texture",
+    "simple",
+    "external",
+    "cv2-telea",
+    "cv2-ns",
+    "migan",
+    "lama",
+)
+VISIBLE_CLEAN_BACKENDS = ("texture", "simple", "external", "cv2-telea", "cv2-ns", "migan", "lama")
+#: Fill backends resolved through the inpaint backend registry: the OpenCV pair
+#: plus the learned ONNX tiers (labeled-unavailable until the migan/lama extras
+#: register real backends).
+REGISTRY_FILL_BACKENDS = ("cv2-telea", "cv2-ns", "migan", "lama")
 
 
 @dataclass(frozen=True, slots=True)
@@ -924,27 +935,17 @@ def _validate_visible_paths(
 
 
 def _resolve_fill_backend(name: str) -> Any:
-    """Resolve a registered fill backend by name; fail soft when unavailable.
+    """Resolve a fill backend by name; fail soft when unavailable.
 
-    The registry is the single source of selectable fill backends: a cv2
-    backend registers only when OpenCV imports, so an unregistered selection
-    is an availability problem, not a crash.  The labeled error carries the
-    canonical install hint and leaves the exit contract to the caller.
+    Delegates to the inpaint backend registry's ``resolve_backend`` -- the single
+    resolution point: ``auto`` walks the lama > migan > cv2 > pure preference
+    order skipping unavailable tiers, and a named selection that is unregistered
+    or unavailable raises the labeled ValueError with the canonical install hint
+    (e.g. ``watermark-remover[migan]``). The exit contract stays with the caller.
     """
     import inpaint_backends
-    import optional_deps
 
-    for backend in inpaint_backends.get_backends():
-        if backend.name == name:
-            if backend.available:
-                return backend
-            break
-    hint = optional_deps.BackendAvailability(
-        available=False,
-        extra="visible",
-        reason="OpenCV (cv2) is not installed",
-    ).hint
-    raise ValueError(f"{name} backend is unavailable. {hint}")
+    return inpaint_backends.resolve_backend(name)
 
 
 def remove_visible(
@@ -1061,7 +1062,7 @@ def remove_visible(
         atomic_write_bytes(dest, encode_png(restored))
         status, output = "completed", str(dest)
         actions.append(act.inpaint_simple())
-    elif plan.backend in CV2_FILL_BACKENDS:
+    elif plan.backend in REGISTRY_FILL_BACKENDS:
         assert raster is not None
         assert dest is not None
         backend = _resolve_fill_backend(plan.backend)
@@ -1073,7 +1074,7 @@ def remove_visible(
             Action(
                 act.ActionCode.INPAINT,
                 act.Effect.CHANGE,
-                f"OpenCV {plan.backend} inpaint + stdlib restore outside mask",
+                f"{plan.backend} inpaint + stdlib restore outside mask",
                 {"backend": plan.backend},
             )
         )
