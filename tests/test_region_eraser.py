@@ -475,7 +475,7 @@ class TestWeightRevisionsArePinned:
 
         def fake_download(**kwargs):
             calls.append(kwargs)
-            return "/tmp/stage8-fake-model.onnx"
+            return "/fake-hub-cache/stage8-fake-model.onnx"
 
         fake_hub = types.ModuleType("huggingface_hub")
         fake_hub.hf_hub_download = fake_download  # type: ignore[attr-defined]
