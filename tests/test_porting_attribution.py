@@ -28,9 +28,7 @@ def test_porting_docs_define_the_provenance_header_convention() -> None:
     so a redistributor can trace every ported line without reading history.
     """
     contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
-    marker = (
-        "Ported from wiltodelta/remove-ai-watermarks <path>, Apache-2.0; modified: <what>"
-    )
+    marker = "Ported from wiltodelta/remove-ai-watermarks <path>, Apache-2.0; modified: <what>"
     assert marker in contributing, (
         "CONTRIBUTING.md must document the per-file provenance header convention"
     )

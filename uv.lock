@@ -1779,6 +1779,13 @@ all = [
     { name = "torch" },
     { name = "torchvision" },
 ]
+pixel = [
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
+    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "opencv-python-headless" },
+    { name = "pillow" },
+]
 provenance = [
     { name = "c2pa-python" },
 ]
@@ -1797,8 +1804,11 @@ visible = [
 [package.metadata]
 requires-dist = [
     { name = "c2pa-python", marker = "extra == 'provenance'" },
+    { name = "numpy", marker = "extra == 'pixel'" },
     { name = "numpy", marker = "extra == 'visible'" },
+    { name = "opencv-python-headless", marker = "extra == 'pixel'" },
     { name = "opencv-python-headless", marker = "extra == 'visible'" },
+    { name = "pillow", marker = "extra == 'pixel'" },
     { name = "pillow", marker = "extra == 'visible'" },
     { name = "scikit-image", marker = "extra == 'quality'" },
     { name = "torch", marker = "extra == 'ai'" },
@@ -1808,4 +1818,4 @@ requires-dist = [
     { name = "watermark-remover", extras = ["quality"], marker = "extra == 'all'" },
     { name = "watermark-remover", extras = ["visible"], marker = "extra == 'all'" },
 ]
-provides-extras = ["visible", "quality", "ai", "provenance", "all"]
+provides-extras = ["visible", "pixel", "quality", "ai", "provenance", "all"]

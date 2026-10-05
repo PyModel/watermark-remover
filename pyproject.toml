@@ -47,6 +47,14 @@ visible = [
     "Pillow",
     "opencv-python-headless",
 ]
+# The `pixel` extra is the declared home for pixel-tier work (numpy, headless
+# OpenCV, Pillow); `visible` remains a working superset alias.  See NOTICE and
+# CONTRIBUTING.md for the porting provenance this extra backs.
+pixel = [
+    "numpy",
+    "opencv-python-headless",
+    "Pillow",
+]
 quality = [
     "scikit-image",
 ]

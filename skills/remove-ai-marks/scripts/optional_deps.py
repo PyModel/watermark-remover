@@ -58,29 +58,34 @@ class BackendAvailability:
 def check_optional(extra: str) -> BackendAvailability:
     """Return availability for a single named extra.
 
-    Dispatches to *_EXTRAS dicts defined below.
+    Dispatches to *_EXTRAS dicts defined below.  An extra may probe several
+    modules; it is available only when every probed module imports.
     """
-    _checkers: dict[str, str] = {
-        "visible": "cv2",
-        "quality": "skimage",
-        "ai": "torch",
-        "provenance": "c2pa",
+    _checkers: dict[str, tuple[str, ...]] = {
+        "visible": ("cv2",),
+        "quality": ("skimage",),
+        "ai": ("torch",),
+        "provenance": ("c2pa",),
+        # The pixel extra (numpy + headless OpenCV + Pillow) is the declared
+        # home for pixel-tier work; `visible` stays its superset alias.
+        "pixel": ("numpy", "cv2", "PIL"),
     }
-    pkg = _checkers.get(extra)
-    if pkg is None:
+    pkgs = _checkers.get(extra)
+    if pkgs is None:
         return BackendAvailability(
             available=False,
             extra=extra,
             reason=f"unknown extra: {extra}",
         )
-    try:
-        importlib.import_module(pkg)
-    except Exception as exc:
-        return BackendAvailability(
-            available=False,
-            extra=extra,
-            reason=str(exc).split("\n")[0][:120],
-        )
+    for pkg in pkgs:
+        try:
+            importlib.import_module(pkg)
+        except Exception as exc:
+            return BackendAvailability(
+                available=False,
+                extra=extra,
+                reason=str(exc).split("\n")[0][:120],
+            )
     return BackendAvailability(available=True, extra=extra)
 
 
@@ -105,8 +110,12 @@ def has_provenance() -> bool:
     return check_optional("provenance").available
 
 
+def has_pixel() -> bool:
+    return check_optional("pixel").available
+
+
 #: Every extra `check_optional` knows about, for capability reporting.
-KNOWN_EXTRAS = ("visible", "quality", "ai", "provenance")
+KNOWN_EXTRAS = ("visible", "quality", "ai", "provenance", "pixel")
 
 
 def extras_status() -> dict[str, dict[str, object]]:
