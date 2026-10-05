@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -10,7 +11,7 @@ from pathlib import Path
 
 import morphomod
 import pytest
-from morphomod import Raster, VisiblePlan, encode_png, remove_visible, write_pgm
+from morphomod import Raster, VisiblePlan, box_mask, decode_png, encode_png, remove_visible, write_pgm
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills" / "remove-ai-marks" / "scripts"
 CLEAN_FILE = SCRIPTS / "clean_file.py"
@@ -255,3 +256,162 @@ def test_audit_custom_path(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert audit.is_file()
     assert json.loads(audit.read_text(encoding="utf-8"))["output"] == str(dest)
+
+
+# ---------------------------------------------------------------------------
+# cv2 fill backends at the wm CLI seam (ticket 02)
+# ---------------------------------------------------------------------------
+
+
+def _write_stub_opencv(directory: Path) -> None:
+    """Ship importable stub cv2/numpy modules for the wm subprocess.
+
+    Same trick as test_stability_server.py's stub cv2: the child resolves
+    them through PYTHONPATH, so the test exercises the real import path —
+    'OpenCV importable' — without the wheel in the pooled venv.  The stub
+    inpaint fills each marked pixel from its nearest unmasked row neighbour.
+    """
+    (directory / "numpy.py").write_text(
+        "\n".join(
+            [
+                "uint8 = 'uint8'",
+                "",
+                "class _Array:",
+                "    def __init__(self, data, shape):",
+                "        self._data = bytes(data)",
+                "        self.shape = tuple(shape)",
+                "",
+                "    def reshape(self, *shape):",
+                "        return _Array(self._data, tuple(shape))",
+                "",
+                "    def tobytes(self):",
+                "        return self._data",
+                "",
+                "def frombuffer(data, dtype=None):",
+                "    return _Array(data, (len(data),))",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (directory / "cv2.py").write_text(
+        "\n".join(
+            [
+                "INPAINT_TELEA = 1",
+                "INPAINT_NS = 2",
+                "",
+                "def inpaint(src, mask, radius, flags):",
+                "    width = src.shape[1]",
+                "    channels = src.shape[2]",
+                "    data = bytearray(src._data)",
+                "    marks = mask._data",
+                "    for index, value in enumerate(marks):",
+                "        if not value:",
+                "            continue",
+                "        row_start = (index // width) * width",
+                "        replacement = bytes(channels)",
+                "        for neighbour in (*range(index - 1, row_start - 1, -1),",
+                "                          *range(index + 1, row_start + width)):",
+                "            if not marks[neighbour]:",
+                "                replacement = data[neighbour * channels:(neighbour + 1) * channels]",
+                "                break",
+                "        data[index * channels:(index + 1) * channels] = replacement",
+                "    return type(src)(bytes(data), src.shape)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize("backend", ["cv2-telea", "cv2-ns"])
+def test_clean_file_cv2_backend_end_to_end_with_stub_opencv(
+    tmp_path: Path, backend: str
+) -> None:
+    stubs = tmp_path / "opencv-stubs"
+    stubs.mkdir()
+    _write_stub_opencv(stubs)
+    width = height = 16
+    background = bytearray([9, 8, 7] * width * height)
+    marked = bytearray(background)
+    index = (7 * width + 7) * 3  # single white pixel at (7, 7)
+    marked[index : index + 3] = b"\xff\xff\xff"
+    src = tmp_path / "input.png"
+    src.write_bytes(encode_png(Raster(width, height, 3, marked)))
+    mask = tmp_path / "mask.pgm"
+    write_pgm(box_mask(width, height, (7, 7, 1, 1)), mask)
+    dest = tmp_path / "cleaned.png"
+    env = {**os.environ, "PYTHONPATH": str(stubs)}
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(CLEAN_FILE),
+            str(src),
+            "-o",
+            str(dest),
+            "--visible-mask",
+            str(mask),
+            "--dilate",
+            "0",
+            "--visible-backend",
+            backend,
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["visible"]["status"] == "completed"
+    assert report["visible"]["backend"] == backend
+    # The filled output verifies: every pixel outside the effective mask is
+    # preserved, and the marked pixel was filled from the background.
+    assert report["verification"]["outside_mask_preserved"] is True
+    assert decode_png(dest.read_bytes()).data == background
+
+
+def test_clean_file_cv2_backend_fails_soft_without_opencv(tmp_path: Path) -> None:
+    src = tmp_path / "input.png"
+    src.write_bytes(encode_png(Raster(16, 16, 3, bytearray([9, 8, 7] * 256))))
+    mask = tmp_path / "mask.pgm"
+    write_pgm(box_mask(16, 16, (7, 7, 1, 1)), mask)
+    dest = tmp_path / "cleaned.png"
+
+    result = _run(
+        str(src),
+        "-o",
+        str(dest),
+        "--visible-mask",
+        str(mask),
+        "--dilate",
+        "0",
+        "--visible-backend",
+        "cv2-telea",
+    )
+
+    # The flag parses (choices widened); the failure is the labeled
+    # unavailability on the normal runtime error path — exit code unchanged
+    # (FAILED -> 1), install hint in stderr, no output written.
+    assert result.returncode == 1
+    assert "invalid choice" not in result.stderr
+    assert "watermark-remover[visible]" in result.stderr
+    assert not dest.exists()
+
+    # Default backends still run unchanged in the same OpenCV-less environment.
+    simple_dest = tmp_path / "simple.png"
+    ok = _run(
+        str(src),
+        "-o",
+        str(simple_dest),
+        "--visible-mask",
+        str(mask),
+        "--dilate",
+        "0",
+        "--visible-backend",
+        "simple",
+        "--json",
+    )
+    assert ok.returncode == 0, ok.stderr
+    assert json.loads(ok.stdout)["visible"]["status"] == "completed"

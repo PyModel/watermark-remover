@@ -237,3 +237,15 @@ def test_bootstrap_registers_cv2_backends_when_opencv_present(
 
     assert "cv2-telea" in names
     assert "cv2-ns" in names
+
+
+def test_bootstrap_excludes_cv2_backends_without_opencv(
+    monkeypatch: pytest.MonkeyPatch, fresh_registry
+) -> None:
+    # Forced-absent regardless of the ambient environment: the incumbent
+    # pair must stay intact and no half-registered cv2 backend may appear.
+    monkeypatch.setattr(optional_deps, "cv2", None)
+
+    names = [backend.name for backend in fresh_registry.get_backends()]
+
+    assert names == ["texture-patch", "simple"]

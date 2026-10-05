@@ -10,6 +10,7 @@ import sys
 import zlib
 from pathlib import Path
 
+import optional_deps
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -808,3 +809,31 @@ def test_remove_visible_cv2_backend_fills_mark_and_preserves_outside_mask(
     # The stub fills the marked pixel from its only neighbour, so the filled
     # output equals the untouched background everywhere — outside-mask kept.
     assert decode_png(dest.read_bytes()).data == background
+
+
+@pytest.mark.parametrize("backend", ["cv2-telea", "cv2-ns"])
+def test_remove_visible_cv2_backend_fails_soft_without_opencv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_backend_registry,
+    backend: str,
+) -> None:
+    # No OpenCV anywhere (the pooled venv never installs it): the registry
+    # holds only the incumbent backends, so the selection must fail soft with
+    # the labeled install hint instead of a traceback or a silent fallback.
+    monkeypatch.setattr(optional_deps, "cv2", None)
+    src = tmp_path / "input.png"
+    src.write_bytes(encode_png(Raster(4, 4, 3, bytearray([9, 8, 7] * 16))))
+    mask = tmp_path / "mask.pgm"
+    write_pgm(box_mask(4, 4, (1, 1, 1, 1)), mask)
+    dest = tmp_path / "cleaned.png"
+
+    with pytest.raises(ValueError, match="unavailable") as exc_info:
+        remove_visible(
+            src,
+            dest,
+            VisiblePlan(mask_path=mask, backend=backend, dilation_radius=0),
+        )
+
+    assert "watermark-remover[visible]" in str(exc_info.value)
+    assert not dest.exists()
