@@ -287,7 +287,6 @@ def collect_provenance_record(
         schema_version, contract="provenance record", supported=(PROVENANCE_RECORD_SCHEMA_VERSION,)
     )
     path = Path(path)
-    issues: list[dict[str, str]] = []
     try:
         kind = force_kind or classify_asset(path)
     except OSError as error:
@@ -307,20 +306,18 @@ def collect_provenance_record(
         try:
             record["evidence"] = _container_evidence(path)
         except Exception:
+            record["status"] = "partial"
             record["issues"].append({"stage": "container", "code": "collection-failed"})
             record["evidence"] = dict(_EMPTY_EVIDENCE)
         return record
 
-    data = b""
     try:
         data = read_bytes_bounded(path, MAX_INPUT_BYTES, label="provenance record source")
-    except (OSError, ValueError) as error:
-        issues.append({"stage": "read", "code": "read-failed"})
+    except (OSError, ValueError):
         record = _base_record(path, schema_version, kind)
         record["status"] = "error"
-        record["issues"] = issues
+        record["issues"] = [{"stage": "read", "code": "read-failed"}]
         record["evidence"] = dict(_EMPTY_EVIDENCE)
-        del error
         return record
 
     from image_meta import detect_format
@@ -330,6 +327,7 @@ def collect_provenance_record(
     try:
         record["evidence"] = _image_evidence(path, data, container)
     except Exception:
+        record["status"] = "partial"
         record["issues"].append({"stage": "image", "code": "collection-failed"})
         record["evidence"] = dict(_EMPTY_EVIDENCE)
     return record

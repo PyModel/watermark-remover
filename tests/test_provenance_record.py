@@ -147,3 +147,17 @@ class TestStableRejections:
         assert record["container"] == "text"
         assert record["status"] == "complete"
         assert record["evidence"]["has_ai_metadata"] is False
+
+    def test_inspector_failure_is_a_partial_record_not_a_crash(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import image_meta
+
+        def _explode(_data: object) -> object:
+            raise RuntimeError("malformed container")
+
+        monkeypatch.setattr(image_meta, "inspect_jpeg", _explode)
+        record = collect_provenance_record(FIXTURES / "tc260_labeled.jpg")
+        assert record["status"] == "partial"
+        assert record["issues"] == [{"stage": "image", "code": "collection-failed"}]
+        assert record["evidence"]["findings"] == []
