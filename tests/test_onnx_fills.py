@@ -415,3 +415,63 @@ class TestDownloadBoundary:
         assert downloads == [1], "one download"
         assert len(constructed) == 1, "one session"
         assert constructed[0][1] == ["CPUExecutionProvider"], "CPU-only providers"
+
+
+class TestExtrasStatus:
+    """The extras-status seam: migan/lama join KNOWN_EXTRAS and the
+    /capabilities data (both flow through optional_deps)."""
+
+    def test_migan_and_lama_are_known_extras(self) -> None:
+        import optional_deps
+
+        assert "migan" in optional_deps.KNOWN_EXTRAS
+        assert "lama" in optional_deps.KNOWN_EXTRAS
+
+    @pytest.mark.parametrize("extra", ["migan", "lama"])
+    def test_check_optional_probes_both_required_modules(self, monkeypatch, extra) -> None:
+        import optional_deps
+
+        probed: list[str] = []
+
+        def fake_import(name: str):
+            probed.append(name)
+            if name in ("onnxruntime", "huggingface_hub"):
+                return object()
+            return real_import(name)
+
+        real_import = importlib.import_module
+        monkeypatch.setattr(importlib, "import_module", fake_import)
+
+        result = optional_deps.check_optional(extra)
+
+        assert result.available is True
+        assert "onnxruntime" in probed
+        assert "huggingface_hub" in probed
+
+    @pytest.mark.parametrize("extra", ["migan", "lama"])
+    def test_missing_dependency_reports_install_hint(self, monkeypatch, extra) -> None:
+        import optional_deps
+
+        def missing(name: str):
+            raise ImportError(f"No module named '{name}'")
+
+        monkeypatch.setattr(importlib, "import_module", missing)
+
+        result = optional_deps.check_optional(extra)
+
+        assert result.available is False
+        assert "unknown extra" not in result.reason
+        assert f"Install watermark-remover[{extra}]" in result.hint
+
+    def test_extras_status_and_capabilities_list_both(self) -> None:
+        import optional_deps
+        import server
+
+        status = optional_deps.extras_status()
+        assert "migan" in status
+        assert "lama" in status
+        assert set(status["migan"]) == {"available", "hint"}
+
+        extras = server.capabilities()["extras"]
+        assert "migan" in extras
+        assert "lama" in extras
