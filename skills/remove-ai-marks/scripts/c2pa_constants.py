@@ -393,6 +393,13 @@ def decode_cbor_texts(
             ):
                 return CborScanResult("rejected", _CBOR_REASONS["text_budget"], ())
             cursor += argument
+        elif major == 6:  # tag: wraps exactly one tagged item
+            if len(stack) + 1 > max_depth:
+                return CborScanResult("rejected", _CBOR_REASONS["depth"], ())
+            if stack:
+                stack[-1] -= 1
+            stack.append(1)
+            continue
         else:  # major 4 (array) / major 5 (map)
             if len(stack) + 1 > max_depth:
                 return CborScanResult("rejected", _CBOR_REASONS["depth"], ())

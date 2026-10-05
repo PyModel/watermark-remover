@@ -184,6 +184,24 @@ def test_cbor_nested_containers_decode():
     assert list(result.texts) == ["inner", "outer"]
 
 
+def test_cbor_tag_wraps_exactly_one_item():
+    from c2pa_constants import decode_cbor_texts
+
+    payload = b"\xc6" + _cbor_text("abc")  # tag(6) wrapping a single text string
+    result = decode_cbor_texts(payload)
+    assert result.status == "ok" and result.reason is None
+    assert list(result.texts) == ["abc"]
+
+
+def test_cbor_malformed_tag_payload_is_stable_rejection():
+    from c2pa_constants import decode_cbor_texts
+
+    result = decode_cbor_texts(b"\xc6\x63ab")  # tag wrapping a truncated text string
+    assert result.status == "rejected"
+    assert result.reason is not None and "truncat" in result.reason.lower()
+    assert result.texts == ()
+
+
 def test_cbor_truncated_payload_is_stable_rejection():
     from c2pa_constants import decode_cbor_texts
 
