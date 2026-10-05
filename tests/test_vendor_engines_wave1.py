@@ -39,6 +39,8 @@ from jimeng_engine import _template_match_score as _jimeng_score
 from kling_engine import _LATIN_CONFIG, KlingEngine
 from kling_engine import _glyph_silhouette as _kling_silhouette
 from numpy.typing import NDArray
+from pill_engine import _DETECT_THRESHOLD as _PILL_GATE
+from pill_engine import PillEngine
 from qwen_engine import QwenEngine
 from qwen_engine import _glyph_silhouette as _qwen_silhouette
 from region_eraser import erase as erase_mask
@@ -955,3 +957,120 @@ class TestGenericAiLabelEngine:
         bgra = np.zeros((2048, 2048, 4), np.uint8)
         mask = eng.footprint_mask(bgra, force=True)
         assert mask is None or mask.shape == (2048, 2048)
+
+
+class TestPillEngine:
+    """Vectors adapted from upstream test_pill_engine.py.
+
+    The outline fixture composites the shipped synthetic pill silhouette (upstream
+    drew the pill with PIL + a system font; the shipped asset is the same pill
+    class rendered by render_pill_silhouette.py).
+    """
+
+    def _compose_pill(self, w: int = 1200, h: int = 1600, bg: int = 150, alpha: float = 0.7):
+        """Composite the shipped pill silhouette top-left at its measured geometry."""
+        # _compose_mark anchors bottom-right, so the TOP-left pill is expressed by
+        # inverting: margin_bottom = h/base - top_margin - gh/base.
+        return _compose_mark(
+            "jimeng_pill.png",
+            w,
+            h,
+            width_frac=0.161,
+            aspect=160 / 320,
+            bg=float(bg),
+            alpha=alpha,
+            basis="width",
+            margin_right=1.0 - 0.03 - 0.161,  # left margin 0.03 of width
+            margin_bottom=(h - 0.02 * w) / w - 0.161 * 0.5,  # top margin 0.02 of width
+        )
+
+    def test_detects_composited_pill(self):
+        pill, _box = self._compose_pill()
+        det = PillEngine().detect(pill)
+        assert det.detected
+        assert det.confidence >= _PILL_GATE
+
+    def test_clean_frame_does_not_fire(self):
+        clean = np.full((1600, 1200, 3), 150, np.uint8)
+        assert not PillEngine().detect(clean).detected
+
+    def test_small_image_no_fire(self):
+        assert not PillEngine().detect(np.full((40, 40, 3), 150, np.uint8)).detected
+
+    def test_detect_bgra_no_crash(self):
+        # A 4-channel BGRA array must be normalized, not crash cv2.cvtColor.
+        bgra = np.zeros((256, 256, 4), np.uint8)
+        det = PillEngine().detect(bgra)
+        assert det.detected in (True, False)
+        assert PillEngine().footprint_texture(bgra) >= 0.0
+
+    def test_footprint_mask_top_left_geometry(self):
+        mask = PillEngine().footprint_mask(np.full((1600, 1200, 3), 150, np.uint8))
+        assert mask is not None
+        assert mask.shape == (1600, 1200)
+        assert mask.any()
+        ys, xs = np.where(mask > 0)
+        # the fixed pill footprint sits top-left: mask mass in the top-left quadrant
+        assert ys.mean() < 800
+        assert xs.mean() < 600
+
+    def test_flat_frame_is_flat(self):
+        assert PillEngine().footprint_is_flat(np.full((1600, 1200, 3), 150, np.uint8))
+
+    def test_textured_frame_is_not_flat(self):
+        """The metadata-only arm removes the pill only where inpainting is safe:
+        median-Sobel texture over the footprint must read as TEXTURED."""
+        eng = PillEngine()
+        w, h = 1200, 1600
+        img = np.full((h, w, 3), 150, np.uint8)
+        fx, fy = int(0.012 * w), int(0.006 * h)
+        fw, fh = int(0.205 * w), int(0.115 * w)
+        yy, xx = np.mgrid[fy : fy + fh, fx : fx + fw]
+        checker = ((((xx // 3) + (yy // 3)) % 2) * 255).astype(np.uint8)
+        img[fy : fy + fh, fx : fx + fw] = checker[:, :, None]
+        assert not eng.footprint_is_flat(img)
+        assert eng.footprint_texture(img) > 6.0
+
+    def test_label_arm_requires_jimeng_provenance(self):
+        """The solid-label arm (contrast front-end) only scans under Jimeng
+        provenance: without it the verified-label path never fires on a bare
+        label composite; with it the label is detected and verified."""
+        label, _ = _compose_mark(
+            "jimeng_label_alpha.png",
+            2048,
+            2048,
+            width_frac=0.14,
+            aspect=128 / 353,
+            bg=170.0,
+            basis="width",
+            margin_right=1.0 - 0.012 - 0.14,  # left margin 0.012 of width
+            margin_bottom=1.0 - 0.02 - 0.14 * (128 / 353),  # top margin 0.02 of height
+        )
+        eng = PillEngine()
+        strict = eng.detect(label)
+        assert not strict.verified_label
+        relaxed = eng.detect(label, provenance=True)
+        assert relaxed.detected
+        assert relaxed.verified_label
+
+    def test_verified_label_footprint_uses_detector_box_with_pads(self):
+        label, (ax, ay, gw, gh) = _compose_mark(
+            "jimeng_label_alpha.png",
+            2048,
+            2048,
+            width_frac=0.14,
+            aspect=128 / 353,
+            bg=170.0,
+            basis="width",
+            margin_right=1.0 - 0.012 - 0.14,
+            margin_bottom=1.0 - 0.02 - 0.14 * (128 / 353),
+        )
+        eng = PillEngine()
+        det = eng.detect(label, provenance=True)
+        assert det.detected and det.verified_label
+        mask = eng.footprint_mask(label, detection=det)
+        assert mask is not None
+        ys, xs = np.where(mask > 0)
+        # the padded detector box covers the label with margin on every side
+        assert xs.min() < ax and xs.max() > ax + gw
+        assert ys.min() < ay and ys.max() > ay + gh
