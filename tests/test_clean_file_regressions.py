@@ -728,7 +728,9 @@ def test_mark_auto_reports_the_actual_fill_backend_not_the_planned_one(tmp_path:
     assert visible["backend"] == visible["marks"][0]["backend"]
 
 
-def test_mark_auto_with_external_backend_reports_the_registry_fill_and_warns(tmp_path: Path) -> None:
+def test_mark_auto_with_external_backend_reports_the_registry_fill_and_warns(
+    tmp_path: Path,
+) -> None:
     """F3: `--visible-backend external` cannot drive a registry mark fill (the
     external command template has no place in the localize->fill->validate
     pass), so the report must name the registry backend that actually ran and
