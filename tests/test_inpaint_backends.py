@@ -361,7 +361,12 @@ class TestResolveBackend:
     def test_auto_skips_registered_but_unavailable_lama(
         self, monkeypatch: pytest.MonkeyPatch, fresh_registry
     ) -> None:
+        # Forced learned-absent: with onnxruntime installed the bootstrap also
+        # registers the REAL learned tiers, and an available migan would win
+        # auto before cv2-telea. The gates off pin the skip-an-unavailable-
+        # lama premise this test exists for.
         _install_stub_opencv(monkeypatch)
+        _force_learned_absent(monkeypatch)
         fresh_registry.register_backend(_FakeLearnedBackend("lama", False))
 
         assert fresh_registry.resolve_backend("auto").name == "cv2-telea"
