@@ -1460,3 +1460,30 @@ class TestFillOrderSingleSource:
         with caplog.at_level(logging.WARNING):
             assert reg.preferred_inpaint_backend() == "cv2"
         assert any("cv2 classical inpaint" in r.message for r in caplog.records)
+
+
+class TestPillWrappersAreDerived:
+    """F11 (stage 8 fix pass 2): the jimeng_pill adapters are the shared wrapper
+    helpers specialized to the pill key -- no duplicate wrapper bodies."""
+
+    def test_no_duplicate_pill_wrapper_defs(self):
+        source = (SCRIPTS / "watermark_registry.py").read_text(encoding="utf-8")
+        for name in ("_pill_detect", "_pill_detect_both", "_pill_mask"):
+            assert f"def {name}(" not in source, f"{name} duplicates the shared wrapper helper"
+
+    def test_pill_wrappers_behave_like_the_shared_helpers(self):
+        import numpy as np
+
+        image = np.zeros((256, 256, 3), np.uint8)
+        detect = reg._engine_mark_detect("jimeng_pill", "Jimeng AI生成 pill", "top-left")
+        detect_both = reg._engine_mark_detect_both("jimeng_pill", "Jimeng AI生成 pill", "top-left")
+        mask = reg._engine_mark_mask("jimeng_pill")
+
+        assert reg._pill_detect(image) == detect(image)
+        assert reg._pill_detect_both(image) == detect_both(image)
+        assert reg._pill_features(image) == {"footprint_flat": 1.0}
+        built_mask = mask(image, force=True)
+        pill_mask = reg._pill_mask(image, force=True)
+        assert (built_mask is None) == (pill_mask is None)
+        if built_mask is not None:
+            assert np.array_equal(built_mask, pill_mask)

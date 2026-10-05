@@ -599,41 +599,12 @@ def _text_mark(
 
 
 # ── Jimeng-basic "AI生成" pill or solid label (top-left) ──
-def _pill_detect(image: NDArray[Any], *, provenance: bool = False) -> MarkDetection:
-    d = _engine("jimeng_pill").detect(image, provenance=provenance)
-    return MarkDetection(
-        "jimeng_pill",
-        "Jimeng AI生成 pill",
-        "top-left",
-        d.detected,
-        d.confidence,
-        d.region,
-        engine_detection=d,
-    )
-
-
-def _pill_detect_both(image: NDArray[Any]) -> tuple[MarkDetection, MarkDetection]:
-    strict, relaxed = _engine("jimeng_pill").detect_both(image)
-
-    def wrap(detection: Any) -> MarkDetection:
-        return MarkDetection(
-            "jimeng_pill",
-            "Jimeng AI生成 pill",
-            "top-left",
-            detection.detected,
-            detection.confidence,
-            detection.region,
-            engine_detection=detection,
-        )
-
-    return wrap(strict), wrap(relaxed)
-
-
-def _pill_mask(
-    image: NDArray[Any], *, force: bool = False, detection: MarkDetection | None = None
-) -> NDArray[Any] | None:
-    engine_detection = detection.engine_detection if detection is not None else None
-    return _engine("jimeng_pill").footprint_mask(image, force=force, detection=engine_detection)
+# The pill's adapters are the shared wrapper helpers specialized to the pill's
+# key/label/location -- no duplicate wrapper bodies (F11). Only the features
+# probe is pill-specific.
+_pill_detect = _engine_mark_detect("jimeng_pill", "Jimeng AI生成 pill", "top-left")
+_pill_detect_both = _engine_mark_detect_both("jimeng_pill", "Jimeng AI生成 pill", "top-left")
+_pill_mask = _engine_mark_mask("jimeng_pill")
 
 
 def _pill_features(image: NDArray[Any]) -> dict[str, float]:
