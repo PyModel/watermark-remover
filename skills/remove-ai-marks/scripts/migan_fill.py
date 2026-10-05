@@ -181,7 +181,26 @@ def get_migan_backends() -> list[MiganFillBackend]:
 
 
 def _download_model() -> str:
-    raise NotImplementedError("download seam is wired in ticket 04")
+    """hf_hub_download pinned to the audited commit; fails soft with next steps.
+
+    No local_dir/cache_dir is passed: the model lands in the Hugging Face
+    cache (``HF_HOME``/``~/.cache/huggingface``), never inside this
+    repository.
+    """
+    from huggingface_hub import hf_hub_download
+
+    try:
+        return hf_hub_download(repo_id=_MODEL_REPO, filename=_MODEL_FILE, revision=_MODEL_REVISION)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Downloading the {_MODEL_LABEL} model "
+            f"(https://huggingface.co/{_MODEL_REPO} / {_MODEL_FILE} @ "
+            f"{_MODEL_REVISION[:12]}) failed: {exc}. The model downloads on "
+            "first use into the Hugging Face cache (set HF_HOME to relocate "
+            "it); check network access and free disk space, then retry. "
+            "Nothing is bundled with the package, and nothing was written "
+            "inside the installation directory."
+        ) from exc
 
 
 def _load_session() -> Any:

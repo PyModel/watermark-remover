@@ -12,6 +12,8 @@ downloads in the default suite.
 from __future__ import annotations
 
 import importlib
+import sys
+import types
 from types import SimpleNamespace
 
 import numpy as np
@@ -329,3 +331,87 @@ class TestInpaintThroughFakeSession:
             full.data[:] = bytes([255]) * 32 * 32
             with pytest.raises(ValueError, match="entire image"):
                 backend.inpaint(InpaintRequest(source=raster, mask=full))
+
+
+class TestDownloadBoundary:
+    """Tier-1 download controls: pinned revisions, fail-soft, no repo writes.
+
+    huggingface_hub is shadowed by a stub module (the sys.modules prior art)
+    so these run hermetically -- no network, no real hub package.
+    """
+
+    @staticmethod
+    def _install_stub_hf(monkeypatch: pytest.MonkeyPatch, hf_hub_download) -> list[dict]:
+        calls: list[dict] = []
+
+        def capturer(**kwargs):
+            calls.append(kwargs)
+            return "hf-cache/fake/model.onnx"
+
+        stub = types.ModuleType("huggingface_hub")
+        stub.hf_hub_download = hf_hub_download or capturer
+        monkeypatch.setitem(sys.modules, "huggingface_hub", stub)
+        return calls
+
+    @pytest.mark.parametrize(("module_name", "attr"), [(t[0], "_MODEL_REVISION") for t in _TIERS])
+    def test_download_pins_repo_file_and_revision(
+        self, monkeypatch, fill_modules, module_name, attr
+    ) -> None:
+        module = importlib.import_module(module_name)
+        calls = self._install_stub_hf(monkeypatch, None)
+
+        assert module._download_model() == "hf-cache/fake/model.onnx"
+
+        (call,) = calls
+        assert call["repo_id"] == module._MODEL_REPO
+        assert call["filename"] == module._MODEL_FILE
+        assert call["revision"] == getattr(module, attr)
+        assert len(call["revision"]) == 40, "full commit sha, not a branch/tag"
+        # "Downloads never write inside the repo": no local_dir/cache_dir is
+        # passed -- the target stays the Hugging Face cache's to decide.
+        assert "local_dir" not in call
+        assert "cache_dir" not in call
+
+    @pytest.mark.parametrize("module_name", [t[0] for t in _TIERS])
+    def test_download_failure_fails_soft_with_actionable_message(
+        self, monkeypatch, fill_modules, module_name
+    ) -> None:
+        module = importlib.import_module(module_name)
+
+        def broken(**kwargs):
+            raise ConnectionError("no route to host")
+
+        self._install_stub_hf(monkeypatch, broken)
+
+        with pytest.raises(RuntimeError, match=r"network|cache") as excinfo:
+            module._download_model()
+        assert "huggingface.co" in str(excinfo.value), "names the source repo"
+        assert isinstance(excinfo.value.__cause__, ConnectionError), "cause preserved"
+
+    @pytest.mark.parametrize("module_name", [t[0] for t in _TIERS])
+    def test_session_loads_once_and_is_cached(self, monkeypatch, fill_modules, module_name) -> None:
+        module = importlib.import_module(module_name)
+        downloads: list[int] = []
+        constructed: list[int] = []
+
+        def fake_download() -> str:
+            downloads.append(1)
+            return "hf-cache/fake/model.onnx"
+
+        class _StubOrt:
+            @staticmethod
+            def InferenceSession(path, providers=None):
+                constructed.append((path, providers))
+                return object()
+
+        self._install_stub_hf(monkeypatch, None)
+        monkeypatch.setattr(module, "_download_model", fake_download)
+        monkeypatch.setitem(sys.modules, "onnxruntime", _StubOrt)
+
+        first = module._load_session()
+        second = module._load_session()
+
+        assert first is second
+        assert downloads == [1], "one download"
+        assert len(constructed) == 1, "one session"
+        assert constructed[0][1] == ["CPUExecutionProvider"], "CPU-only providers"
