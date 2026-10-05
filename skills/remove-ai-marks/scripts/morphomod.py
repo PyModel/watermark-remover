@@ -42,6 +42,7 @@ from common import (
     read_bytes_bounded,
     validate_output_path,
 )
+from domain_types import InpaintRequest
 from image_meta import detect_format
 from pipeline_actions import Action, report_actions
 from png_chunks import iter_png_chunks
@@ -55,8 +56,10 @@ MAX_COMMAND_DIAGNOSTIC_BYTES = 64 * 1024
 EXTERNAL_COMMAND_TIMEOUT_SECONDS = 1800
 PNG_SIG = b"\x89PNG\r\n\x1a\n"
 
-VISIBLE_BACKENDS = ("print-plan", "texture", "simple", "external")
-VISIBLE_CLEAN_BACKENDS = ("texture", "simple", "external")
+VISIBLE_BACKENDS = ("print-plan", "texture", "simple", "external", "cv2-telea", "cv2-ns")
+VISIBLE_CLEAN_BACKENDS = ("texture", "simple", "external", "cv2-telea", "cv2-ns")
+#: Fill backends resolved through the inpaint backend registry (OpenCV-backed).
+CV2_FILL_BACKENDS = ("cv2-telea", "cv2-ns")
 
 
 @dataclass(frozen=True, slots=True)
@@ -920,6 +923,30 @@ def _validate_visible_paths(
         raise ValueError("image output and mask output alias each other")
 
 
+def _resolve_fill_backend(name: str) -> Any:
+    """Resolve a registered fill backend by name; fail soft when unavailable.
+
+    The registry is the single source of selectable fill backends: a cv2
+    backend registers only when OpenCV imports, so an unregistered selection
+    is an availability problem, not a crash.  The labeled error carries the
+    canonical install hint and leaves the exit contract to the caller.
+    """
+    import inpaint_backends
+    import optional_deps
+
+    for backend in inpaint_backends.get_backends():
+        if backend.name == name:
+            if backend.available:
+                return backend
+            break
+    hint = optional_deps.BackendAvailability(
+        available=False,
+        extra="visible",
+        reason="OpenCV (cv2) is not installed",
+    ).hint
+    raise ValueError(f"{name} backend is unavailable. {hint}")
+
+
 def remove_visible(
     path: Path,
     dest: Path | None,
@@ -1034,6 +1061,22 @@ def remove_visible(
         atomic_write_bytes(dest, encode_png(restored))
         status, output = "completed", str(dest)
         actions.append(act.inpaint_simple())
+    elif plan.backend in CV2_FILL_BACKENDS:
+        assert raster is not None
+        assert dest is not None
+        backend = _resolve_fill_backend(plan.backend)
+        result = backend.inpaint(InpaintRequest(source=raster, mask=refined))
+        restored = composite(raster, result.inpainted, refined)
+        atomic_write_bytes(dest, encode_png(restored))
+        status, output = "completed", str(dest)
+        actions.append(
+            Action(
+                act.ActionCode.INPAINT,
+                act.Effect.CHANGE,
+                f"OpenCV {plan.backend} inpaint + stdlib restore outside mask",
+                {"backend": plan.backend},
+            )
+        )
     else:
         assert plan.backend == "external"
         assert plan.command is not None
