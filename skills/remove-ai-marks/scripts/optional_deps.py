@@ -69,6 +69,10 @@ def check_optional(extra: str) -> BackendAvailability:
         # The pixel extra (numpy + headless OpenCV + Pillow) is the declared
         # home for pixel-tier work; `visible` stays its superset alias.
         "pixel": ("numpy", "cv2", "PIL"),
+        # The learned ONNX inpaint tiers (region_eraser): inference runtime plus
+        # the hub client that fetches the model on first use.
+        "migan": ("onnxruntime", "huggingface_hub"),
+        "lama": ("onnxruntime", "huggingface_hub"),
     }
     pkgs = _checkers.get(extra)
     if pkgs is None:
@@ -115,7 +119,7 @@ def has_pixel() -> bool:
 
 
 #: Every extra `check_optional` knows about, for capability reporting.
-KNOWN_EXTRAS = ("visible", "quality", "ai", "provenance", "pixel")
+KNOWN_EXTRAS = ("visible", "quality", "ai", "provenance", "pixel", "migan", "lama")
 
 
 def extras_status() -> dict[str, dict[str, object]]:

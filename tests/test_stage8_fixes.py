@@ -90,3 +90,34 @@ class TestF1MarkAutoTile:
         src.write_bytes(encode_png(Raster(8, 8, 3, bytearray([9, 8, 7] * 64))))
         with pytest.raises(ValueError, match="output required"):
             remove_visible(src, None, VisiblePlan(mark="auto"))
+# ---------------------------------------------------------------------------
+# F2: migan/lama extras undeclared
+# ---------------------------------------------------------------------------
+
+
+class TestF2LearnedInpaintExtras:
+    """The ``migan``/``lama`` extras the runtime hints name must exist."""
+
+    @pytest.mark.parametrize("extra", ["migan", "lama"])
+    def test_extras_status_lists_the_learned_backend_extras(self, extra: str):
+        import optional_deps
+
+        assert extra in optional_deps.KNOWN_EXTRAS
+        status = optional_deps.extras_status()
+        assert extra in status, f"extras_status() does not list {extra}"
+        assert set(status[extra]) == {"available", "hint"}
+
+    @pytest.mark.parametrize("extra", ["migan", "lama"])
+    def test_pyproject_declares_the_extra_with_runtime_requirements(self, extra: str):
+        pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        extras = pyproject["project"]["optional-dependencies"]
+        assert extra in extras, f"pyproject.toml does not declare the {extra} extra"
+        declared = {req.split(";")[0].split(">=")[0].split("==")[0].strip().lower() for req in extras[extra]}
+        assert {"onnxruntime", "huggingface-hub"} <= declared
+
+    def test_uv_lock_carries_the_learned_backend_extras(self):
+        """The regenerated lock must contain the declared extras."""
+        lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
+        root = next(pkg for pkg in lock["package"] if pkg["name"] == "watermark-remover")
+        extras = root.get("optional-dependencies", {})
+        assert {"migan", "lama"} <= set(extras)

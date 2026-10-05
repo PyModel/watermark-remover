@@ -65,6 +65,17 @@ ai = [
 provenance = [
     "c2pa-python",
 ]
+# The learned ONNX inpaint tiers (region_eraser.py): each downloads its model
+# from Hugging Face on first use, so both need onnxruntime and huggingface-hub --
+# the exact pair the runtime install hints name.
+migan = [
+    "onnxruntime",
+    "huggingface-hub",
+]
+lama = [
+    "onnxruntime",
+    "huggingface-hub",
+]
 all = [
     "watermark-remover[visible]",
     "watermark-remover[quality]",
