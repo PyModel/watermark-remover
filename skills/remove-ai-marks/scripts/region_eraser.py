@@ -57,9 +57,15 @@ Backend = Literal["cv2", "lama", "migan"]
 
 _LAMA_REPO = "Carve/LaMa-ONNX"
 _LAMA_FILE = "lama_fp32.onnx"
+#: Pinned commit of ``Carve/LaMa-ONNX`` (recorded in assets/PROVENANCE.md). The
+#: weights must not float ``main``: a force-push upstream would otherwise
+#: silently change the model this code runs.
+_LAMA_REVISION = "c3c0c9e468934d62e79c329e35d82dd09ff8c444"
 
 _MIGAN_REPO = "andraniksargsyan/migan"
 _MIGAN_FILE = "migan.onnx"
+#: Pinned commit of ``andraniksargsyan/migan`` (recorded in assets/PROVENANCE.md).
+_MIGAN_REVISION = "406830d0fa60666da0071c342ad2fbc8f30c5c64"
 
 # Cached onnxruntime sessions, keyed by backend name (loading is expensive; reuse
 # across calls).
@@ -231,8 +237,12 @@ def lama_available() -> bool:
     return optional_deps._import_safe("onnxruntime") is not None
 
 
-def _get_session(name: str, repo_id: str, filename: str, label: str) -> object:
-    """Load (once) an ONNX session, downloading the model on first use."""
+def _get_session(name: str, repo_id: str, filename: str, revision: str, label: str) -> object:
+    """Load (once) an ONNX session, downloading the model on first use.
+
+    The download pins an explicit ``revision``: the model this tree runs is the
+    commit the pinned SHAs name, never whatever ``main`` holds at download time.
+    """
     cached = _sessions.get(name)
     if cached is not None:
         return cached
@@ -241,9 +251,16 @@ def _get_session(name: str, repo_id: str, filename: str, label: str) -> object:
     from huggingface_hub import hf_hub_download
 
     try:
-        model_path = hf_hub_download(repo_id=repo_id, filename=filename)
+        model_path = hf_hub_download(repo_id=repo_id, filename=filename, revision=revision)
     except Exception as exc:
-        logger.warning("Downloading %s model %s from %s failed: %s", label, filename, repo_id, exc)
+        logger.warning(
+            "Downloading %s model %s from %s@%s failed: %s",
+            label,
+            filename,
+            repo_id,
+            revision,
+            exc,
+        )
         raise
     logger.info("Loading %s model: %s", label, model_path)
     session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
@@ -253,7 +270,7 @@ def _get_session(name: str, repo_id: str, filename: str, label: str) -> object:
 
 def _get_lama_session() -> object:
     """The big-LaMa ONNX session (kept as a named seam the tests monkeypatch)."""
-    return _get_session("lama", _LAMA_REPO, _LAMA_FILE, "LaMa-ONNX")
+    return _get_session("lama", _LAMA_REPO, _LAMA_FILE, _LAMA_REVISION, "LaMa-ONNX")
 
 
 def erase_lama(image_bgr: NDArray[Any], mask: NDArray[Any]) -> NDArray[Any]:
@@ -341,7 +358,7 @@ def migan_available() -> bool:
 
 def _get_migan_session() -> object:
     """The MI-GAN ONNX session (kept as a named seam the tests monkeypatch)."""
-    return _get_session("migan", _MIGAN_REPO, _MIGAN_FILE, "MI-GAN ONNX")
+    return _get_session("migan", _MIGAN_REPO, _MIGAN_FILE, _MIGAN_REVISION, "MI-GAN ONNX")
 
 
 def _run_migan_crop(crop_bgr: NDArray[Any], crop_mask: NDArray[Any]) -> NDArray[Any]:

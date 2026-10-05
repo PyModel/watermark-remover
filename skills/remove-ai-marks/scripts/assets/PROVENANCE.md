@@ -39,6 +39,23 @@ obtained without git metadata, so the snapshot version (its `pyproject.toml`
 version field) is the revision reference; per-file provenance headers name the
 exact upstream script per asset in the table above.
 
+## Learned fill-model pins
+
+The ONNX fill backends download their weights from Hugging Face on first use,
+and the download pins an explicit commit (never a moving ref), recorded in
+`region_eraser.py` (`_LAMA_REVISION` / `_MIGAN_REVISION`) and here:
+
+| Repo | File | Pinned revision | License |
+| --- | --- | --- | --- |
+| `Carve/LaMa-ONNX` | `lama_fp32.onnx` | `c3c0c9e468934d62e79c329e35d82dd09ff8c444` | Apache-2.0 |
+| `andraniksargsyan/migan` | `migan.onnx` | `406830d0fa60666da0071c342ad2fbc8f30c5c64` | MIT |
+
+The upstream reference (v0.44.0 snapshot) does not pin revisions; these are the
+repositories' current commit SHAs at the time of pinning (read from the
+Hugging Face models API), pinned so an upstream force-push cannot silently
+change the model this tree runs. To re-pin, update the constants in
+`region_eraser.py`, this table, and the pinning test.
+
 ## Excluded capture-derived assets (must never enter this tree)
 
 `tests/test_silhouette_assets.py::test_forbidden_capture_derived_assets_absent_from_tree`

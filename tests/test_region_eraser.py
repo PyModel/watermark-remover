@@ -455,3 +455,62 @@ class TestBoundedDilation:
         m3 = boxes_to_mask((64, 64), [(30, 30, 4, 4)], dilate=3)
         assert m3.sum() > m0.sum()
         assert not (m3 == 255).all()
+
+
+class TestWeightRevisionsArePinned:
+    """F4 (stage 8 fix pass 2): the ONNX weights must not float ``main``.
+
+    ``_get_session`` passes an explicit revision to ``hf_hub_download`` so a
+    force-push upstream cannot silently change the model this code runs. The
+    pinned SHAs are recorded in assets/PROVENANCE.md."""
+
+    @pytest.fixture
+    def _stubbed_runtimes(self, monkeypatch: pytest.MonkeyPatch):
+        import sys
+        import types
+
+        import region_eraser
+
+        calls: list[dict] = []
+
+        def fake_download(**kwargs):
+            calls.append(kwargs)
+            return "/tmp/stage8-fake-model.onnx"
+
+        fake_hub = types.ModuleType("huggingface_hub")
+        fake_hub.hf_hub_download = fake_download  # type: ignore[attr-defined]
+        fake_ort = types.ModuleType("onnxruntime")
+        fake_ort.InferenceSession = lambda *args, **kwargs: object()  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
+        monkeypatch.setitem(sys.modules, "onnxruntime", fake_ort)
+        monkeypatch.setattr(region_eraser, "_sessions", {})
+        return calls
+
+    def test_lama_download_passes_the_pinned_revision(self, _stubbed_runtimes):
+        import region_eraser
+
+        region_eraser._get_lama_session()
+        assert len(_stubbed_runtimes) == 1
+        call = _stubbed_runtimes[0]
+        assert call["repo_id"] == region_eraser._LAMA_REPO
+        assert call["revision"] == region_eraser._LAMA_REVISION
+        assert region_eraser._LAMA_REVISION != "main"
+
+    def test_migan_download_passes_the_pinned_revision(self, _stubbed_runtimes):
+        import region_eraser
+
+        region_eraser._get_migan_session()
+        assert len(_stubbed_runtimes) == 1
+        call = _stubbed_runtimes[0]
+        assert call["repo_id"] == region_eraser._MIGAN_REPO
+        assert call["revision"] == region_eraser._MIGAN_REVISION
+        assert region_eraser._MIGAN_REVISION != "main"
+
+    def test_pinned_revisions_are_commit_shas(self):
+        import re
+
+        import region_eraser
+
+        sha = re.compile(r"^[0-9a-f]{40}$")
+        assert sha.fullmatch(region_eraser._LAMA_REVISION), region_eraser._LAMA_REVISION
+        assert sha.fullmatch(region_eraser._MIGAN_REVISION), region_eraser._MIGAN_REVISION
