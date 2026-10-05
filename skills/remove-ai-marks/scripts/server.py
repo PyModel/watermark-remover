@@ -32,7 +32,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -48,6 +48,7 @@ from common import (
     which,
 )
 from container_meta import clean_container, inspect_container
+from identify import identify_file, unknown_verdict
 from image_meta import inspect_image, run_synthid_score
 from layer_b_discovery import layer_b_status
 from optional_deps import extras_status
@@ -269,6 +270,19 @@ _OPENAPI_PATHS: dict[str, dict[str, Any]] = {
     "/inspect": {
         "post": {
             "summary": "Inspect a file for AI provenance marks (text / image / container auto-routed)",
+            "parameters": [
+                {
+                    "name": "identify",
+                    "in": "query",
+                    "required": False,
+                    "schema": _schema(type="boolean"),
+                    "description": (
+                        "Also return one provenance verdict (tri-state AI-ness, "
+                        "platform, source kind, integrity clashes, C2PA validation) "
+                        "under ``identify``. Metadata only; classifiers are never run"
+                    ),
+                }
+            ],
             "requestBody": _schema(
                 required=True,
                 content={
@@ -311,6 +325,14 @@ _OPENAPI_PATHS: dict[str, dict[str, Any]] = {
                             ),
                         ),
                         "report": _schema(type="object"),
+                        "identify": _schema(
+                            type="object",
+                            description=(
+                                "Present only when ?identify=true. The six-field "
+                                "provenance verdict; is_ai_generated is true or null "
+                                "(unknown) — never asserted clean"
+                            ),
+                        ),
                     },
                 )
             },
@@ -401,6 +423,7 @@ def openapi_spec() -> dict[str, Any]:
                 "summary": op["summary"],
                 "responses": responses,
                 **((op.get("requestBody") and {"requestBody": op["requestBody"]}) or {}),
+                **((op.get("parameters") and {"parameters": op["parameters"]}) or {}),
             }
 
     spec: dict[str, Any] = {
@@ -530,6 +553,12 @@ def _plan_preflight(src: Path, dest: Path, request: CleanRequest) -> None:
     plan_work([item], request, batch=False)
 
 
+def _identify_query(target: str) -> bool:
+    """The ``?identify=`` query flag of a request target (opt-in, truthy spellings)."""
+    parsed = parse_qs(urlparse(target).query)
+    return parsed.get("identify", [""])[0].strip().lower() in ("true", "1", "yes")
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = f"watermark-remover/{VERSION}"
 
@@ -604,7 +633,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             if path == "/inspect":
-                self._handle_inspect(data, name, body)
+                identify = _identify_query(self.path)
+                self._handle_inspect(data, name, body, identify=identify)
             elif path == "/detect":
                 self._handle_detect(data, name)
             else:
@@ -617,23 +647,26 @@ class Handler(BaseHTTPRequestHandler):
                 HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": "internal error"}
             )
 
-    def _handle_inspect(self, data: bytes, name: str, body: dict[str, Any]) -> None:
+    def _handle_inspect(
+        self, data: bytes, name: str, body: dict[str, Any], *, identify: bool = False
+    ) -> None:
         kind = classify_bytes(data, Path(name).suffix)
         if kind == "unknown":
-            self._respond(
-                HTTPStatus.OK,
-                {
-                    "ok": True,
-                    "kind": "unknown",
-                    "report": {
-                        "note": "unrecognized format; use a filename with a known extension",
-                    },
-                    "suspicious": False,
-                    "detection_status": "NOT_RUN",
+            response: dict[str, Any] = {
+                "ok": True,
+                "kind": "unknown",
+                "report": {
+                    "note": "unrecognized format; use a filename with a known extension",
                 },
-            )
+                "suspicious": False,
+                "detection_status": "NOT_RUN",
+            }
+            if identify:
+                response["identify"] = unknown_verdict().to_dict()
+            self._respond(HTTPStatus.OK, response)
             return
         run_detect = body.get("detect") is True
+        verdict = None
         with tempfile.TemporaryDirectory(prefix="wm-inspect-") as tmp:
             path = _tmp_path(Path(tmp), name or "input")
             path.write_bytes(data)
@@ -648,10 +681,16 @@ class Handler(BaseHTTPRequestHandler):
                 report["stylometry"] = s_rep.to_dict()
                 if run_detect:
                     report["text_detectors"] = run_all_text_detectors(raw_text)
+                if identify:
+                    # Provenance identification is a metadata question about
+                    # binary assets; a text asset carries none — unknown.
+                    verdict = unknown_verdict()
             elif kind == "image":
                 report = inspect_image(path).to_dict()
             else:
                 report = inspect_container(path).to_dict()
+            if identify and verdict is None:
+                verdict = identify_file(path)
         detection_status = _text_detection_status(report.get("text_detectors") or [])
         suspicious = (
             bool(report.get("suspicious_total"))
@@ -659,16 +698,18 @@ class Handler(BaseHTTPRequestHandler):
             or bool(report.get("stylometry", {}).get("score", 0.0) >= 0.65)
             or detection_status in {"DETECTED", "INCONCLUSIVE"}
         )
-        self._respond(
-            HTTPStatus.OK,
-            {
-                "ok": True,
-                "kind": kind,
-                "report": report,
-                "suspicious": suspicious,
-                "detection_status": detection_status,
-            },
-        )
+        response = {
+            "ok": True,
+            "kind": kind,
+            "report": report,
+            "suspicious": suspicious,
+            "detection_status": detection_status,
+        }
+        if identify:
+            # One provenance verdict from the already-collected evidence;
+            # classifiers stay opt-in and are never triggered by the param.
+            response["identify"] = (verdict or unknown_verdict()).to_dict()
+        self._respond(HTTPStatus.OK, response)
 
     def _handle_detect(self, data: bytes, name: str) -> None:
         kind = classify_bytes(data, Path(name).suffix)

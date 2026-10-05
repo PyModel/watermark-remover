@@ -19,6 +19,7 @@ SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 import image_meta
+import server
 from identify import (
     PROVENANCE_VERDICT_SCHEMA_VERSION,
     ProvenanceVerdict,
@@ -326,6 +327,106 @@ class TestInspectCliSurface:
         code, _out, err = self._run(str(FIXTURES / "does_not_exist.jpg"), "--identify")
         assert code == 2
         assert "not a regular file" in err
+
+
+@pytest.fixture(scope="module")
+def server_conn():
+    import http.client
+    import threading
+
+    srv = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1])
+    yield c
+    c.close()
+    srv.shutdown()
+    srv.server_close()
+    thread.join(timeout=5)
+
+
+class TestServerIdentifySurface:
+    """POST /inspect?identify=true — the HTTP identify surface.
+
+    The existing server suite (tests/test_http_server.py) stays unmodified
+    and pins today's no-param behavior; these tests pin the param.
+    """
+
+    def _post(self, conn, path: str, data: bytes, name: str) -> tuple[int, dict]:
+        import base64
+        import json as _json
+
+        body = _json.dumps({"file": base64.b64encode(data).decode("ascii"), "name": name})
+        conn.request("POST", path, body=body.encode(), headers={"Content-Type": "application/json"})
+        resp = conn.getresponse()
+        payload = resp.read()
+        return resp.status, _json.loads(payload) if payload else {}
+
+    def test_identify_param_returns_the_verdict(self, server_conn) -> None:
+        code, payload = self._post(
+            server_conn,
+            "/inspect?identify=true",
+            (FIXTURES / "tc260_signature_clash.jpg").read_bytes(),
+            "x.jpg",
+        )
+        assert code == 200
+        # today's response shape intact, verdict added:
+        assert payload["ok"] is True and payload["kind"] == "image"
+        assert "report" in payload and "suspicious" in payload and "detection_status" in payload
+        verdict = payload["identify"]
+        assert verdict["is_ai_generated"] is True
+        assert verdict["platform"] == "ByteDance"
+        assert len(verdict["integrity_clashes"]) == 1
+        assert set(verdict) == {
+            "schema_version",
+            "is_ai_generated",
+            "platform",
+            "ai_source_kind",
+            "ai_from_metadata",
+            "integrity_clashes",
+            "c2pa_validation",
+        }
+
+    def test_identify_accepts_1_and_true_spellings(self, server_conn) -> None:
+        data = (FIXTURES / "tc260_labeled.jpg").read_bytes()
+        for query in ("?identify=1", "?identify=true", "?identify=TRUE"):
+            code, payload = self._post(server_conn, f"/inspect{query}", data, "x.jpg")
+            assert code == 200, query
+            assert payload["identify"]["platform"] == "ByteDance", query
+
+    def test_without_the_param_the_response_has_no_identify_key(self, server_conn) -> None:
+        data = (FIXTURES / "tc260_labeled.jpg").read_bytes()
+        for path in ("/inspect", "/inspect?identify=false", "/inspect?identify=0"):
+            code, payload = self._post(server_conn, path, data, "x.jpg")
+            assert code == 200, path
+            assert "identify" not in payload, path
+
+    def test_identify_on_text_is_all_unknown(self, server_conn) -> None:
+        code, payload = self._post(server_conn, "/inspect?identify=true", b"plain text", "a.txt")
+        assert code == 200
+        verdict = payload["identify"]
+        assert verdict["is_ai_generated"] is None
+        assert verdict["ai_from_metadata"] is False
+
+    def test_openapi_documents_the_identify_param(self, server_conn) -> None:
+        code, spec = self._get_spec(server_conn)
+        assert code == 200
+        op = spec["paths"]["/inspect"]["post"]
+        params = {p["name"]: p for p in op.get("parameters", [])}
+        assert "identify" in params
+        assert params["identify"]["in"] == "query"
+        assert params["identify"]["schema"]["type"] == "boolean"
+        assert (
+            "identify"
+            in op["responses"]["200"]["content"]["application/json"]["schema"]["properties"]
+        )
+
+    def _get_spec(self, conn):
+        import json as _json
+
+        conn.request("GET", "/openapi.json")
+        resp = conn.getresponse()
+        return resp.status, _json.loads(resp.read())
 
 
 class TestVerdictShape:
