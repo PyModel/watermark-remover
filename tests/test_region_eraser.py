@@ -436,3 +436,22 @@ class TestRegionFillEndToEnd:
         # the watermark block was repainted towards its surroundings, not left bright
         region = reloaded[12:58, 102:148]
         assert float(region.mean()) < 150
+
+
+class TestBoundedDilation:
+    """Tier-1 control: an absurd dilation radius must not allocate an absurd kernel.
+
+    Any radius at least the image diagonal saturates the whole frame, so the
+    clamp in boxes_to_mask is result-identical to upstream while bounding the
+    (2r+1)-square kernel allocation for untrusted radii.
+    """
+
+    def test_absurd_radius_saturates_instead_of_exploding(self):
+        mask = boxes_to_mask((64, 64), [(30, 30, 4, 4)], dilate=10**7)
+        assert (mask == 255).all()
+
+    def test_normal_radius_grows_mask_without_saturating(self):
+        m0 = boxes_to_mask((64, 64), [(30, 30, 4, 4)], dilate=0)
+        m3 = boxes_to_mask((64, 64), [(30, 30, 4, 4)], dilate=3)
+        assert m3.sum() > m0.sum()
+        assert not (m3 == 255).all()
