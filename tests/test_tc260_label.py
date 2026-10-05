@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+import heif_meta
 import image_meta
 from tc260_label import MAX_TC260_VALUE_BYTES, label_from_metadata, parse_tc260_aigc_json
 
@@ -215,4 +216,97 @@ class TestImageSeam:
         data = _png_with_text(b"Comment", label.encode())
         cleaned, _actions = image_meta.strip_png(data, strip_all_text=False)
         _c, _a, findings, _n = image_meta.inspect_png(cleaned)
+        assert not any("TC260" in f for f in findings)
+
+
+def _bmff_box(kind: bytes, payload: bytes) -> bytes:
+    return struct.pack(">I", 8 + len(payload)) + kind + payload
+
+
+def _bmff_fullbox(kind: bytes, version: int, payload: bytes) -> bytes:
+    return _bmff_box(kind, bytes([version]) + b"\x00\x00\x00" + payload)
+
+
+def _heif_with_aigc_item(payload: bytes, major: bytes = b"heic") -> bytes:
+    """HEIF/AVIF with an ISO-BMFF AIGC tag: a mime (application/json) iinf
+    item named AIGC whose file extent carries the label JSON."""
+    ftyp = _bmff_box(b"ftyp", major + b"\x00\x00\x00\x00" + b"mif1" + major)
+    item_info = struct.pack(">HH", 1, 0) + b"mime" + b"AIGC\x00" + b"application/json\x00"
+    infe = _bmff_fullbox(b"infe", 2, item_info)
+    iinf = _bmff_fullbox(b"iinf", 0, struct.pack(">H", 1) + infe)
+
+    def iloc(off: int) -> bytes:
+        body = (
+            bytes([0x44, 0x00])
+            + struct.pack(">H", 1)
+            + struct.pack(">HHH", 1, 0, 1)
+            + struct.pack(">II", off, len(payload))
+        )
+        return _bmff_fullbox(b"iloc", 0, body)
+
+    hdlr = _bmff_fullbox(b"hdlr", 0, b"\x00" * 4 + b"pict" + b"\x00" * 12 + b"Picture\x00")
+    meta0 = _bmff_fullbox(b"meta", 0, hdlr + iinf + iloc(0))
+    meta = _bmff_fullbox(b"meta", 0, hdlr + iinf + iloc(len(ftyp) + len(meta0) + 8))
+    return ftyp + meta + _bmff_box(b"mdat", payload)
+
+
+def _signed_label_json() -> bytes:
+    sys.path.insert(0, str(ROOT / "tests"))
+    from test_tc260_verify import CHOSEN_K, EMBEDDED_KEY, _label, _signed_label
+
+    return json.dumps(
+        _signed_label(EMBEDDED_KEY, CHOSEN_K, _label()), separators=(",", ":")
+    ).encode()
+
+
+class TestHeifSeam:
+    def test_isobmff_aigc_tag_yields_the_same_finding_class(self) -> None:
+        data = (FIXTURES / "tc260_label.heic").read_bytes()
+        has_c2pa, has_ai, findings, _notes, _details = heif_meta.inspect_heif(data)
+        assert has_ai and not has_c2pa
+        label_lines = [f for f in findings if "TC260 AIGC label" in f]
+        assert len(label_lines) == 1
+        assert (
+            "Label=1" in label_lines[0]
+            and DOUBAO_USCC in label_lines[0]
+            and "ByteDance" in label_lines[0]
+        )
+        assert any("TC260 label signature verified" in f for f in findings)
+
+    def test_the_same_class_routes_through_inspect_image(self) -> None:
+        report = image_meta.inspect_image(FIXTURES / "tc260_label.heic")
+        assert report.format == "heif"
+        assert any("TC260 AIGC label" in f and "ByteDance" in f for f in report.findings)
+
+    def test_an_avif_brand_yields_the_same_class(self) -> None:
+        data = _heif_with_aigc_item(_signed_label_json(), major=b"avif")
+        assert image_meta.detect_format(data) == "avif"
+        _c2pa, has_ai, findings, _notes = image_meta.inspect_avif(data)
+        assert has_ai
+        assert any("TC260 AIGC label" in f and "ByteDance" in f for f in findings)
+
+    def test_cleaning_neutralizes_the_aigc_tag_at_equal_length(self) -> None:
+        data = _heif_with_aigc_item(_signed_label_json())
+        for strip_all in (True, False):
+            cleaned, _actions = heif_meta.neutralize_heif(data, strip_all_metadata=strip_all)
+            assert len(cleaned) == len(data)  # offsets never move
+            _c, _a, findings, _n, _d = heif_meta.inspect_heif(cleaned)
+            assert not any("TC260" in f for f in findings)
+
+    def test_a_non_utf8_aigc_item_is_a_findings_free_refusal(self) -> None:
+        data = _heif_with_aigc_item(b'{"Label":"1","ContentProducer":"\xff\xfe\xfd"}')
+        has_c2pa, _ai, findings, _notes, _details = heif_meta.inspect_heif(data)
+        assert not has_c2pa
+        assert not any("TC260" in f for f in findings)
+        # Not flagged -> untouched by targeted cleaning; strip-all still zeroes
+        # every metadata item by its own contract.
+        kept, _actions = heif_meta.neutralize_heif(data, strip_all_metadata=False)
+        assert kept == data
+        stripped, _actions = heif_meta.neutralize_heif(data, strip_all_metadata=True)
+        assert stripped != data
+
+    def test_an_oversized_aigc_item_is_a_findings_free_refusal(self) -> None:
+        big = b'{"Label":"' + b"x" * (MAX_TC260_VALUE_BYTES + 1) + b'"}'
+        data = _heif_with_aigc_item(big)
+        _c, _ai, findings, _n, _d = heif_meta.inspect_heif(data)
         assert not any("TC260" in f for f in findings)

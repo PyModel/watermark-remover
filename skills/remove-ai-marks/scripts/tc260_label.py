@@ -108,26 +108,16 @@ def _parse_wrapped(text: str, *, require_tc260_field: bool) -> dict[str, str] | 
     return _tc260_fields(cast("dict[object, object]", parsed))
 
 
-def label_from_metadata(data: bytes, candidates: tuple[str, ...] = ()) -> dict[str, str] | None:
-    """Parse a China TC260 AI-labeling block from already collected metadata.
-
-    ``candidates`` are decoded metadata strings (PNG text-chunk values and the
-    like); each must parse as a JSON object carrying at least one TC260 field.
-    The byte scan over ``data`` recognizes the unambiguous XMP forms (any JSON
-    object is accepted there) and the generic wrapped ``{"AIGC":{...}}`` and
-    bare ``AIGC{...}`` blobs, which must carry a TC260 field to count.
-    """
-    for candidate in candidates:
-        result = parse_tc260_aigc_text(candidate)
-        if result:
-            return result
-
+def _scan_label(data: bytes) -> tuple[dict[str, str], tuple[int, int]] | None:
+    """``(parsed label, byte span of the label JSON)`` from the XMP or generic
+    wrapped forms, or None. The span is exclusive at the end and maps 1:1 onto
+    ``data``'s bytes, so callers can overwrite exactly the label in place."""
     for match in _XMP_AIGC.finditer(data):
-        body = match.group(1) if match.group(1) is not None else match.group(2)
-        decoded = html.unescape(body.decode("utf-8", "replace"))
+        group = 1 if match.group(1) is not None else 2
+        decoded = html.unescape(match.group(group).decode("utf-8", "replace"))
         result = _parse_wrapped(decoded, require_tc260_field=False)
         if result:
-            return result
+            return result, (match.start(group), match.end(group))
 
     text = data.decode("latin-1")
     for needle in ('"AIGC"', "AIGC{"):
@@ -143,8 +133,37 @@ def label_from_metadata(data: bytes, candidates: tuple[str, ...] = ()) -> dict[s
             continue
         result = _parse_wrapped(text[brace:end], require_tc260_field=True)
         if result:
-            return result
+            # latin-1 decodes 1:1, so character offsets are byte offsets.
+            return result, (brace, end)
     return None
+
+
+def label_from_metadata(data: bytes, candidates: tuple[str, ...] = ()) -> dict[str, str] | None:
+    """Parse a China TC260 AI-labeling block from already collected metadata.
+
+    ``candidates`` are decoded metadata strings (PNG text-chunk values and the
+    like); each must parse as a JSON object carrying at least one TC260 field.
+    The byte scan over ``data`` recognizes the unambiguous XMP forms (any JSON
+    object is accepted there) and the generic wrapped ``{"AIGC":{...}}`` and
+    bare ``AIGC{...}`` blobs, which must carry a TC260 field to count.
+    """
+    for candidate in candidates:
+        result = parse_tc260_aigc_text(candidate)
+        if result:
+            return result
+    found = _scan_label(data)
+    return found[0] if found else None
+
+
+def label_span(data: bytes) -> tuple[int, int] | None:
+    """The ``(start, end)`` byte span of a label JSON inside ``data``, or None.
+
+    Companion to :func:`label_from_metadata` for in-place neutralization: a
+    stripper can overwrite exactly this run at equal length and keep every
+    other byte (and file offset) intact.
+    """
+    found = _scan_label(data)
+    return found[1] if found else None
 
 
 def aigc_label_marker_in(data: bytes) -> bool:
