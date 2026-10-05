@@ -19,6 +19,7 @@ import pytest
 from numpy.typing import NDArray
 
 import _text_mark_engine as tme
+import _text_mark_variants as tmv
 from _text_mark_engine import (
     TextMarkConfig,
     TextMarkEngine,
@@ -69,12 +70,14 @@ def _stamp(
     alpha: float = 0.6,
     textured: bool = False,
     scale: float = 1.0,
+    flush: bool = False,
 ) -> NDArray[np.uint8]:
     """Composite the engine's own glyph silhouette onto ``image`` (white overlay).
 
     Same forward model the marks use: ``stamped = (1-a)*bg + a*white``. ``scale``
-    resizes the stamped glyph off the nominal size; ``textured`` adds fine
-    luminance noise so the top-hat responds outside the glyph too.
+    resizes the stamped glyph off the nominal size; ``textured`` adds fine luminance
+    noise so the top-hat responds outside the glyph too. ``flush`` pins the glyph to
+    the locate box's bottom-right edge (a corner-hugging mark) instead of centering it.
     """
     tmpl = load_alpha_template(engine.config.asset_name)
     assert tmpl is not None
@@ -91,8 +94,10 @@ def _stamp(
     if gw >= loc.w or gh >= loc.h:
         pytest.fail("fixture glyph does not fit the locate box")
     a = cv2.resize(tmpl, (gw, gh), interpolation=cv2.INTER_AREA).astype(np.float32) * alpha
-    x = loc.x + (loc.w - gw) // 2
-    y = loc.y + (loc.h - gh) // 2
+    if flush:
+        x, y = loc.x + loc.w - gw, loc.y + loc.h - gh
+    else:
+        x, y = loc.x + (loc.w - gw) // 2, loc.y + (loc.h - gh) // 2
     roi = img[y : y + gh, x : x + gw].astype(np.float32)
     a3 = a[..., None]
     img[y : y + gh, x : x + gw] = np.clip(roi * (1 - a3) + 255.0 * a3, 0, 255).astype(np.uint8)
@@ -621,3 +626,209 @@ class TestMemoryGuard:
         det = eng.detect(_flat(w=96, h=96))
         assert not det.detected and det.region == (0, 0, 0, 0)
         assert eng.footprint_mask(_flat(w=96, h=96)) is None
+
+
+# ── Variants mixin (ticket 07: _text_mark_variants) ──────────────────────────
+
+
+class _VariantHost(tmv.TextMarkVariantsMixin, TextMarkEngine):
+    """A synthetic variants engine: base config plus independently gated layouts."""
+
+    def __init__(self, config: TextMarkConfig, variants: tuple[TextMarkEngine, ...] = ()) -> None:
+        TextMarkEngine.__init__(self, config)
+        self._variants = variants
+
+
+def _variant_pair() -> tuple[_VariantHost, TextMarkEngine, TextMarkEngine]:
+    """(host, base engine over kling, variant engine over qwen) sharing geometry."""
+    base = _engine()
+    variant = _engine(name="Variant", asset_name="qwen_alpha.png")
+    host = _VariantHost(_config(), (variant,))
+    return host, base, variant
+
+
+class TestVariantsMixin:
+    """Independently gated layouts combine into one engine (upstream variants vectors,
+    config-driven: the layouts are synthetic TextMarkConfigs, not vendor modules)."""
+
+    def test_variant_detection_retains_the_winning_asset(self):
+        host, _base, variant = _variant_pair()
+        marked = _stamp(variant, _flat())
+        det = host.detect(marked)
+        assert det.detected
+        assert det.template_asset == "qwen_alpha.png"
+
+    def test_base_layout_still_wins_on_its_own_stamp(self):
+        host, base, _variant = _variant_pair()
+        marked = _stamp(base, _flat())
+        det = host.detect(marked)
+        assert det.detected
+        assert det.template_asset == ASSET
+
+    def test_detect_both_combines_strict_and_relaxed_across_variants(self):
+        host, base, _variant = _variant_pair()
+        marked = _stamp(base, _flat())
+        strict, relaxed = host.detect_both(marked)
+        assert strict.provenance is False and relaxed.provenance is True
+        assert strict.detected and relaxed.detected
+        assert strict.confidence == relaxed.confidence
+
+    def test_footprint_routes_to_the_winning_variant_engine(self):
+        """The removal mask is built by the variant that won, so it bounds THAT
+        layout's stamped pixels (upstream >= 98% coverage semantic)."""
+        host, _base, variant = _variant_pair()
+        clean = _flat()
+        marked = _stamp(variant, clean)
+        det = host.detect(marked)
+        assert det.template_asset == "qwen_alpha.png"
+        mask = host.footprint_mask(marked, detection=det)
+        assert mask is not None
+        changed = np.any(clean != marked, axis=2)
+        covered = np.count_nonzero(mask[changed]) / np.count_nonzero(changed)
+        assert covered >= 0.98
+
+    def test_force_falls_back_to_the_base_geometry_box(self):
+        host, _base, _variant = _variant_pair()
+        mask = host.footprint_mask(_flat(), force=True)
+        assert mask is not None
+        loc = host.locate(_flat())
+        assert (mask[loc.y : loc.y + loc.h, loc.x : loc.x + loc.w] == 255).all()
+
+    def test_empty_input_delegates_stably(self):
+        host, _base, _variant = _variant_pair()
+        assert host.footprint_mask(None) is None
+
+
+class TestGlyphFootprint:
+    """GlyphTextMarkEngine: aligned alpha strokes instead of a textured ROI."""
+
+    def test_masks_the_aligned_glyph_sparsely(self):
+        eng = tmv.GlyphTextMarkEngine(_config())
+        marked = _stamp(eng, _flat())
+        mask = eng.footprint_mask(marked)
+        assert mask is not None
+        assert int((mask > 0).sum()) > 0
+        # sparse strokes, not the solid rectangle: strictly smaller than the corner box
+        loc = eng.locate(marked)
+        assert int((mask > 0).sum()) < loc.w * loc.h
+        # ...but it still covers the stamped glyph: the kling silhouette fills only
+        # ~21% of its own bbox in text strokes, so with the 2px dilation a faithful
+        # aligned mask lands near 40% of the nominal window -- well above the raw
+        # fill, far below a solid rectangle.
+        base = eng.scale_base(marked)
+        gw = max(eng.config.min_gw, int(eng.config.alpha_width_frac * base))
+        gh = max(4, int(eng.config.alpha_height_frac * base))
+        x = loc.x + (loc.w - gw) // 2
+        y = loc.y + (loc.h - gh) // 2
+        covered = np.count_nonzero(mask[y : y + gh, x : x + gw]) / (gw * gh)
+        assert covered > 0.35
+
+    def test_no_detection_means_no_mask(self):
+        eng = tmv.GlyphTextMarkEngine(_config())
+        assert eng.footprint_mask(_flat(), force=False) is None
+
+    def test_force_fills_the_geometry_box(self):
+        eng = tmv.GlyphTextMarkEngine(_config())
+        img = _flat()
+        mask = eng.footprint_mask(img, force=True)
+        assert mask is not None
+        loc = eng.locate(img)
+        assert (mask[loc.y : loc.y + loc.h, loc.x : loc.x + loc.w] == 255).all()
+
+
+class TestBoxFootprint:
+    """BoxTextMarkEngine: the full winning text rectangle, config-driven pads."""
+
+    def test_masks_the_full_text_rectangle(self):
+        eng = tmv.BoxTextMarkEngine(_config())
+        marked = _stamp(eng, _flat())
+        mask = eng.footprint_mask(marked)
+        assert mask is not None
+        changed = np.any(_flat() != marked, axis=2)
+        covered = np.count_nonzero(mask[changed]) / np.count_nonzero(changed)
+        assert covered >= 0.98
+
+    def test_pads_are_config_driven_class_attributes(self):
+        """Side pads extend the rectangle by a fraction of the match height."""
+        eng = tmv.BoxTextMarkEngine(_config())
+        eng._BOX_PAD_LEFT_HEIGHT = 0.5
+        eng._BOX_PAD_RIGHT_HEIGHT = 0.5
+        marked = _stamp(eng, _flat())
+        det = eng.detect(marked)
+        assert det.match_box is not None
+        mask = eng.footprint_mask(marked, detection=det)
+        assert mask is not None
+        x0, y0, x1, y1 = det.match_box
+        loc = eng.locate(marked)
+        gh = y1 - y0 + 1
+        # a half-height pad each side is inside the mask
+        assert mask[loc.y + y0 + gh // 2, max(0, loc.x + x0 - gh // 2)] == 255
+
+    def test_no_detection_means_no_mask(self):
+        eng = tmv.BoxTextMarkEngine(_config())
+        assert eng.footprint_mask(_flat(), force=False) is None
+
+
+class TestBottomRightAnchor:
+    """The anchor post-gate demotes matches that do not hug the corner."""
+
+    def test_corner_hugging_match_is_kept(self):
+        eng = tmv.BottomRightGlyphTextMarkEngine(_config(detect_frontend="tophat", detect_ncc_threshold=0.50))
+        marked = _stamp(eng, _flat(), alpha=0.6, flush=True)
+        assert eng.detect(marked).detected
+
+    def test_off_anchor_match_is_demoted(self):
+        """Stamp the glyph at the TOP of the locate box: same shape, same score, but
+        it no longer ends near the corner -- the post-gate must demote it."""
+        eng = tmv.BottomRightGlyphTextMarkEngine(_config(detect_frontend="tophat", detect_ncc_threshold=0.50))
+        plain = TextMarkEngine(eng.config)
+        img = _flat()
+        marked = _stamp_off_anchor(plain, img)
+        det = plain.detect(marked)
+        assert det.detected  # the unanchored engine accepts it...
+        assert not eng.detect(marked).detected  # ...the anchored one demotes it
+
+    def test_anchored_ladder_only_considers_corner_placements(self):
+        eng = tmv.BottomRightGlyphTextMarkEngine(_config(detect_frontend="tophat", detect_ncc_threshold=0.50))
+        marked = _stamp(eng, _flat(), alpha=0.6, flush=True)
+        loc = eng.locate(marked)
+        _score, box = eng._ladder_best(marked, loc)
+        assert box is not None
+        h, w = marked.shape[:2]
+        base = min(h, w)
+        gx1, gy1 = loc.x + box[2] + 1, loc.y + box[3] + 1
+        assert (w - gx1) / base <= eng._ANCHOR_MAX_RIGHT
+        assert (h - gy1) / base <= eng._ANCHOR_MAX_BOTTOM
+
+
+class TestBottomRightBoxEngine:
+    """Anchored detection + solid rectangle footprint compose."""
+
+    def test_masks_the_full_rectangle_of_a_corner_stamp(self):
+        eng = tmv.BottomRightBoxTextMarkEngine(_config(detect_frontend="tophat", detect_ncc_threshold=0.50))
+        marked = _stamp(eng, _flat(), alpha=0.6, flush=True)
+        det = eng.detect(marked)
+        assert det.detected
+        mask = eng.footprint_mask(marked, detection=det)
+        assert mask is not None
+        changed = np.any(_flat() != marked, axis=2)
+        covered = np.count_nonzero(mask[changed]) / np.count_nonzero(changed)
+        assert covered >= 0.98
+
+
+def _stamp_off_anchor(engine: TextMarkEngine, image: NDArray[np.uint8]) -> NDArray[np.uint8]:
+    """Stamp the glyph at the TOP of the locate box instead of vertically centered."""
+    tmpl = load_alpha_template(engine.config.asset_name)
+    assert tmpl is not None
+    img = image.copy()
+    loc = engine.locate(img)
+    base = engine.scale_base(img)
+    gw = max(engine.config.min_gw, int(engine.config.alpha_width_frac * base))
+    gh = max(4, int(engine.config.alpha_height_frac * base))
+    a = cv2.resize(tmpl, (gw, gh), interpolation=cv2.INTER_AREA).astype(np.float32)
+    x = loc.x + (loc.w - gw) // 2
+    y = loc.y + 2  # pinned to the box's top edge: far from the corner anchor
+    roi = img[y : y + gh, x : x + gw].astype(np.float32)
+    a3 = a[..., None]
+    img[y : y + gh, x : x + gw] = np.clip(roi * (1 - a3) + 255.0 * a3, 0, 255).astype(np.uint8)
+    return img
