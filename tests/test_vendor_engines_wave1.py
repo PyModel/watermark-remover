@@ -23,6 +23,8 @@ import cv2
 import numpy as np
 import pytest
 from baidu_engine import BaiduEngine
+from doubao_engine import DoubaoEngine
+from doubao_engine import _template_match_score as _doubao_score
 from jimeng_engine import _ALPHA_WIDTH_FRAC as _JIMENG_ALPHA_WFRAC
 from jimeng_engine import DETECT_NCC_THRESHOLD as _JIMENG_GATE
 from jimeng_engine import JimengEngine
@@ -389,3 +391,142 @@ class TestYuanbaoEngine:
         eng = YuanbaoEngine()
         out = _fill(eng, watermark)
         assert not eng.detect(out).detected
+
+
+class TestDoubaoEngine:
+    """Vectors adapted from upstream test_doubao_engine.py.
+
+    Deviations from upstream: the capture-solved solid-strip silhouette is
+    forbidden in this tree, so the primary arm carries the shipped
+    renderer-synthetic ``doubao_outline_alpha.png``; the outlined-variant arm is
+    not ported (upstream's variant routing keys on a distinct second silhouette
+    asset, and this tree ships exactly one Doubao silhouette — a shared asset
+    name mis-routes the base detection into the variant's solid-box footprint).
+    The tinted arm is upstream's.
+    """
+
+    def _compose(
+        self,
+        w: int,
+        h: int,
+        bg: float | tuple[float, float, float] = 100.0,
+        *,
+        alpha: float = 1.0,
+    ):
+        return _compose_mark(
+            "doubao_outline_alpha.png",
+            w,
+            h,
+            width_frac=0.1636,
+            aspect=77 / 346,
+            bg=bg,
+            alpha=alpha,
+        )
+
+    def test_locate_anchored_bottom_right(self):
+        eng = DoubaoEngine()
+        img = np.zeros((2048, 2048, 3), np.uint8)
+        loc = eng.locate(img)
+        assert 2048 - (loc.x + loc.w) < int(2048 * 0.03)
+        assert 2048 - (loc.y + loc.h) < int(2048 * 0.03)
+
+    def test_locate_scales_with_width(self):
+        eng = DoubaoEngine()
+        small = eng.locate(np.zeros((1024, 1024, 3), np.uint8))
+        large = eng.locate(np.zeros((2048, 2048, 3), np.uint8))
+        assert large.w == pytest.approx(small.w * 2, rel=0.1)
+
+    def test_tinted_glyph_on_saturated_background(self):
+        """A translucent white glyph stays recognizable after a yellow background
+        tints it: the tinted arm (wider saturation filter) recovers it."""
+        # a translucent glyph lets the saturated background tint it (alpha < 1)
+        wm, _mark = self._compose(2048, 2048, bg=(20, 190, 240), alpha=0.75)
+        eng = DoubaoEngine()
+        clean = np.empty_like(wm)
+        clean[:] = (20, 190, 240)
+        assert not eng.detect(clean).detected
+        assert eng.detect(wm).detected
+        out = _fill(eng, wm)
+        assert not eng.detect(out).detected
+        h, w = wm.shape[:2]
+        assert np.array_equal(wm[: h // 2, : w // 2], out[: h // 2, : w // 2])
+
+    def test_clean_gradient_not_detected(self):
+        eng = DoubaoEngine()
+        ramp = np.tile(np.linspace(0, 255, 1024, dtype=np.uint8), (1024, 1))
+        img = cv2.cvtColor(ramp, cv2.COLOR_GRAY2BGR)
+        assert not eng.detect(img).detected
+
+    def test_solid_blob_corner_not_detected(self):
+        """A bright blob is not the glyph shape -> low correlation, not detected."""
+        eng = DoubaoEngine()
+        img = np.zeros((1024, 1024, 3), np.uint8)
+        x, y, bw, bh = eng.locate(img).bbox
+        img[y + bh // 4 : y + bh * 3 // 4, x : x + bw // 2] = 200
+        assert not eng.detect(img).detected
+
+    def test_small_image_guarded_from_false_positive(self):
+        eng = DoubaoEngine()
+        wm, _mark = self._compose(2048, 2048)
+        assert eng.detect(wm).detected
+        assert not eng.detect(cv2.resize(wm, (150, 150))).detected
+
+    def test_footprint_stays_on_glyphs_and_off_frame_edges(self):
+        """The removal footprint follows the aligned glyph, not the background
+        response: it must not touch the frame edges and must stay sparse inside its
+        own bounding rectangle (a solid edge-to-edge mask turns textured content
+        behind the mark into triangular inpaint artifacts)."""
+        eng = DoubaoEngine()
+        wm, _mark = self._compose(2048, 2048)
+        mask = eng.footprint_mask(wm)
+        assert mask is not None
+        assert not mask[-1].any()
+        assert not mask[:, -1].any()
+        ys, xs = np.where(mask > 0)
+        bounding_area = (int(xs.max()) - int(xs.min()) + 1) * (int(ys.max()) - int(ys.min()) + 1)
+        assert np.count_nonzero(mask) < 0.65 * bounding_area
+
+    def test_footprint_mask_in_bottom_right(self):
+        eng = DoubaoEngine()
+        wm, _mark = self._compose(2048, 2048)
+        mask = eng.footprint_mask(wm)
+        assert mask is not None
+        ys, xs = np.where(mask > 0)
+        assert ys.mean() > wm.shape[0] / 2
+        assert xs.mean() > wm.shape[1] / 2
+
+    def test_fill_clears_and_leaves_far_region_exact(self):
+        eng = DoubaoEngine()
+        wm, _mark = self._compose(1773, 2364)
+        before = eng.detect(wm)
+        assert before.detected
+        out = _fill(eng, wm, detection=before)
+        assert eng.detect(out).confidence < before.confidence
+        h, w = wm.shape[:2]
+        assert np.array_equal(out[: h // 2, : w // 2], wm[: h // 2, : w // 2])
+
+    @pytest.mark.parametrize(("w", "h"), [(2048, 1), (1, 2048), (2048, 8)])
+    def test_wide_short_does_not_raise(self, w: int, h: int):
+        eng = DoubaoEngine()
+        img = np.zeros((h, w, 3), np.uint8)
+        mask = eng.footprint_mask(img, force=True)
+        assert mask is None or mask.shape == (h, w)
+
+    def test_grayscale_2d_does_not_raise(self):
+        eng = DoubaoEngine()
+        gray = np.zeros((2048, 2048), np.uint8)
+        mask = eng.footprint_mask(gray, force=True)
+        assert mask is None or mask.shape == (2048, 2048)
+
+    def test_bgra_4channel_does_not_raise(self):
+        eng = DoubaoEngine()
+        bgra = np.zeros((2048, 2048, 4), np.uint8)
+        mask = eng.footprint_mask(bgra, force=True)
+        assert mask is None or mask.shape == (2048, 2048)
+
+    def test_template_match_score_guards_return_zero(self):
+        # Guards return 0.0 (never a false positive) for a mask that cannot hold a
+        # glyph: empty, narrower than min_gw, or shorter than the 4-px floor.
+        assert _doubao_score(np.zeros((0, 5), np.uint8), 1000) == 0.0
+        assert _doubao_score(np.zeros((10, 3), np.uint8), 1000) == 0.0  # width-1 < min_gw
+        assert _doubao_score(np.zeros((3, 200), np.uint8), 1000) == 0.0  # height-1 < 4
