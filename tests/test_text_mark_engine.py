@@ -846,7 +846,11 @@ def _stamp_off_anchor(engine: TextMarkEngine, image: NDArray[np.uint8]) -> NDArr
 class TestGlyphPathMemoryGuard:
     """The glyph/variant footprint path must bound its dilation kernel too."""
 
-    @pytest.mark.parametrize("eng", [tmv.GlyphTextMarkEngine(_config()), tmv.BoxTextMarkEngine(_config())], ids=["glyph", "box"])
+    @pytest.mark.parametrize(
+        "eng",
+        [tmv.GlyphTextMarkEngine(_config()), tmv.BoxTextMarkEngine(_config())],
+        ids=["glyph", "box"],
+    )
     def test_absurd_dilate_returns_without_unbounded_allocation(self, eng: TextMarkEngine):
         marked = _stamp(eng, _flat())
         mask = eng.footprint_mask(marked, dilate=10**9)
