@@ -477,3 +477,147 @@ def _stamp_dark(engine: TextMarkEngine, image: NDArray[np.uint8], *, level: int)
     a3 = a[..., None]
     img[y : y + gh, x : x + gw] = np.clip(roi * (1 - a3) + level * a3, 0, 255).astype(np.uint8)
     return img
+
+
+class TestFaintMarkIsMaskable:
+    """A mark the tophat front-end DETECTS must also be maskable (upstream faint-mask
+    vectors): detection found it through the continuous response, so removal must not
+    silently no-op when the binarized blob comes back empty."""
+
+    def test_binary_glyph_blob_is_empty_on_a_faint_mark(self):
+        """The premise: this is the input class the binarizing path cannot segment."""
+        eng = _engine(detect_frontend="tophat", detect_ncc_threshold=0.50)
+        img = _stamp(eng, _flat(), alpha=0.06)
+        loc = eng.locate(img)
+        glyph = eng.extract_mask(img, loc)
+        assert int((glyph > 0).sum()) < eng._MIN_GLYPH_PIXELS
+
+    def test_footprint_mask_is_not_empty_when_the_continuous_response_has_signal(self):
+        eng = _engine(detect_frontend="tophat", detect_ncc_threshold=0.50)
+        img = _stamp(eng, _flat(), alpha=0.06)
+        mask = eng.footprint_mask(img, force=False)
+        assert mask is not None, "a detectable faint mark produced no removal mask"
+        assert int((mask > 0).sum()) > 0
+
+    def test_a_clean_frame_still_produces_no_mask(self):
+        """The guard: the fallback must not turn every flat corner into a fill."""
+        eng = _engine(detect_frontend="tophat", detect_ncc_threshold=0.50)
+        clean = cv2.GaussianBlur(_flat(), (5, 5), 0)
+        assert eng.footprint_mask(clean, force=False) is None
+
+    @pytest.mark.parametrize("alpha", [0.5, 0.9])
+    def test_a_bold_mark_is_unaffected(self, alpha: float):
+        eng = _engine(detect_frontend="tophat", detect_ncc_threshold=0.50)
+        img = _stamp(eng, _flat(), alpha=alpha)
+        mask = eng.footprint_mask(img, force=False)
+        assert mask is not None
+        assert int((mask > 0).sum()) > 0
+
+
+class TestFaintMaskStaysTight:
+    """The faint fallback must cover the mark WITHOUT filling the whole corner (the
+    upstream 120%-of-ROI defect came from thresholding the uint8 response)."""
+
+    def test_mask_does_not_swallow_the_whole_corner_on_a_textured_frame(self):
+        eng = _engine(detect_frontend="tophat", detect_ncc_threshold=0.50)
+        img = _stamp(eng, _flat(), alpha=0.10, textured=True)
+        assert eng.detect(img).detected, "fixture must reach the faint path to test it"
+        mask = eng.footprint_mask(img, force=False)
+        assert mask is not None
+        area = int((mask > 0).sum())
+        loc = eng.locate(img)
+        roi = loc.w * loc.h
+        # The glyph box is ~40% of the corner ROI and the mask pads it; a correct mask
+        # lands near 60%. The pre-fix behavior covered the whole ROI plus padding.
+        assert area < 0.85 * roi, f"mask covers {100 * area / roi:.0f}% of the corner box"
+
+    def test_mask_still_covers_the_stamped_glyph(self):
+        """Tightness is only a virtue if the mark is still inside."""
+        eng = _engine(detect_frontend="tophat", detect_ncc_threshold=0.50)
+        img = _stamp(eng, _flat(), alpha=0.10, textured=True)
+        assert eng.detect(img).detected, "fixture must reach the faint path to test it"
+        mask = eng.footprint_mask(img, force=False)
+        assert mask is not None
+        loc = eng.locate(img)
+        base = eng.scale_base(img)
+        gw = max(eng.config.min_gw, int(eng.config.alpha_width_frac * base))
+        gh = max(4, int(eng.config.alpha_height_frac * base))
+        x = loc.x + (loc.w - gw) // 2
+        y = loc.y + (loc.h - gh) // 2
+        covered = int(np.count_nonzero(mask[y : y + gh, x : x + gw])) / max(1, gw * gh)
+        assert covered > 0.6, f"mask covers only {100 * covered:.0f}% of the stamped glyph"
+
+
+class TestSharedFillAndValidate:
+    """locate -> NCC score -> footprint mask -> shared region-eraser fill -> validate."""
+
+    def test_end_to_end_fill_through_region_eraser_validates_clean(self):
+        import region_eraser
+
+        eng = _engine()
+        marked = _stamp(eng, _flat())
+        det = eng.detect(marked)
+        assert det.detected
+        mask = eng.footprint_mask(marked, detection=det)
+        assert mask is not None
+        cleaned = region_eraser.erase(marked, mask=mask, backend="cv2")
+        # validate: the detector re-run on the cleaned frame must not re-fire
+        assert not eng.detect(cleaned).detected
+        # and the fill actually changed the marked pixels
+        assert int(np.count_nonzero(np.any(cleaned != marked, axis=2))) > 0
+
+    def test_threaded_detection_is_reused_not_recomputed(self):
+        """A STRICT threaded detection bounds the fill without a second sweep; a
+        RELAXED one is not reused (a strict re-detect may demote it)."""
+        eng = _engine()
+        marked = _stamp(eng, _flat())
+        strict = eng.detect(marked)
+        relaxed = eng.detect(marked, provenance=True)
+        assert eng._strict_detection(marked, strict) is strict
+        assert eng._strict_detection(marked, relaxed) is not relaxed
+        assert eng._strict_detection(marked, relaxed).detected
+
+    def test_force_fills_the_whole_geometry_box(self):
+        eng = _engine()
+        img = _flat()  # nothing stamped
+        mask = eng.footprint_mask(img, force=True)
+        assert mask is not None
+        loc = eng.locate(img)
+        assert (mask[loc.y : loc.y + loc.h, loc.x : loc.x + loc.w] == 255).all()
+        # ...and without force a clean corner yields nothing
+        assert eng.footprint_mask(img, force=False) is None
+
+    def test_dilation_is_bounded_for_absurd_radii(self):
+        """An untrusted dilate radius must not allocate a (2r+1)^2 kernel: the shared
+        boxes_to_mask clamps to the frame diagonal, so this returns rather than blows
+        up the process."""
+        eng = _engine()
+        marked = _stamp(eng, _flat())
+        mask = eng.footprint_mask(marked, dilate=10**9)
+        assert mask is not None
+        assert mask.dtype == np.uint8
+        assert mask.shape == marked.shape[:2]
+
+
+class TestMemoryGuard:
+    """Upstream text_mark_memory semantics, engine-level: O(footprint) scans on
+    untrusted geometry; nothing allocates a full-frame intermediate per detect."""
+
+    def test_oversized_frame_routes_through_the_bounded_box_mask(self):
+        """A huge frame still allocates only the locate-box mask inside detect (the
+        full-frame uint8 exists solely as the fill contract in footprint_mask)."""
+        eng = _engine()
+        big = _flat(w=4096, h=4096)
+        marked = _stamp(eng, big)
+        loc = eng.locate(marked)
+        box = eng.extract_mask(marked, loc)
+        assert box.shape == (loc.h, loc.w)
+        assert box.shape[0] * box.shape[1] < big.shape[0] * big.shape[1] / 16
+        det = eng.detect(marked)
+        assert det.detected
+
+    def test_tiny_frames_skip_detection_without_allocating(self):
+        eng = _engine()
+        det = eng.detect(_flat(w=96, h=96))
+        assert not det.detected and det.region == (0, 0, 0, 0)
+        assert eng.footprint_mask(_flat(w=96, h=96)) is None
