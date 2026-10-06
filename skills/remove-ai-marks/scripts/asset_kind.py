@@ -52,7 +52,7 @@ _TEXT_EXTENSIONS = frozenset(
 )
 SUPPORTED_EXTENSIONS = _IMAGE_EXTENSIONS | _CONTAINER_EXTENSIONS | _TEXT_EXTENSIONS
 
-_ASSET_KINDS: tuple[AssetKind, ...] = ("text", "image", "container", "video", "unknown")
+_ASSET_KINDS: tuple[AssetKind, ...] = ("text", "image", "container", "unknown")
 _SNIFF_BYTES = 4096  # HEIF brand detection scans at most the first 4 KiB.
 
 #: The EBML header that opens every Matroska and WebM file. Four bytes is the

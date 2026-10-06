@@ -24,6 +24,7 @@ SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 from asset_kind import classify_asset
 from clean_asset import CleanPlan, clean_asset
+from clean_request import missing_video_runtime, video_runtime_hint
 from rewrite_text import RewritePlan, rewrite
 
 
@@ -64,6 +65,10 @@ def clean_upload(file_obj, keep_non_ai: bool, layer_b: bool, strength: str):
         safe_suffix = re.sub(r"[^A-Za-z0-9._-]", "_", src.suffix)
         dest = workdir / f"{safe_stem}.cleaned{safe_suffix}"
         kind = classify_asset(src)
+        if kind == "video" and (missing := missing_video_runtime()):
+            # The demo builds its plan directly instead of crossing plan_work,
+            # so it applies the same runtime gate the planning seam applies.
+            raise ValueError(video_runtime_hint(missing))
         result = clean_asset(
             src, dest, CleanPlan(forced_kind=kind, strip_all_metadata=not keep_non_ai)
         ).to_dict()

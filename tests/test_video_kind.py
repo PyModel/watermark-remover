@@ -77,14 +77,67 @@ def test_video_is_never_text(tmp_path: Path) -> None:
     assert module.classify_asset(ebml) != "text"
 
 
-def test_video_sniff_is_bounded_and_reads_only_the_header(tmp_path: Path, monkeypatch) -> None:
-    module = _routing_module()
-    path = tmp_path / "clip.bin"
+# ---------------------------------------------------------------------------
+# Runtime refusal at the pipeline seam (ticket 01)
+# ---------------------------------------------------------------------------
+
+#: The exact shell-quoted install command the refusal must carry. The extra's
+#: brackets are a shell glob, so the hint is copy-pasteable only when quoted.
+QUOTED_VIDEO_INSTALL = "pip install 'watermark-remover[video]'"
+
+
+def _video_file(path: Path) -> Path:
     path.write_bytes(EBML_MAGIC + b"\x00" * 64)
+    return path
 
-    def reject_whole_file_read(_path):
-        raise AssertionError("classification must not read the whole file")
 
-    monkeypatch.setattr(Path, "read_bytes", reject_whole_file_read)
+def _simulate_absent_video_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Force ffmpeg/ffprobe and the video extra absent, whatever the host has."""
+    empty = tmp_path / "no-tools"
+    empty.mkdir(exist_ok=True)
+    monkeypatch.setenv("PATH", str(empty))
+    # A ``None`` entry makes the import system raise ImportError for the name,
+    # so the probe sees the extra absent even where PyAV is installed.
+    monkeypatch.setitem(sys.modules, "av", None)
 
-    assert module.classify_asset(path) == "video"
+
+@pytest.mark.parametrize("name", ["clip.mp4", "recording.payload"])
+def test_clean_video_without_runtime_refuses_and_writes_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    name: str,
+) -> None:
+    import clean_file
+
+    src = _video_file(tmp_path / name)
+    dest = tmp_path / f"cleaned{src.suffix}"
+    _simulate_absent_video_runtime(monkeypatch, tmp_path)
+    monkeypatch.setattr(sys, "argv", ["clean_file.py", str(src), "-o", str(dest)])
+
+    exit_code = clean_file.main()
+
+    err = capsys.readouterr().err
+    assert exit_code == 1
+    assert QUOTED_VIDEO_INSTALL in err
+    assert "pip install watermark-remover[video]" not in err
+    for missing in ("ffmpeg", "ffprobe", "av"):
+        assert missing in err
+    assert not dest.exists()
+
+
+def test_demo_video_without_runtime_returns_the_same_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from demo import clean_upload
+
+    src = _video_file(tmp_path / "clip.webm")
+    _simulate_absent_video_runtime(monkeypatch, tmp_path)
+
+    report, output, _prompt = clean_upload(str(src), False, False, "paraphrase")
+
+    assert report.startswith("**Error cleaning")
+    assert QUOTED_VIDEO_INSTALL in report
+    assert "pip install watermark-remover[video]" not in report
+    assert "ffmpeg" in report
+    assert output is None
