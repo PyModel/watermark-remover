@@ -21,16 +21,15 @@ import types
 from pathlib import Path
 
 import pytest
-from packaging.requirements import Requirement
-
 from conftest import fake_command_result
+from packaging.requirements import Requirement
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(SCRIPTS))
 
-import video_encoding  # noqa: E402
+import video_encoding
 
 #: One ffprobe video-stream row: a full-range 4:2:2 source whose time base and
 #: frame rate both need normalizing, with the raw bit depth the probe reports.
@@ -64,7 +63,9 @@ def _recording_runner(result, seen: list) -> object:
     return fake_run
 
 
-def test_probing_a_clip_reports_its_pixel_format_and_frame_timing(monkeypatch, tmp_path: Path) -> None:
+def test_probing_a_clip_reports_its_pixel_format_and_frame_timing(
+    monkeypatch, tmp_path: Path
+) -> None:
     source = tmp_path / "clip.mp4"
     source.write_bytes(b"not really a video; ffprobe is faked")
     seen: list = []
@@ -158,7 +159,9 @@ def test_a_probe_that_cannot_answer_labels_the_fallback(monkeypatch, tmp_path: P
         assert profile.frame_rate is None
 
 
-def test_component_depth_falls_back_to_the_probes_own_bit_depth(monkeypatch, tmp_path: Path) -> None:
+def test_component_depth_falls_back_to_the_probes_own_bit_depth(
+    monkeypatch, tmp_path: Path
+) -> None:
     # ``None`` in sys.modules is the documented way to make a later import
     # raise ImportError, so this pins the PyAV-absent path even on a machine
     # that has av installed.
@@ -202,9 +205,7 @@ def test_component_depth_consults_pyav_for_that_one_lookup(monkeypatch, tmp_path
         "run_command",
         lambda *_a, **_k: fake_command_result(
             0,
-            stdout=json.dumps(
-                {"streams": [{"pix_fmt": "yuvj422p", "bits_per_raw_sample": "8"}]}
-            ),
+            stdout=json.dumps({"streams": [{"pix_fmt": "yuvj422p", "bits_per_raw_sample": "8"}]}),
         ),
     )
 
@@ -353,7 +354,9 @@ def _tool(argv: list[str]) -> subprocess.CompletedProcess:
 
 def _audio_bitstream_md5(path: Path) -> str:
     """The audio elementary bitstream's hash, read with a stream copy."""
-    result = _tool([_FFMPEG, "-v", "error", "-i", str(path), "-map", "0:a:0", "-c", "copy", "-f", "md5", "-"])
+    result = _tool(
+        [_FFMPEG, "-v", "error", "-i", str(path), "-map", "0:a:0", "-c", "copy", "-f", "md5", "-"]
+    )
     assert result.returncode == 0, result.stderr.decode()
     return result.stdout.decode().strip()
 
