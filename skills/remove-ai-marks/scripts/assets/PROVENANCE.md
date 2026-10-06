@@ -103,11 +103,6 @@ constants in the modules and are asserted by `tests/test_source_classify.py`
 and `tests/test_source_classify_v2.py` (which also monkeypatch the hub client
 to prove the pinned call happens — no test touches the network).
 
-| Weights | Repo @ revision | SHA-256 | Env override | Purpose |
-| --- | --- | --- | --- | --- |
-| `source-pipeline-mlp.npz` | [`wiltodelta/raiw-source-classify`](https://huggingface.co/wiltodelta/raiw-source-classify) @ `4b8b408d03dac20231d46217977fd164414b6b9e` | `6430b0738869ff07b6845b7c6149c2a83bc3f3785878082886c241c6f7ca0c4a` | `RAIW_SOURCE_CLASSIFY_WEIGHTS` | E2: fused 124-d + spectral features → source/export-pipeline MLP (892→128→64→3), calibrated per-provider margin thresholds |
-| `openai-google-source-v1.npz` | [`wiltodelta/openai-google-image-source-classifier`](https://huggingface.co/wiltodelta/openai-google-image-source-classifier) @ `4563fb97e5572030ad8d6acbb6f20eaab7fc3009` | `0e94e565c181416e4f63a2bfc06cd5179f4201befda7481ac510f6a168c612f4` | `RAIW_IMAGE_SOURCE_WEIGHTS` | E3: phase-free spectral template filters + spatial residual templates → OpenAI/Google/unknown with conflict abstention |
-
 Both models are trained upstream on private corpora that never enter this
 checkout (upstream `docs/release-and-distribution.md` records the publish
 workflows: hash-verified derivative artifacts only, published behind manual
@@ -116,7 +111,21 @@ claims are evidence-only, and a label is a routing hint, never a verdict.
 Upstream publishes each artifact with a model card recording evaluation and
 robustness limits; the upstream reference snapshot carries them at
 `docs/source-classify-hf/` and `docs/image-source-hf/`. To re-pin, update the
-constants in the two modules, this table, and the pinning tests.
+constants in the two modules, this list, and the pinning tests.
+
+- `source-pipeline-mlp.npz` (E2: fused 124-d + spectral features →
+  source/export-pipeline MLP, 892→128→64→3, calibrated per-provider margin
+  thresholds) — [`wiltodelta/raiw-source-classify`](https://huggingface.co/wiltodelta/raiw-source-classify)
+  @ revision `4b8b408d03dac20231d46217977fd164414b6b9e`, SHA-256
+  `6430b0738869ff07b6845b7c6149c2a83bc3f3785878082886c241c6f7ca0c4a`,
+  offline override `RAIW_SOURCE_CLASSIFY_WEIGHTS`.
+- `openai-google-source-v1.npz` (E3: phase-free spectral template filters +
+  spatial residual templates → OpenAI/Google/unknown with conflict
+  abstention) —
+  [`wiltodelta/openai-google-image-source-classifier`](https://huggingface.co/wiltodelta/openai-google-image-source-classifier)
+  @ revision `4563fb97e5572030ad8d6acbb6f20eaab7fc3009`, SHA-256
+  `0e94e565c181416e4f63a2bfc06cd5179f4201befda7481ac510f6a168c612f4`,
+  offline override `RAIW_IMAGE_SOURCE_WEIGHTS`.
 
 ## Excluded capture-derived assets (must never enter this tree)
 
