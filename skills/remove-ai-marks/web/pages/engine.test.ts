@@ -3,7 +3,7 @@
  * native Python answers through the same bridge. Needs `bun run build:pages`.
  */
 import { describe, expect, test } from "bun:test"
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, readFileSync, readdirSync } from "node:fs"
 import { join } from "node:path"
 import { loadPyodide } from "pyodide"
 
@@ -69,10 +69,11 @@ function native(): [number, string][] {
 }
 
 describe("browser engine", async () => {
-  if (!existsSync(join(RUNTIME, "wm.zip"))) throw new Error("run `bun run build:pages` first")
+  const zip = readdirSync(join(WEB, "dist-pages")).find((name) => /^cleaners-[0-9a-f]{16}\.zip$/.test(name))
+  if (!zip || !existsSync(join(RUNTIME, "pyodide.asm.wasm"))) throw new Error("run `bun run build:pages` first")
   const py = await loadPyodide({ indexURL: `${RUNTIME}/` })
   await py.loadPackage(["pillow-12.2.0-cp314-cp314-pyemscripten_2026_0_wasm32.whl", "pypdf-6.19.0-py3-none-any.whl"].map((f) => join(RUNTIME, f)))
-  py.unpackArchive(new Uint8Array(readFileSync(join(RUNTIME, "wm.zip"))).buffer, "zip", { extractDir: "/wm" })
+  py.unpackArchive(new Uint8Array(readFileSync(join(WEB, "dist-pages", zip))).buffer, "zip", { extractDir: "/wm" })
   py.runPython("import sys, os; sys.path.insert(0, '/wm'); os.environ.clear()")
   const bridge = py.pyimport("bridge")
   const expected = native()
@@ -101,6 +102,15 @@ describe("browser engine", async () => {
     expect(Object.values(caps.tools)).toEqual([false, false, false])
     expect(caps.layer_b.configured).toBe(false)
     expect(caps.max_input_bytes).toBe(40 * 1024 * 1024)
+  })
+
+  test("a redirect to another origin counts as another origin", () => {
+    const same = (a: string, b: string) => py.runPython(`import bridge; bridge._origin(${JSON.stringify(a)}) == bridge._origin(${JSON.stringify(b)})`)
+    expect(same("http://localhost:11434/api/chat", "http://LOCALHOST:11434/v1")).toBe(true)
+    expect(same("http://localhost/api", "http://localhost:80/api")).toBe(true)
+    expect(same("http://localhost:11434/api", "http://localhost:11435/api")).toBe(false)
+    expect(same("http://localhost:11434/api", "http://127.0.0.1:11434/api")).toBe(false)
+    expect(same("http://localhost/api", "https://localhost/api")).toBe(false)
   })
 
   test("rewrite settings reach Layer B", () => {

@@ -13,6 +13,7 @@ import io
 import json
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 import urllib.response
 
@@ -62,6 +63,12 @@ def configure(settings: str) -> None:
             os.environ.pop(name, None)
 
 
+def _origin(url: str) -> tuple[str, str, int | None]:
+    parts = urllib.parse.urlsplit(url)
+    port = parts.port or {"http": 80, "https": 443}.get(parts.scheme)
+    return (parts.scheme, (parts.hostname or "").lower(), port)
+
+
 class XHRHandler(urllib.request.HTTPHandler):
     """urllib -> synchronous XMLHttpRequest. Failures surface as URLError, so Layer B's
     existing error mapping (connection failed / timed out / HTTP n) is unchanged."""
@@ -87,6 +94,12 @@ class XHRHandler(urllib.request.HTTPHandler):
             raise urllib.error.URLError(reason) from None
         if xhr.status == 0:
             raise urllib.error.URLError("blocked or unreachable")
+        # XHR follows redirects itself, so SameOriginRedirectHandler never sees them. Refuse an
+        # answer from another origin, as wm-serve does. ponytail: the request has already been
+        # sent by then; the CSP's connect-src keeps that hop on this computer. Sync XHR can't
+        # stop at a redirect; an async fetch(redirect: "manual") transport could.
+        if _origin(str(xhr.responseURL or req.full_url)) != _origin(req.full_url):
+            raise urllib.error.URLError("redirected to another origin")
         headers = email.message.Message()
         for line in str(xhr.getAllResponseHeaders()).splitlines():
             name, _, value = line.partition(":")

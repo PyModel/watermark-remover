@@ -40,7 +40,7 @@ async function boot(): Promise<Bridge> {
   progress("Loading the cleaners")
   const lock = await (await fetch(`${BASE}pyodide-lock.json`)).json()
   const [zip] = await Promise.all([
-    fetch(`${BASE}wm.zip`).then((r) => r.arrayBuffer()),
+    fetch(process.env.WM_CLEANERS ?? "/cleaners.zip").then((r) => r.arrayBuffer()),
     py.loadPackage([`${BASE}${lock.packages.pillow.file_name}`, `${BASE}pypdf-6.19.0-py3-none-any.whl`]),
   ])
   py.unpackArchive(zip, "zip", { extractDir: "/wm" })
