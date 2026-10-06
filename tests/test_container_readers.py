@@ -60,3 +60,45 @@ class TestMatroskaProvenance:
             "ContentProducer": DOUBAO_USCC,
             "ProduceID": PRODUCE_ID,
         }
+
+
+# --- FLV -------------------------------------------------------------------
+
+
+def _amf0_string(value: bytes) -> bytes:
+    return b"\x02" + len(value).to_bytes(2, "big") + value
+
+
+def _flv(value: bytes = LABEL) -> bytes:
+    payload = (
+        _amf0_string(b"onMetaData")
+        + b"\x08\x00\x00\x00\x02"
+        + len(b"AIGC").to_bytes(2, "big")
+        + b"AIGC"
+        + _amf0_string(value)
+        + len(b"duration").to_bytes(2, "big")
+        + b"duration"
+        + b"\x00"
+        + b"\x00\x00\x00\x00\x00\x00\x00\x00"
+        + b"\x00\x00\x09"
+    )
+    tag_header = b"\x12" + len(payload).to_bytes(3, "big") + b"\x00" * 7
+    return (
+        b"FLV\x01\x05\x00\x00\x00\x09"
+        + b"\x00\x00\x00\x00"
+        + tag_header
+        + payload
+        + (11 + len(payload)).to_bytes(4, "big")
+    )
+
+
+class TestFlvProvenance:
+    def test_a_synthetic_flv_marker_is_a_finding(self) -> None:
+        findings = container_readers.flv_findings(_flv())
+        assert len(findings) == 1
+        assert findings[0]["container"] == "flv"
+        assert findings[0]["label"] == {
+            "Label": "1",
+            "ContentProducer": DOUBAO_USCC,
+            "ProduceID": PRODUCE_ID,
+        }
