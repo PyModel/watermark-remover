@@ -77,6 +77,21 @@ def test_video_is_never_text(tmp_path: Path) -> None:
     assert module.classify_asset(ebml) != "text"
 
 
+def test_video_sniff_is_bounded_and_reads_only_the_header(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _routing_module()
+    path = tmp_path / "clip.bin"
+    path.write_bytes(EBML_MAGIC + b"\x00" * 64)
+
+    def reject_whole_file_read(_path):
+        raise AssertionError("classification must not read the whole file")
+
+    monkeypatch.setattr(Path, "read_bytes", reject_whole_file_read)
+
+    assert module.classify_asset(path) == "video"
+
+
 # ---------------------------------------------------------------------------
 # Runtime refusal at the pipeline seam (ticket 01)
 # ---------------------------------------------------------------------------
