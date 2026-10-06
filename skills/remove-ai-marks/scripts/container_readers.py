@@ -18,6 +18,7 @@ nothing.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TypedDict
 
 from tc260_label import MAX_TC260_VALUE_BYTES, parse_tc260_aigc_json
@@ -328,4 +329,21 @@ def avi_findings(data: bytes) -> tuple[ContainerFinding, ...]:
         if chunk_id == b"LIST" and size >= 4 and data[payload_start : payload_start + 4] == b"INFO":
             found.extend(_info_findings(data, payload_start + 4, payload_end))
         position = payload_end + (size & 1)
+    return tuple(found)
+
+
+#: The three fixed container readers. Each self-gates on its magic bytes, so a
+#: wrong container reads a few header bytes and returns no finding.
+_CONTAINER_READERS: tuple[Callable[[bytes], tuple[ContainerFinding, ...]], ...] = (
+    matroska_findings,
+    flv_findings,
+    avi_findings,
+)
+
+
+def read_container_findings(data: bytes) -> tuple[ContainerFinding, ...]:
+    """Provenance findings from every reader whose container magic bytes match."""
+    found: list[ContainerFinding] = []
+    for reader in _CONTAINER_READERS:
+        found.extend(reader(data))
     return tuple(found)

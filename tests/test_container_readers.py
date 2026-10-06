@@ -11,6 +11,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
@@ -128,3 +130,21 @@ class TestAviProvenance:
             "ContentProducer": DOUBAO_USCC,
             "ProduceID": PRODUCE_ID,
         }
+
+
+# --- magic-byte dispatch ---------------------------------------------------
+
+
+class TestContainerDispatch:
+    @pytest.mark.parametrize(
+        ("builder", "container"),
+        [(_matroska, "matroska"), (_flv, "flv"), (_avi, "avi")],
+    )
+    def test_each_container_marker_reaches_the_dispatch(self, builder, container) -> None:
+        findings = container_readers.read_container_findings(builder())
+        assert [(f["container"], f["label"]["ContentProducer"]) for f in findings] == [
+            (container, DOUBAO_USCC)
+        ]
+
+    def test_unknown_bytes_return_nothing(self) -> None:
+        assert container_readers.read_container_findings(b"not a container at all") == ()
