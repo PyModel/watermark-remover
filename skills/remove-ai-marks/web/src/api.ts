@@ -93,6 +93,10 @@ export type CleanOptions = Partial<Record<CleanOption, boolean>>
 
 export interface Capabilities {
   version: string
+  /** public mode: rate limited, and the endpoints in `disabled` answer 403 */
+  public: boolean
+  disabled: string[]
+  max_input_bytes: number
   tools: Record<"c2patool" | "exiftool" | "qpdf", boolean>
   pixel_backends: Record<"ctrlregen" | "diffusion", boolean>
   scorers: Record<"synthid" | "synthid_http" | "stylometry", boolean>
@@ -179,7 +183,13 @@ async function call<T>(path: string, body?: unknown): Promise<T> {
 
 function errorMessage(status: number, serverMessage: unknown): string {
   if (status === 401) return "This server needs an API key."
-  if (status === 413) return "This file is over the server's size limit (100 MB by default)."
+  if (status === 413) return "This file is over this server's size limit."
+  if (status === 429) return "Too many requests from this connection. Wait a minute, then try again."
+  if (status === 503) return "The server is busy with other files. Try again in a few seconds."
+  if (status === 421) return "This server doesn't answer to this address."
+  if (status === 403 && typeof serverMessage === "string" && serverMessage.includes("cross-origin")) {
+    return "The server refused a request from another site."
+  }
   if (status === 502 && typeof serverMessage === "string") return sentenceCase(serverMessage)
   if (status >= 500) return "wm-serve hit an internal error. Its terminal log has the details."
   if (typeof serverMessage === "string" && serverMessage.includes("binary container as text")) {

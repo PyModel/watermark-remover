@@ -20,8 +20,12 @@ Endpoints:
                          -> visible-mark inpainting inside the box, PNG out
 
 Hardening mirrors the CLIs: input size caps, binary-as-text guard, atomic
-writes, loopback-only bind by default, optional bearer API key. Run it as an
-unprivileged user (the Docker image does). Intended for a trusted network;
+writes, loopback-only bind by default, optional bearer API key. Every
+deployment also gets a Host allowlist (DNS rebinding), a same-origin check on
+POST (CSRF), a socket timeout and a cap on concurrent jobs.
+WATERMARKS_SERVER_PUBLIC=1 adds a per-client rate limit and turns off the
+endpoints that spend the operator's model or vendor keys (rewrite, detect).
+Run it as an unprivileged user (the Docker image does). Intended for a trusted network;
 expose through a reverse proxy if reachable from untrusted clients.
 """
 
@@ -30,10 +34,13 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import hmac
 import json
 import os
 import sys
 import tempfile
+import threading
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -67,6 +74,21 @@ VERSION = os.environ.get("WATERMARKS_SERVER_VERSION", "dev")
 # `Authorization: Bearer <key>`. Empty means no auth (default).
 API_KEY = os.environ.get("WATERMARKS_SERVER_API_KEY", "").strip()
 
+# Deployment policy, filled from the environment by main(); tests set them directly.
+#: Public mode: rate limit per client and no rewrite/detect, which would spend the
+#: operator's model and vendor API keys on anyone's behalf.
+PUBLIC = False
+#: Host header values this server answers to (lower-case, no port). Empty = any.
+#: main() pins loopback binds to loopback names, which defeats DNS rebinding.
+ALLOWED_HOSTS: frozenset[str] = frozenset()
+#: Read the client address from the last X-Forwarded-For hop (set behind a proxy).
+TRUST_PROXY = False
+#: Features refused with 403 in public mode.
+PUBLIC_DISABLED = ("rewrite", "detect")
+LOOPBACK_NAMES = frozenset({"127.0.0.1", "localhost", "::1"})
+# A slow client can't hold a worker thread forever.
+SOCKET_TIMEOUT_SECONDS = 60
+
 # Body cap for the JSON envelope. Base64 inflates by 4/3, so the decoded file
 # stays well under MAX_INPUT_BYTES for the same cap.
 MAX_BODY_BYTES = MAX_INPUT_BYTES + (MAX_INPUT_BYTES >> 1)
@@ -90,6 +112,50 @@ _UI_CSP = (
     "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob:; "
     "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 )
+
+
+class RateLimiter:
+    """Token bucket per client: *per_minute* requests, refilled continuously."""
+
+    # ponytail: in-memory and per-process; move to Redis if the service runs more than one replica.
+    def __init__(self, per_minute: int) -> None:
+        self.per_minute = per_minute
+        self._buckets: dict[str, tuple[float, float]] = {}
+        self._lock = threading.Lock()
+
+    def allow(self, client: str, now: float | None = None) -> bool:
+        if self.per_minute <= 0:
+            return True
+        now = time.monotonic() if now is None else now
+        rate = self.per_minute / 60.0
+        with self._lock:
+            tokens, stamp = self._buckets.get(client, (float(self.per_minute), now))
+            tokens = min(float(self.per_minute), tokens + (now - stamp) * rate)
+            allowed = tokens >= 1.0
+            self._buckets[client] = (tokens - 1.0 if allowed else tokens, now)
+            if len(self._buckets) > 10_000:
+                # Full buckets carry no state worth keeping; drop them.
+                full = [
+                    k
+                    for k, (t, ts) in self._buckets.items()
+                    if t + (now - ts) * rate >= self.per_minute
+                ]
+                for key in full:
+                    del self._buckets[key]
+            return allowed
+
+
+RATE_LIMITER = RateLimiter(0)
+#: Concurrent POST jobs; past this the server answers 503 instead of queueing threads.
+JOBS = threading.BoundedSemaphore(int(os.environ.get("WATERMARKS_SERVER_MAX_JOBS", "4")))
+
+
+def host_name(header: str | None) -> str:
+    """Host header -> lower-case name without port; handles [::1]:8765."""
+    value = (header or "").strip().lower()
+    if value.startswith("["):
+        return value[1 : value.find("]")] if "]" in value else value
+    return value.rsplit(":", 1)[0] if value.count(":") == 1 else value
 
 
 def static_file(path: str) -> Path | None:
@@ -176,6 +242,9 @@ def _text_detection_status(reports: list[dict[str, Any]]) -> str:
 def capabilities() -> dict[str, Any]:
     return {
         "version": VERSION,
+        "public": PUBLIC,
+        "disabled": list(PUBLIC_DISABLED) if PUBLIC else [],
+        "max_input_bytes": MAX_INPUT_BYTES,
         "tools": {
             "c2patool": which("c2patool") is not None,
             "exiftool": which("exiftool") is not None,
@@ -601,6 +670,7 @@ def _decode_input(body: dict[str, Any]) -> tuple[bytes, str]:
 
 class Handler(BaseHTTPRequestHandler):
     server_version = f"watermark-remover/{VERSION}"
+    timeout = SOCKET_TIMEOUT_SECONDS
 
     def log_message(self, fmt: str, *args: object) -> None:
         eprint(f"{self.address_string()} - {fmt % args}")
@@ -609,7 +679,25 @@ class Handler(BaseHTTPRequestHandler):
         if not API_KEY:
             return True
         header = self.headers.get("Authorization", "")
-        return header == f"Bearer {API_KEY}"
+        return hmac.compare_digest(header.encode(), f"Bearer {API_KEY}".encode())
+
+    def _host_allowed(self) -> bool:
+        return not ALLOWED_HOSTS or host_name(self.headers.get("Host")) in ALLOWED_HOSTS
+
+    def _same_origin(self) -> bool:
+        """A browser POST from another site carries its Origin; refuse it (CSRF)."""
+        origin = self.headers.get("Origin")
+        if origin is None:
+            return True  # curl, scripts, same-origin GET-less clients
+        return urlparse(origin).netloc.lower() == (self.headers.get("Host") or "").strip().lower()
+
+    def _client(self) -> str:
+        if TRUST_PROXY:
+            forwarded = self.headers.get("X-Forwarded-For", "")
+            hops = [hop.strip() for hop in forwarded.split(",") if hop.strip()]
+            if hops:
+                return hops[-1]  # the hop the proxy saw; earlier ones are client-supplied
+        return self.client_address[0]
 
     def _read_json(self) -> dict[str, Any] | None:
         raw = self.headers.get("Content-Length")
@@ -626,12 +714,16 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return body
 
-    def _respond(self, status: int, payload: dict[str, Any]) -> None:
+    def _respond(
+        self, status: int, payload: dict[str, Any], retry_after: int | None = None
+    ) -> None:
         data = _json_ok(payload)
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        if retry_after is not None:
+            self.send_header("Retry-After", str(retry_after))
         self.end_headers()
         self.wfile.write(data)
 
@@ -648,6 +740,9 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self) -> None:
+        if not self._host_allowed():
+            self._respond(HTTPStatus.MISDIRECTED_REQUEST, {"ok": False, "error": "unknown host"})
+            return
         path = urlparse(self.path).path
         file = static_file(path)
         if file is not None:
@@ -676,6 +771,14 @@ class Handler(BaseHTTPRequestHandler):
             self._respond(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not found"})
 
     def do_POST(self) -> None:
+        if not self._host_allowed():
+            self._respond(HTTPStatus.MISDIRECTED_REQUEST, {"ok": False, "error": "unknown host"})
+            return
+        if not self._same_origin():
+            self._respond(
+                HTTPStatus.FORBIDDEN, {"ok": False, "error": "cross-origin request refused"}
+            )
+            return
         path = urlparse(self.path).path
         if not self._authorized():
             self._respond(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "unauthorized"})
@@ -683,6 +786,32 @@ class Handler(BaseHTTPRequestHandler):
         if path not in ("/inspect", "/clean", "/detect", "/rewrite", "/visible"):
             self._respond(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not found"})
             return
+        if PUBLIC and path.lstrip("/") in PUBLIC_DISABLED:
+            self._respond(
+                HTTPStatus.FORBIDDEN,
+                {"ok": False, "error": f"{path.lstrip('/')} is turned off on this server"},
+            )
+            return
+        if not RATE_LIMITER.allow(self._client()):
+            self._respond(
+                HTTPStatus.TOO_MANY_REQUESTS,
+                {"ok": False, "error": "too many requests; wait a minute"},
+                60,
+            )
+            return
+        if not JOBS.acquire(blocking=False):
+            self._respond(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                {"ok": False, "error": "server is busy; try again shortly"},
+                5,
+            )
+            return
+        try:
+            self._post(path)
+        finally:
+            JOBS.release()
+
+    def _post(self, path: str) -> None:
         body = self._read_json()
         if body is None:
             raw_len = self.headers.get("Content-Length")
@@ -735,6 +864,8 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         run_detect = body.get("detect") is True
+        if run_detect and PUBLIC:
+            raise ValueError("detectors are turned off on this server")
         with tempfile.TemporaryDirectory(prefix="wm-inspect-") as tmp:
             path = _tmp_path(Path(tmp), name or "input")
             path.write_bytes(data)
@@ -917,6 +1048,8 @@ class Handler(BaseHTTPRequestHandler):
             options = {}
         if not isinstance(options, dict):
             raise ValueError("'options' must be an object")
+        if PUBLIC and (options.get("detect_before") or options.get("detect_after")):
+            raise ValueError("detectors are turned off on this server")
         for key, value in options.items():
             if key not in ALLOWED_CLEAN_OPTIONS:
                 raise ValueError(f"unknown option: {key}")
@@ -1008,13 +1141,26 @@ class Handler(BaseHTTPRequestHandler):
         )
 
 
+def configure_policy(bind_host: str) -> None:
+    """Set the deployment policy from the environment for a server bound to *bind_host*."""
+    global PUBLIC, ALLOWED_HOSTS, RATE_LIMITER, TRUST_PROXY  # noqa: PLW0603
+    PUBLIC = read_flag_env("WATERMARKS_SERVER_PUBLIC")
+    TRUST_PROXY = PUBLIC or read_flag_env("WATERMARKS_SERVER_TRUST_PROXY")
+    hosts = os.environ.get("WATERMARKS_SERVER_ALLOWED_HOSTS", "")
+    ALLOWED_HOSTS = frozenset(h.strip().lower() for h in hosts.split(",") if h.strip())
+    if not ALLOWED_HOSTS and bind_host in LOOPBACK_NAMES:
+        ALLOWED_HOSTS = LOOPBACK_NAMES
+    default_limit = "30" if PUBLIC else "0"
+    RATE_LIMITER = RateLimiter(int(os.environ.get("WATERMARKS_SERVER_RATE_LIMIT", default_limit)))
+
+
 def main() -> int:
     global API_KEY  # noqa: PLW0603
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--host", default=os.environ.get("WATERMARKS_SERVER_HOST", "127.0.0.1"))
-    p.add_argument(
-        "--port", type=int, default=int(os.environ.get("WATERMARKS_SERVER_PORT", "8765"))
-    )
+    # PORT is what Railway, Heroku and Cloud Run hand the process.
+    default_port = os.environ.get("WATERMARKS_SERVER_PORT") or os.environ.get("PORT") or "8765"
+    p.add_argument("--port", type=int, default=int(default_port))
     p.add_argument("--api-key", default=API_KEY, help="require this bearer token (default: none)")
     p.add_argument("-V", "--version", action="store_true", help="print version and exit")
     args = p.parse_args()
@@ -1024,6 +1170,14 @@ def main() -> int:
         return 0
 
     API_KEY = args.api_key
+    configure_policy(args.host)
+    if PUBLIC:
+        eprint(
+            f"public mode: {RATE_LIMITER.per_minute} requests/min per client, "
+            f"{', '.join(PUBLIC_DISABLED)} off"
+        )
+        if not ALLOWED_HOSTS:
+            eprint("warning: public mode without WATERMARKS_SERVER_ALLOWED_HOSTS answers any Host")
 
     if args.host not in ("127.0.0.1", "localhost", "::1"):
         eprint(f"warning: binding {args.host} — intended for a trusted network only")

@@ -34,8 +34,8 @@ export function Workspace({ queue, caps, offline, onReconnect, selected, setSele
   // A new file starts on its first available tool, never on one left over from the last file.
   useEffect(() => {
     setActive(null)
-    if (kind) setTool(toolsFor(kind)[0] ?? "clean")
-  }, [selected, kind])
+    if (kind) setTool(toolsFor(kind, caps?.disabled)[0] ?? "clean")
+  }, [selected, kind, caps])
 
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase()
@@ -95,7 +95,7 @@ export function Workspace({ queue, caps, offline, onReconnect, selected, setSele
 
       {items.length === 0 ? (
         <>
-          <Intake onFiles={addFiles} />
+          <Intake onFiles={addFiles} limit={caps?.max_input_bytes ?? null} />
           {caps && <CapabilityCards caps={caps} />}
         </>
       ) : (
@@ -124,7 +124,7 @@ export function Workspace({ queue, caps, offline, onReconnect, selected, setSele
                 setBox={(box) => setBoxes((all) => ({ ...all, [item.id]: box }))}
               />
               <div className="side">
-                <FindingsCard item={item} active={active} setActive={setActive} />
+                <FindingsCard item={item} active={active} setActive={setActive} onRetry={() => void queue.retry(item.id)} />
                 {item.inspection && item.inspection.kind !== "unknown" && (
                   <ToolsCard
                     key={item.id}
@@ -171,7 +171,8 @@ function Metrics({ items, caps }: { items: Item[]; caps: Capabilities | null }) 
     0,
   )
   const rewritten = items.filter((item) => item.result?.via === "rewrite").length
-  const detectors = caps ? Object.values(caps.text_detectors).filter(Boolean).length : 0
+  const detectors = caps && !caps.disabled.includes("detect") ? Object.values(caps.text_detectors).filter(Boolean).length : 0
+  const rewriteOn = !!caps?.layer_b.configured && !caps.disabled.includes("rewrite")
   const pct = (part: number, whole: number) => (whole ? (part / whole) * 100 : 0)
 
   return (
@@ -238,12 +239,14 @@ function Metrics({ items, caps }: { items: Item[]; caps: Capabilities | null }) 
           </span>
         </div>
         <p className="metric-value">
-          <strong className="metric-word">{caps ? (caps.layer_b.configured ? "Rewrite ready" : "Rewrite off") : "—"}</strong>
+          <strong className="metric-word">{caps ? (rewriteOn ? "Rewrite ready" : "Rewrite off") : "—"}</strong>
         </p>
         <p className="metric-note">
-          {caps?.layer_b.configured
-            ? "Token-level watermarks need a rewrite; hidden characters and metadata don't."
-            : "Token-level watermarks need a rewrite model set up on the server."}
+          {caps?.disabled.includes("rewrite")
+            ? "This public server doesn't run rewrites. Run wm-serve yourself to use one."
+            : rewriteOn
+              ? "Token-level watermarks need a rewrite; hidden characters and metadata don't."
+              : "Token-level watermarks need a rewrite model set up on the server."}
         </p>
         <div className="metric-foot">
           <MiniStat label="Rewritten" value={rewritten} />
@@ -276,14 +279,17 @@ function FilePicker({ onFiles, children, className }: { onFiles: (files: File[])
   )
 }
 
-function Intake({ onFiles }: { onFiles: (files: File[]) => void }) {
+function Intake({ onFiles, limit }: { onFiles: (files: File[]) => void; limit: number | null }) {
   return (
     <section className="intake" aria-labelledby="intake-title">
       <div className="intake-icon">
         <Icon name="upload" size={24} />
       </div>
       <h2 id="intake-title">Drop files to inspect them</h2>
-      <p>Text, Markdown and code, PNG, JPEG, WebP and other images, PDF, Word, EPUB, HTML and SVG. Up to 100 MB each.</p>
+      <p>
+        Text, Markdown and code, PNG, JPEG, WebP and other images, PDF, Word, EPUB, HTML and SVG.
+        {limit !== null && ` Up to ${formatBytes(limit)} each.`}
+      </p>
       <p className="sample" aria-label="Example: a sentence with two hidden characters, each shown as a lit code point">
         {SAMPLE.segments.map((segment, index) =>
           segment.kind === "text" ? segment.value : <mark key={index}>{segment.cp.slice(2)}</mark>,
@@ -321,6 +327,7 @@ function CapabilityCards({ caps }: { caps: Capabilities }) {
           <h3>{CARD_INFO[row.name]!.title}</h3>
           <p>{row.enables}.</p>
           {row.status[1] === "Needs setup" && <p className="capability-hint">Set up on the server. The Server view lists what to set.</p>}
+          {row.status[1] === "Off on this server" && <p className="capability-hint">{row.hint}</p>}
           <p className="capability-works">{CARD_INFO[row.name]!.works}</p>
         </article>
       ))}
@@ -675,15 +682,32 @@ function Evidence({ inspection, recheck, compact }: { inspection: Inspection; re
 
 /* ---------- findings ---------- */
 
-function FindingsCard({ item, active, setActive }: { item: Item; active: string | null; setActive: (cp: string | null) => void }) {
+function FindingsCard({
+  item,
+  active,
+  setActive,
+  onRetry,
+}: {
+  item: Item
+  active: string | null
+  setActive: (cp: string | null) => void
+  onRetry: () => void
+}) {
   const { inspection } = item
   if (!inspection)
     return (
       <Card title="Findings" icon="search">
         {item.error ? (
-          <div className="error" role="alert">
-            <p>{item.error.message}</p>
-          </div>
+          <>
+            <div className="error" role="alert">
+              <Icon name="alert" size={16} />
+              <p>{item.error.message}</p>
+            </div>
+            <button type="button" className="button" onClick={onRetry}>
+              <Icon name="refresh" size={16} />
+              Inspect again
+            </button>
+          </>
         ) : (
           <p className="placeholder" aria-busy="true">
             Inspecting…

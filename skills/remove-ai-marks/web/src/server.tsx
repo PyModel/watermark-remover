@@ -2,7 +2,7 @@ import { useState } from "react"
 import { apiKey, type Capabilities } from "./api"
 import type { Connection } from "./App"
 import { Icon } from "./icons"
-import { Card, Check, Chip, StatRow, type Tone } from "./ui"
+import { Card, Check, Chip, StatRow, formatBytes, type Tone } from "./ui"
 
 interface Row {
   name: string
@@ -16,6 +16,9 @@ export function capabilityRows(caps: Capabilities): Row[] {
   const ready: [Tone, string] = ["ok", "Ready"]
   const setup: [Tone, string] = ["off", "Needs setup"]
   const layerB = caps.layer_b
+  const off = (feature: string) => caps.disabled.includes(feature)
+  const offHere: [Tone, string] = ["off", "Off on this server"]
+  const offHint = "This public server turns it off so visitors can't spend its model or API keys. Run wm-serve yourself to use it."
   const rows: Row[] = [
     { name: "Hidden characters", enables: "Find and remove zero-width and other invisible Unicode in text", status: ready },
     { name: "Metadata", enables: "Strip C2PA, EXIF, XMP and AI tags from images, PDF, Office, EPUB, HTML and SVG", status: ready },
@@ -25,8 +28,10 @@ export function capabilityRows(caps: Capabilities): Row[] {
     {
       name: "Rewrite (Layer B)",
       enables: "Reword text with a model to weaken token-level watermarks",
-      status: layerB.configured ? (layerB.endpoint_allowed ? ready : ["bad", "Blocked"]) : setup,
-      hint: layerB.configured
+      status: off("rewrite") ? offHere : layerB.configured ? (layerB.endpoint_allowed ? ready : ["bad", "Blocked"]) : setup,
+      hint: off("rewrite")
+        ? offHint
+        : layerB.configured
         ? layerB.endpoint_allowed
           ? `${layerB.backend} at ${layerB.base_url_host}${layerB.loopback ? " (this machine)" : ""}`
           : `${layerB.base_url_host} is not this machine. Set WATERMARKS_REWRITE_ALLOW_REMOTE=1 to send text there.`
@@ -35,14 +40,14 @@ export function capabilityRows(caps: Capabilities): Row[] {
     {
       name: "SynthID scorer",
       enables: "Score images for a SynthID watermark before and after cleaning",
-      status: caps.scorers.synthid || caps.scorers.synthid_http ? ready : setup,
-      hint: "Set WATERMARKS_SYNTHID_SCORER_URL or REVERSE_SYNTHID_DIR.",
+      status: off("detect") ? offHere : caps.scorers.synthid || caps.scorers.synthid_http ? ready : setup,
+      hint: off("detect") ? offHint : "Set WATERMARKS_SYNTHID_SCORER_URL or REVERSE_SYNTHID_DIR.",
     },
     ...Object.entries(caps.text_detectors).map(([name, on]): Row => ({
       name: `Detector: ${name}`,
       enables: "Check text for a vendor watermark. Sends the text to that detector.",
-      status: on ? ready : setup,
-      hint: on ? undefined : "Configure this detector's environment variables, then restart wm-serve.",
+      status: off("detect") ? offHere : on ? ready : setup,
+      hint: off("detect") ? offHint : on ? undefined : "Configure this detector's environment variables, then restart wm-serve.",
     })),
     ...(["c2patool", "exiftool", "qpdf"] as const).map((tool): Row => ({
       name: tool,
@@ -113,6 +118,8 @@ export function ServerView({ connection, onRetry, onKey }: { connection: Connect
                 <StatRow icon="cube" label="Version">{caps.version}</StatRow>
                 <StatRow icon="link" label="Address">{location.host}</StatRow>
                 <StatRow icon="key" label="API key">{apiKey() ? "Sent with each request" : "Not required"}</StatRow>
+                <StatRow icon="shield" label="Mode">{caps.public ? "Public, rate limited" : "Private"}</StatRow>
+                <StatRow icon="upload" label="File size limit">{formatBytes(caps.max_input_bytes)}</StatRow>
               </div>
             </Card>
             <Card title="Rewrite model" icon="layers" badge={<Chip tone={caps.layer_b.configured ? "ok" : "off"}>{caps.layer_b.configured ? "Configured" : "Not set up"}</Chip>}>

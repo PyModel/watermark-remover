@@ -6,11 +6,10 @@ import { Card, Chip, Segmented, plural, sentence, type Tone } from "./ui"
 
 const TOOL_LABEL: Record<Tool, string> = { clean: "Clean", rewrite: "Rewrite", visible: "Visible mark", detect: "Detect" }
 
-export function toolsFor(kind: Kind): Tool[] {
-  if (kind === "text") return ["clean", "rewrite", "detect"]
-  if (kind === "image") return ["clean", "visible", "detect"]
-  if (kind === "container") return ["clean"]
-  return []
+/** The tools a file of this kind can use here; a public server turns some off. */
+export function toolsFor(kind: Kind, disabled: string[] = []): Tool[] {
+  const all: Tool[] = kind === "text" ? ["clean", "rewrite", "detect"] : kind === "image" ? ["clean", "visible", "detect"] : kind === "container" ? ["clean"] : []
+  return all.filter((tool) => !disabled.includes(tool))
 }
 
 interface ToolsProps {
@@ -28,7 +27,7 @@ interface ToolsProps {
 export function ToolsCard(props: ToolsProps) {
   const { item, tool, setTool } = props
   const kind = item.inspection!.kind
-  const tools = toolsFor(kind)
+  const tools = toolsFor(kind, props.caps?.disabled)
   const busy = item.status === "working" || item.status === "inspecting"
   return (
     <Card title="Actions" icon="pen" className="tools">
@@ -101,8 +100,9 @@ function Option({ id, label, hint, options, setOptions, fallback = false, disabl
 function CleanPanel({ item, caps, options, setOptions, queue }: ToolsProps) {
   const kind = item.inspection!.kind
   const png = item.inspection!.report.format === "png"
-  const textDetectors = caps ? Object.values(caps.text_detectors).some(Boolean) : false
-  const scorer = caps ? caps.scorers.synthid || caps.scorers.synthid_http : false
+  const detectOff = caps?.disabled.includes("detect") ?? false
+  const textDetectors = caps && !detectOff ? Object.values(caps.text_detectors).some(Boolean) : false
+  const scorer = caps && !detectOff ? caps.scorers.synthid || caps.scorers.synthid_http : false
   const shared = { options, setOptions }
   return (
     <>

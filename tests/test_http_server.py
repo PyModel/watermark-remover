@@ -513,3 +513,145 @@ def test_visible_output_never_aliases_the_upload_name(conn, name):
         conn, "/visible", {"file": _b64(_striped_png()), "name": name, "box": [8, 8, 8, 8]}
     )
     assert status == 200, body
+
+
+# ---------- deployment guards (DNS rebinding, CSRF, rate, jobs, public mode) ----------
+
+
+def _post_with(conn, path, payload, headers):
+    conn.request(
+        "POST",
+        path,
+        body=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", **headers},
+    )
+    resp = conn.getresponse()
+    data = resp.read()
+    return resp.status, json.loads(data) if data else {}, dict(resp.getheaders())
+
+
+TEXT = {"file": _b64(b"Hi\xe2\x80\x8b there"), "name": "a.txt"}
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        ("127.0.0.1:8765", "127.0.0.1"),
+        ("LocalHost", "localhost"),
+        ("[::1]:8765", "::1"),
+        ("::1", "::1"),
+        (None, ""),
+    ],
+)
+def test_host_name(header, expected):
+    assert server.host_name(header) == expected
+
+
+def test_unknown_host_is_refused(conn, monkeypatch):
+    # A DNS-rebinding page reaches a loopback server under its own hostname.
+    monkeypatch.setattr(server, "ALLOWED_HOSTS", frozenset({"wm.example"}))
+    status, _, _ = _post_with(conn, "/inspect", TEXT, {"Host": "evil.example"})
+    assert status == 421
+    status, _, _ = _post_with(conn, "/inspect", TEXT, {"Host": "wm.example"})
+    assert status == 200
+
+
+def test_cross_origin_post_is_refused(conn):
+    host = f"127.0.0.1:{conn.port}"
+    status, body, _ = _post_with(conn, "/clean", TEXT, {"Origin": "https://evil.example"})
+    assert status == 403 and "cross-origin" in body["error"]
+    status, _, _ = _post_with(conn, "/clean", TEXT, {"Origin": f"http://{host}"})
+    assert status == 200
+
+
+def test_rate_limiter_refills_over_time():
+    limiter = server.RateLimiter(2)
+    assert limiter.allow("a", now=0) and limiter.allow("a", now=0)
+    assert not limiter.allow("a", now=0)
+    assert limiter.allow("b", now=0)  # per client
+    assert limiter.allow("a", now=30)  # one token back after half a minute
+
+
+def test_rate_limit_answers_429_with_retry_after(conn, monkeypatch):
+    monkeypatch.setattr(server, "RATE_LIMITER", server.RateLimiter(1))
+    assert _post_with(conn, "/inspect", TEXT, {})[0] == 200
+    status, _, headers = _post_with(conn, "/inspect", TEXT, {})
+    assert status == 429 and headers["Retry-After"] == "60"
+
+
+def test_busy_server_answers_503(conn, monkeypatch):
+    monkeypatch.setattr(server, "JOBS", threading.BoundedSemaphore(1))
+    assert server.JOBS.acquire(blocking=False)  # one job already running
+    status, _, headers = _post_with(conn, "/inspect", TEXT, {})
+    assert status == 503 and headers["Retry-After"] == "5"
+    server.JOBS.release()
+    assert _post_with(conn, "/inspect", TEXT, {})[0] == 200
+
+
+def test_trusted_proxy_uses_the_last_forwarded_hop(monkeypatch):
+    monkeypatch.setattr(server, "TRUST_PROXY", True)
+    handler = server.Handler.__new__(server.Handler)
+    handler.client_address = ("10.0.0.1", 1)
+    handler.headers = {"X-Forwarded-For": "6.6.6.6, 203.0.113.9"}
+    assert handler._client() == "203.0.113.9"
+    monkeypatch.setattr(server, "TRUST_PROXY", False)
+    assert handler._client() == "10.0.0.1"
+
+
+def test_public_mode_turns_off_paid_endpoints(conn, monkeypatch):
+    monkeypatch.setattr(server, "PUBLIC", True)
+    for path in ("/rewrite", "/detect"):
+        status, body, _ = _post_with(conn, path, {**TEXT, "strength": "paraphrase"}, {})
+        assert status == 403 and "turned off" in body["error"]
+    status, body, _ = _post_with(conn, "/inspect", {**TEXT, "detect": True}, {})
+    assert status == 400 and "turned off" in body["error"]
+    status, body, _ = _post_with(conn, "/clean", {**TEXT, "options": {"detect_after": True}}, {})
+    assert status == 400 and "turned off" in body["error"]
+    assert _post_with(conn, "/clean", TEXT, {})[0] == 200
+    status, caps = _get(conn, "/capabilities")
+    assert caps["public"] is True and caps["disabled"] == ["rewrite", "detect"]
+    assert caps["max_input_bytes"] == server.MAX_INPUT_BYTES
+
+
+def test_api_key_comparison_rejects_near_misses(conn, monkeypatch):
+    monkeypatch.setattr(server, "API_KEY", "sekret")
+    for value in ("Bearer sekre", "Bearer sekrett", "bearer sekret", ""):
+        assert _post_with(conn, "/inspect", TEXT, {"Authorization": value})[0] == 401
+    assert _post_with(conn, "/inspect", TEXT, {"Authorization": "Bearer sekret"})[0] == 200
+
+
+@pytest.fixture
+def policy(monkeypatch):
+    for name in ("PUBLIC", "ALLOWED_HOSTS", "RATE_LIMITER", "TRUST_PROXY"):
+        monkeypatch.setattr(server, name, getattr(server, name))
+    for var in (
+        "WATERMARKS_SERVER_PUBLIC",
+        "WATERMARKS_SERVER_ALLOWED_HOSTS",
+        "WATERMARKS_SERVER_RATE_LIMIT",
+        "WATERMARKS_SERVER_TRUST_PROXY",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    return monkeypatch
+
+
+def test_loopback_bind_answers_only_to_loopback_names(policy):
+    server.configure_policy("127.0.0.1")
+    assert {"127.0.0.1", "localhost", "::1"} == server.ALLOWED_HOSTS
+    assert not server.PUBLIC and server.RATE_LIMITER.per_minute == 0
+
+
+def test_open_bind_answers_any_host_unless_configured(policy):
+    server.configure_policy("192.0.2.10")
+    assert frozenset() == server.ALLOWED_HOSTS
+    policy.setenv("WATERMARKS_SERVER_ALLOWED_HOSTS", "WM.example.com, healthcheck.railway.app")
+    server.configure_policy("192.0.2.10")
+    assert {"wm.example.com", "healthcheck.railway.app"} == server.ALLOWED_HOSTS
+
+
+def test_public_policy_defaults(policy):
+    policy.setenv("WATERMARKS_SERVER_PUBLIC", "1")
+    server.configure_policy("192.0.2.10")
+    assert server.PUBLIC and server.TRUST_PROXY and server.RATE_LIMITER.per_minute == 30
+    policy.setenv("WATERMARKS_SERVER_RATE_LIMIT", "5")
+    server.configure_policy("192.0.2.10")
+    assert server.RATE_LIMITER.per_minute == 5

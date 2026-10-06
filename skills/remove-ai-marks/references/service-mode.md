@@ -65,6 +65,12 @@ the variable; a failing model endpoint answers 502. `/visible` accepts PNG or JP
 and always returns PNG; a box too large for `texture` answers 400, so retry with
 `simple`.
 
+A server started with `WATERMARKS_SERVER_PUBLIC=1` answers `/rewrite` and `/detect`
+with 403, refuses `detect` / `detect_before` / `detect_after` with 400, and
+rate-limits POSTs (429 with `Retry-After`). `/capabilities` reports `public`,
+`disabled` and `max_input_bytes`. Any server answers 421 to an unknown `Host`,
+403 to a browser POST from another origin, and 503 when its job slots are full.
+
 `/clean` and `/inspect` route by the uploaded `name` extension plus the bytes;
 unrecognized formats answer `kind: "unknown"` (`/inspect`) or 400 (`/clean`).
 When writing a temp file for pasted text, keep a known extension (`.txt` /

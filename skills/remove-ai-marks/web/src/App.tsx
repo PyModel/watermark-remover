@@ -98,7 +98,9 @@ export function App() {
             {connection.caps && (
               <span className="pill">
                 <Icon name="layers" />
-                Rewrite {connection.caps.layer_b.configured ? "ready" : "not set up"}
+                {connection.caps.public
+                  ? "Public server"
+                  : `Rewrite ${connection.caps.layer_b.configured ? "ready" : "not set up"}`}
               </span>
             )}
             {connection.caps && (

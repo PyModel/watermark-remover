@@ -467,6 +467,19 @@ curl -s http://127.0.0.1:8765/openapi.json
 # POST /visible with {"file": ..., "name": "x.png", "box": [x, y, w, h], "backend": "texture"}
 ```
 
+Every deployment refuses requests for an unknown `Host` (a loopback bind answers only to `127.0.0.1`, `localhost` and `::1`, which stops DNS rebinding), refuses browser POSTs from another origin, drops idle sockets after 60 s, and runs at most 4 jobs at once (503 with `Retry-After` past that). To run it as a public service:
+
+| Variable | Effect |
+| --- | --- |
+| `WATERMARKS_SERVER_PUBLIC=1` | 30 POSTs per minute per client (429 past that), client address from the last `X-Forwarded-For` hop, and `/rewrite` and `/detect` turned off so visitors can't spend your model or vendor keys |
+| `WATERMARKS_SERVER_ALLOWED_HOSTS` | Comma-separated host names to answer to, such as `wm.example.com,healthcheck.railway.app` |
+| `WATERMARKS_SERVER_RATE_LIMIT` | POSTs per minute per client; `0` turns it off |
+| `WATERMARKS_SERVER_MAX_JOBS` | Concurrent jobs (default 4) |
+| `WATERMARKS_MAX_INPUT_BYTES` | Largest accepted file (default 256 MB) |
+| `PORT` | Listening port when `WATERMARKS_SERVER_PORT` is unset, as Railway and Cloud Run set it |
+
+`railway.json` deploys the core `Dockerfile` with `/health` as the health check.
+
 Docker (core image with exiftool + qpdf + c2patool baked in) and compose profiles for the heavy harnesses:
 
 ```bash
