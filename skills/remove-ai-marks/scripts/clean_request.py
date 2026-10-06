@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import math
 import shlex
-import shutil
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -51,9 +50,9 @@ from common import (
     validate_output_path,
 )
 from morphomod import DEFAULT_DILATION_RADIUS, VisiblePlan
-from optional_deps import module_available
 from perturb_text import MODES as PERTURB_MODES
 from rewrite_text import REWRITE_STRENGTHS, RewritePlan
+from video import video_runtime, video_runtime_hint
 
 #: Layer B strengths that ``--rewrite`` accepts.  ``tsapa`` is included so
 #: ``--rewrite tsapa`` and the older ``--tsapa`` flag mean the same thing.
@@ -429,34 +428,13 @@ def describe_dropped_text_transforms(
     )
 
 
-#: The video runtime a video asset needs before it can be planned: the two
-#: executables the video path shells out to, and the importable half of the
-#: ``video`` extra (PyAV). Every piece is required, so a missing runtime is a
-#: refusal before any write, never a degraded encode.
-VIDEO_EXTRA = "video"
-VIDEO_RUNTIME_BINARIES = ("ffmpeg", "ffprobe")
-VIDEO_RUNTIME_MODULES = ("av",)
-
+#: The video runtime a video asset needs before it can be planned. The
+#: canonical check lives in ``video.py`` beside the module that consumes it;
+#: this name is kept because the demo and the planning step import it here.
 
 def missing_video_runtime() -> tuple[str, ...]:
     """The absent video-runtime pieces, executables first, in a stable order."""
-    missing = [name for name in VIDEO_RUNTIME_BINARIES if shutil.which(name) is None]
-    missing.extend(name for name in VIDEO_RUNTIME_MODULES if not module_available(name))
-    return tuple(missing)
-
-
-def video_runtime_hint(missing: Sequence[str]) -> str:
-    """The labeled refusal for a video asset whose runtime is incomplete.
-
-    The install command is shell-quoted: the extra's brackets are a shell glob,
-    and a copied hint that silently splits the package name is worse than none.
-    """
-    detail = f" (missing: {', '.join(missing)})" if missing else ""
-    install = shlex.quote(f"watermark-remover[{VIDEO_EXTRA}]")
-    return (
-        f"video assets need the video runtime{detail}. "
-        f"Install: pip install {install} and a system ffmpeg/ffprobe"
-    )
+    return video_runtime()
 
 
 def build_clean_plan(request: CleanRequest, dest: Path, kind: AssetKind) -> CleanPlan:
