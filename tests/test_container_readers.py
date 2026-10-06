@@ -198,3 +198,23 @@ class TestMalformedContainers:
         field, so the empty result above comes from the bound, not bad content."""
         assert json.loads(_OVERSIZED_LABEL)["Label"] == "1"
         assert parse_tc260_aigc_json(_OVERSIZED_LABEL) is None
+
+
+# --- provenance (the port is noticed) --------------------------------------
+
+
+class TestProvenanceNotice:
+    def test_the_module_header_names_its_source_and_license(self) -> None:
+        text = (SCRIPTS / "container_readers.py").read_text(encoding="utf-8")
+        header = text.split('"""', 1)[0]
+        assert header.startswith("# Ported from wiltodelta/remove-ai-watermarks")
+        for source in ("_internal/ebml.py", "_internal/flv.py", "_internal/riff.py"):
+            assert source in header
+        assert "Apache-2.0" in header
+
+    def test_the_notice_lists_the_ported_readers_and_their_license(self) -> None:
+        notice = (ROOT / "NOTICE").read_text(encoding="utf-8")
+        assert "container_readers.py" in notice
+        for source in ("_internal/ebml.py", "_internal/flv.py", "_internal/riff.py"):
+            assert source in notice
+        assert "Apache" in notice and "2.0" in notice
