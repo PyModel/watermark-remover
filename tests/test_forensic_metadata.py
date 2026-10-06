@@ -9,6 +9,7 @@ schema-rejection wording. Fixtures are synthetic (Pillow-generated).
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import zlib
 from types import SimpleNamespace
@@ -80,9 +81,7 @@ def test_json_helpers_and_format_sniffer():
 
 def test_sha256_matches_file_bytes(tmp_path):
     path = _jpeg(tmp_path / "plain.jpg")
-    assert (
-        sha256_of(path.read_bytes()) == __import__("hashlib").sha256(path.read_bytes()).hexdigest()
-    )
+    assert sha256_of(path.read_bytes()) == hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def test_xattrs_and_live_photo_probe_are_safe_on_plain_file(tmp_path):

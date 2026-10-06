@@ -26,7 +26,7 @@ import re
 import struct
 import zlib
 from pathlib import Path
-from typing import Any, TypedDict, cast
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 import image_io
 from provenance_record import require_record_version
@@ -49,6 +49,18 @@ __all__ = [
     "SUPPORTED_EXTENSIONS",
     "collect_forensic_metadata",
 ]
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from typing import Protocol
+
+    class SupportsReadSeek(Protocol):
+        """The binary-stream surface the box walker needs (BytesIO / file objects)."""
+
+        def read(self, size: int, /) -> bytes: ...
+
+        def seek(self, offset: int, whence: int = 0, /) -> int: ...
+
 
 SUPPORTED_EXTENSIONS = {
     ".jpg",
@@ -622,7 +634,9 @@ def read_png_late_metadata_path(path: Path, window: int = _RAW_SCAN_HEAD) -> lis
     return chunks
 
 
-def _read_box_header(stream: Any, pos: int, limit: int) -> tuple[int, bytes, int] | None:
+def _read_box_header(
+    stream: SupportsReadSeek, pos: int, limit: int
+) -> tuple[int, bytes, int] | None:
     """Return ``(end, type, payload_offset)`` for one box inside ``limit``."""
     if pos < 0 or pos + 8 > limit:
         return None
@@ -649,7 +663,9 @@ def _read_box_header(stream: Any, pos: int, limit: int) -> tuple[int, bytes, int
     return end, box_type, payload_off
 
 
-def iter_file_boxes(stream: Any, start: int, end: int) -> Any:
+def iter_file_boxes(
+    stream: SupportsReadSeek, start: int, end: int
+) -> Iterator[tuple[int, int, bytes, int]]:
     """Yield ``(start, end, type, payload_offset)`` for each box in one bounded
     container region. Bounded local port of the upstream _internal.isobmff
     walker: every step reads an 8-16 byte header, never a media payload."""
