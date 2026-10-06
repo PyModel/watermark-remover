@@ -1014,7 +1014,9 @@ def clean_asset(
     # ``forced_kind`` may name video, which ``classify_asset`` deliberately does
     # not accept as a forced kind yet; the plan itself is the routing decision.
     kind: AssetKind = (
-        "video" if plan.forced_kind == "video" else classify_asset(path, forced_kind=plan.forced_kind)
+        "video"
+        if plan.forced_kind == "video"
+        else classify_asset(path, forced_kind=plan.forced_kind)
     )
     if kind == "unknown":
         # Contract (asset_kind.classify_asset): unknown binaries are never

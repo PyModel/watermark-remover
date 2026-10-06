@@ -432,6 +432,7 @@ def describe_dropped_text_transforms(
 #: canonical check lives in ``video.py`` beside the module that consumes it;
 #: this name is kept because the demo and the planning step import it here.
 
+
 def missing_video_runtime() -> tuple[str, ...]:
     """The absent video-runtime pieces, executables first, in a stable order."""
     return video_runtime()

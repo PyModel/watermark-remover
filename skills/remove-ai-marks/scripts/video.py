@@ -119,8 +119,7 @@ def _read_video(path: Path) -> tuple[str, tuple[dict, ...]]:
     data = read_bytes_bounded(path, MAX_INPUT_BYTES, label="video")
     container = _container_name(data)
     markers = tuple(
-        _marker(finding["container"], finding["label"])
-        for finding in read_container_findings(data)
+        _marker(finding["container"], finding["label"]) for finding in read_container_findings(data)
     )
     return container, markers
 

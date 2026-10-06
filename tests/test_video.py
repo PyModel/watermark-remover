@@ -218,8 +218,8 @@ def _ffmpeg_writing(output: bytes):
 
 def _clean_video(src: Path, *, output: bytes, monkeypatch: pytest.MonkeyPatch):
     import clean_pipeline
-    from clean_request import CleanRequest
     import video_encoding
+    from clean_request import CleanRequest
 
     dest = src.with_name(f"{src.stem}-cleaned{src.suffix}")
     monkeypatch.setattr(video_encoding, "run_command", _ffmpeg_writing(output))
