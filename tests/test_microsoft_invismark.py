@@ -188,7 +188,14 @@ def test_c2pa_uuid_requires_exact_algorithm_and_one_valid_value() -> None:
     }
 
     assert invismark_id_from_c2pa_info(info) == _WATERMARK_ID
-    assert invismark_id_from_c2pa_info({**info, "soft_binding_algorithm": "io.iscc.v0"}) is None
+    # Negative control: a synthetic non-invismark algorithm must not match
+    # (kept clear of every CC BY registry IRI the carve-out guard forbids).
+    assert (
+        invismark_id_from_c2pa_info(
+            {**info, "soft_binding_algorithm": "example.softbinding.algorithm"}
+        )
+        is None
+    )
     assert (
         invismark_id_from_c2pa_info(
             {**info, "soft_binding_value": f"{_WATERMARK_ID}, {uuid.uuid4()}"}
@@ -236,7 +243,10 @@ def test_c2pa_file_fallback_scans_a_cabx_chunk_and_stays_fail_soft(tmp_path: Pat
     )
     other = _cabx_png(
         tmp_path / "other.png",
-        f'{{"c2pa.soft-binding": {{"alg": "io.iscc.v0", "value": "{_WATERMARK_ID}"}}}}'.encode(),
+        (
+            '{"c2pa.soft-binding": {"alg": "example.softbinding.algorithm",'
+            f' "value": "{_WATERMARK_ID}"}}}}'
+        ).encode(),
     )
     ambiguous = _cabx_png(
         tmp_path / "ambiguous.png",

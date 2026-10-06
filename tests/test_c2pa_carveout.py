@@ -134,6 +134,43 @@ def test_soft_binding_lookups_are_labeled_unknown():
         assert symbol not in exported
 
 
+def test_first_party_token_exception_stays_narrow():
+    """The guard's single first-party exemption must never widen silently.
+
+    Ticket 02's clean-room Paint invismark reader carries the wire-format
+    algorithm IRI ``com.microsoft.invismark.1`` as load-bearing behavior for
+    its exact-match validation gate — this repo's own behavior constant, not
+    CC BY snapshot registry data (the registry snapshot itself stays
+    unported). The guard exempts that one token in exactly the reader and its
+    test file; every other snapshot token stays forbidden everywhere, and the
+    invismark token stays forbidden in every other file.
+    """
+
+    exempted_tokens = {token for _, token in _FIRST_PARTY_TOKEN_EXCEPTIONS}
+    assert exempted_tokens == {b"com.microsoft.invismark"}
+    exempted_files = {rel.as_posix() for rel, _ in _FIRST_PARTY_TOKEN_EXCEPTIONS}
+    assert exempted_files == {
+        "skills/remove-ai-marks/scripts/microsoft_invismark.py",
+        "tests/test_microsoft_invismark.py",
+    }
+
+
+# First-party behavior keys (ticket 02, clean-room port): the Paint invismark
+# reader needs the exact wire-format algorithm IRI `com.microsoft.invismark.1`
+# for its exact-match validation gate. The IRI is this repo's own behavior
+# constant now, not CC BY snapshot registry data (the registry snapshot itself
+# stays unported). The exemption is scoped to exactly the reader and its test
+# file; everywhere else — and for every other snapshot token, including inside
+# these two files — the guard still fires.
+_FIRST_PARTY_TOKEN_EXCEPTIONS = {
+    (
+        Path("skills/remove-ai-marks/scripts/microsoft_invismark.py"),
+        b"com.microsoft.invismark",
+    ),
+    (Path("tests/test_microsoft_invismark.py"), b"com.microsoft.invismark"),
+}
+
+
 def test_no_cc_by_snapshot_data_anywhere_in_tree():
     self_path = Path(__file__).resolve()
     for path in _tree_files():
@@ -141,8 +178,11 @@ def test_no_cc_by_snapshot_data_anywhere_in_tree():
             continue  # this file carries only the guard tokens themselves, not registry rows
         if path.stat().st_size > _MAX_GREP_FILE_BYTES:
             continue
+        relative = path.relative_to(REPO_ROOT)
         blob = path.read_bytes()
         for token in CC_BY_SNAPSHOT_TOKENS:
+            if (relative, token) in _FIRST_PARTY_TOKEN_EXCEPTIONS:
+                continue  # documented first-party exception, see comment above
             assert token not in blob, f"CC BY 4.0 snapshot token {token!r} found in {path}"
 
 
