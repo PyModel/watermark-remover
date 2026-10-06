@@ -92,6 +92,11 @@ def check_optional(extra: str) -> BackendAvailability:
         # The open DWT-DCT detector (dwt_dct.py + invisible_watermark.py):
         # the exact module set its is_available() probe names.
         "detect": ("numpy", "cv2", "pywt"),
+        # The Adobe TrustMark soft-binding decoder (trustmark_detector.py): the
+        # pip package pulls torch itself and downloads model weights on first
+        # use. Standalone by design -- it never joins the `all` aggregate
+        # (torch stays opt-in, per the extras-surface ruling).
+        "trustmark": ("trustmark",),
         # The aggregate extra joins the registry with a real checker: every
         # member declared in pyproject at this commit (visible + quality + ai
         # + provenance + detect; source-classify joins when it lands). Probe
@@ -143,7 +148,18 @@ def has_pixel() -> bool:
 
 
 #: Every extra `check_optional` knows about, for capability reporting.
-KNOWN_EXTRAS = ("visible", "quality", "ai", "provenance", "pixel", "migan", "lama", "detect", "all")
+KNOWN_EXTRAS = (
+    "visible",
+    "quality",
+    "ai",
+    "provenance",
+    "pixel",
+    "migan",
+    "lama",
+    "detect",
+    "trustmark",
+    "all",
+)
 
 
 def extras_status() -> dict[str, dict[str, object]]:
