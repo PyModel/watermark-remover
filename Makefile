@@ -29,7 +29,7 @@ pages-check:
 	cd skills/remove-ai-marks/web && bun install --frozen-lockfile && bun run build:pages && WM_PYTHON="$(PYTHON_PATH)" bun run test:pages
 
 pages-deploy: pages-check
-	cd skills/remove-ai-marks/web && bunx wrangler@4 pages deploy dist-pages --project-name watermark-remover --branch main
+	cd skills/remove-ai-marks/web && bunx wrangler@4 deploy --config pages/wrangler.jsonc
 
 packaging:
 	WM_PACKAGING_E2E=1 $(PYTHON) -m pytest tests/test_packaging.py -q

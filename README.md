@@ -458,13 +458,13 @@ Open `http://127.0.0.1:8765/` for the web UI. Drop one file or many: each is ins
 
 ### In the browser
 
-[watermark.pymodel.com](https://watermark.pymodel.com) is the same page with the server replaced by the same Python modules running in the tab (Pyodide, Python compiled to WebAssembly). `pages/bridge.py` drives `server.Handler` without a socket, so every answer matches `wm-serve`; `make pages-check` compares them on text, HTML, AVIF, PNG, JPEG and PDF fixtures. Files are never uploaded: the page's Content-Security-Policy allows only its own origin and `localhost`, which you can confirm in the browser's network panel. The first visit downloads about 15 MB (Python, Pillow, pypdf, the cleaners), cached afterwards.
+[watermark.pymodel.com](https://watermark.pymodel.com) is the same page with the server replaced by the same Python modules running in the tab (Pyodide, Python compiled to WebAssembly). `pages/bridge.py` drives `server.Handler` without a socket, so every answer matches `wm-serve`; `make pages-check` compares them on text, HTML, AVIF, PNG, JPEG and PDF fixtures. Files are never uploaded: the page's Content-Security-Policy allows only its own origin and `localhost`, which you can confirm in the browser's network panel. The first visit downloads about 8 MB compressed (Python, Pillow, pypdf, the cleaners), cached afterwards.
 
 What runs there: hidden characters, metadata for every format, visible-mark removal, SynthID band suppression, the style score, and Rewrite through your own model server on `localhost` (Ollama, LM Studio or any OpenAI-compatible server; the Engine view lists the steps, including `OLLAMA_ORIGINS`). Vendor detectors, the SynthID scorer and `exiftool`/`qpdf`/`c2patool` need keys or binaries, so they stay in `wm-serve` and the CLI. The browser limit is 40 MB per file.
 
 ```bash
 make pages-check     # build web/dist-pages and compare the browser engine with native Python
-make pages-deploy    # pages-check, then wrangler pages deploy (needs Cloudflare login)
+make pages-deploy    # pages-check, then wrangler deploy to Workers static assets (needs Cloudflare login)
 ```
 
 `/rewrite` uses only the model in the server's environment (`WATERMARKS_REWRITE_BACKEND`, `WATERMARKS_REWRITE_MODEL`, `WATERMARKS_REWRITE_BASE_URL`); a request that names its own endpoint, model or key is refused. `/visible` runs the built-in texture and blend fills only; the external inpainting command stays CLI-only.

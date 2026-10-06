@@ -1,0 +1,9 @@
+// The static site: Workers static assets (Cloudflare's successor to Pages). No Worker script runs;
+// dist-pages/_headers sets the CSP and caching. Deploy: make pages-deploy
+{
+  "name": "watermark-remover",
+  "account_id": "1020f6f28ab73dc9dedb54c461ff1aa0",
+  "compatibility_date": "2026-10-06",
+  "assets": { "directory": "../dist-pages" },
+  "routes": [{ "pattern": "watermark.pymodel.com", "custom_domain": true }]
+}

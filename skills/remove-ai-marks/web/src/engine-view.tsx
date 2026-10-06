@@ -58,7 +58,7 @@ export function EngineView({ connection, stage, onRetry }: { connection: Connect
             <StatRow icon="upload" label="File size limit">{caps ? formatBytes(caps.max_input_bytes) : "—"}</StatRow>
           </div>
           <p className="card-note">
-            The same Python modules as the wm command line. The first visit downloads about 15 MB; later visits load it from
+            The same Python modules as the wm command line. The first visit downloads about 8 MB; later visits load it from
             the browser cache.
           </p>
         </Card>
