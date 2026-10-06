@@ -99,3 +99,73 @@ def test_detects_repeated_payload_and_windows_guid_order(tmp_path: Path) -> None
     )
     assert detection.payload == expected_payload
     assert detection.minimum_support >= 3
+
+
+def test_rejects_clean_and_malformed_payloads(tmp_path: Path) -> None:
+    clean = tmp_path / "clean.png"
+    malformed = tmp_path / "malformed.png"
+    Image.fromarray(
+        np.random.default_rng(20260913).integers(24, 232, size=(192, 192, 3), dtype=np.uint8),
+        "RGB",
+    ).save(clean)
+    _write_carrier(malformed, valid_checksum=False)
+
+    assert detect_local_invismark(clean) is None
+    assert detect_local_invismark(malformed) is None
+
+
+def test_rejects_the_zero_uuid_and_tiny_carriers(tmp_path: Path) -> None:
+    zero = tmp_path / "zero.png"
+    tiny = tmp_path / "tiny.png"
+    plain = np.random.default_rng(20260913).integers(24, 232, size=(192, 192, 3), dtype=np.uint8)
+    Image.fromarray(_synthetic_writer(plain, uuid.UUID(int=0)), "RGB").save(zero)
+    # 24px tall: the LL plane is 12px -> 3 block rows, so map cells cannot reach
+    # the minimum support; the reader must answer None, not crash.
+    Image.fromarray(
+        np.random.default_rng(7).integers(24, 232, size=(24, 192, 3), dtype=np.uint8), "RGB"
+    ).save(tiny)
+
+    assert detect_local_invismark(zero) is None
+    assert detect_local_invismark(tiny) is None
+
+
+def test_disruption_requires_expected_guid_and_invalidates_payload(tmp_path: Path) -> None:
+    from microsoft_invismark import disrupt_local_invismark
+
+    source = tmp_path / "paint.png"
+    wrong_output = tmp_path / "wrong.png"
+    output = tmp_path / "clean.png"
+    original = _write_carrier(source)
+
+    assert disrupt_local_invismark(source, wrong_output, expected_watermark_id=uuid.uuid4()) is None
+    assert not wrong_output.exists()
+
+    result = disrupt_local_invismark(source, output, expected_watermark_id=_WATERMARK_ID)
+
+    assert result is not None
+    assert result.watermark_id == _WATERMARK_ID
+    assert result.changed_blocks >= 432
+    assert output.exists()
+    assert detect_local_invismark(output) is None
+    cleaned = np.asarray(Image.open(output).convert("RGB"))
+    assert np.mean(np.abs(cleaned.astype(np.int16) - original.astype(np.int16))) < 2.0
+
+
+def test_disruption_refuses_images_the_reader_cannot_validate(tmp_path: Path) -> None:
+    """No pixel mutation path runs when the repeated message fails validation."""
+    from microsoft_invismark import disrupt_local_invismark
+
+    clean = tmp_path / "clean.png"
+    malformed = tmp_path / "malformed.png"
+    refused = tmp_path / "refused.png"
+    Image.fromarray(
+        np.random.default_rng(20260913).integers(24, 232, size=(192, 192, 3), dtype=np.uint8),
+        "RGB",
+    ).save(clean)
+    _write_carrier(malformed, valid_checksum=False)
+
+    assert disrupt_local_invismark(clean, refused) is None
+    assert disrupt_local_invismark(malformed, refused) is None
+    assert not refused.exists()
+    # The refusal must not touch the source either.
+    assert detect_local_invismark(malformed) is None
