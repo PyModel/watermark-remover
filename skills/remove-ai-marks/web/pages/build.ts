@@ -4,7 +4,7 @@
  * only. Output: web/dist-pages (gitignored). Run: bun run build:pages
  */
 import { createHash } from "node:crypto"
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 
 const WEB = join(import.meta.dir, "..")
@@ -49,14 +49,21 @@ async function wheel({ file, url, sha256: expected }: (typeof WHEELS)[number]): 
   return data
 }
 
-/** Every cleaner module plus server.py and the bridge, as one zip the worker unpacks. */
-function cleaners(): void {
+/**
+ * Every cleaner module plus server.py and the bridge, as one zip the worker unpacks. The name
+ * carries its hash: it changes with every cleaner release, unlike the Pyodide runtime's path.
+ */
+function cleaners(): string {
   const files = readdirSync(SCRIPTS).filter((name) => name.endsWith(".py"))
+  const staging = join(OUT, "cleaners.zip")
   const zip = Bun.spawnSync(
-    ["python3", "-m", "zipfile", "-c", join(RUNTIME, "wm.zip"), ...files.map((f) => join(SCRIPTS, f)), join(import.meta.dir, "bridge.py")],
+    ["python3", "-m", "zipfile", "-c", staging, ...files.map((f) => join(SCRIPTS, f)), join(import.meta.dir, "bridge.py")],
     { stderr: "inherit" },
   )
   if (zip.exitCode !== 0) throw new Error("zipping the cleaners failed")
+  const name = `cleaners-${sha256(new Uint8Array(readFileSync(staging))).slice(0, 16)}.zip`
+  renameSync(staging, join(OUT, name))
+  return `/${name}`
 }
 
 // CSP: wm-serve's page policy plus what Pyodide needs (wasm compile, a same-origin worker) and the
@@ -83,9 +90,13 @@ ${PYODIDE}*
   Cache-Control: public, max-age=31536000, immutable
 /chunk-*
   Cache-Control: public, max-age=31536000, immutable
+/cleaners-*
+  Cache-Control: public, max-age=31536000, immutable
 `
 
 rmSync(OUT, { recursive: true, force: true })
+mkdirSync(RUNTIME, { recursive: true })
+const CLEANERS = cleaners()
 const build = await Bun.build({
   entrypoints: [join(WEB, "index.html"), join(WEB, "src", "engine.worker.ts")],
   outdir: OUT,
@@ -93,17 +104,16 @@ const build = await Bun.build({
   naming: { entry: "[name].[ext]", chunk: "chunk-[hash].[ext]", asset: "chunk-[hash].[ext]" },
   define: { "process.env.WM_TARGET": '"browser"', "process.env.WM_PYODIDE": JSON.stringify(PYODIDE),
     "process.env.WM_VERSION": JSON.stringify(APP_VERSION),
+    "process.env.WM_CLEANERS": JSON.stringify(CLEANERS),
   },
 })
 if (!build.success) {
   for (const log of build.logs) console.error(log)
   process.exit(1)
 }
-mkdirSync(RUNTIME, { recursive: true })
 for (const file of ["pyodide.mjs", "pyodide.asm.mjs", "pyodide.asm.wasm", "python_stdlib.zip", "pyodide-lock.json"]) {
   cpSync(join(CORE, file), join(RUNTIME, file))
 }
 for (const spec of WHEELS) writeFileSync(join(RUNTIME, spec.file), await wheel(spec))
-cleaners()
 writeFileSync(join(OUT, "_headers"), HEADERS)
-console.log(`dist-pages ready: watermark-remover ${APP_VERSION}, Pyodide ${VERSION}, ${WHEELS.length} wheels, cleaners zipped`)
+console.log(`dist-pages ready: watermark-remover ${APP_VERSION}, Pyodide ${VERSION}, ${WHEELS.length} wheels, cleaners at ${CLEANERS}`)
