@@ -8,6 +8,7 @@ test; the readers are stdlib-only and take bytes, so the seam stays here.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -18,7 +19,7 @@ SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 import container_readers
-from tc260_label import MAX_TC260_VALUE_BYTES
+from tc260_label import MAX_TC260_VALUE_BYTES, parse_tc260_aigc_json
 
 DOUBAO_USCC = "91110102MACQD9K640"
 PRODUCE_ID = "c6a75f11-3f4e-4b0a-9d21-77c0aa12e55f"
@@ -67,17 +68,19 @@ class TestMatroskaProvenance:
 # --- FLV -------------------------------------------------------------------
 
 
-def _amf0_string(value: bytes) -> bytes:
+def _amf0_string(value: bytes, *, long: bool = False) -> bytes:
+    if long:
+        return b"\x0c" + len(value).to_bytes(4, "big") + value
     return b"\x02" + len(value).to_bytes(2, "big") + value
 
 
-def _flv(value: bytes = LABEL) -> bytes:
+def _flv(value: bytes = LABEL, *, long: bool = False) -> bytes:
     payload = (
         _amf0_string(b"onMetaData")
         + b"\x08\x00\x00\x00\x02"
         + len(b"AIGC").to_bytes(2, "big")
         + b"AIGC"
-        + _amf0_string(value)
+        + _amf0_string(value, long=long)
         + len(b"duration").to_bytes(2, "big")
         + b"duration"
         + b"\x00"
@@ -148,3 +151,50 @@ class TestContainerDispatch:
 
     def test_unknown_bytes_return_nothing(self) -> None:
         assert container_readers.read_container_findings(b"not a container at all") == ()
+
+
+# --- malformed input (boundary tier) ---------------------------------------
+
+_OVERSIZED_LABEL = (
+    b'{"Label":"1","ContentProducer":"' + b"x" * (MAX_TC260_VALUE_BYTES + 1) + b'"}'
+)
+
+
+class TestMalformedContainers:
+    @pytest.mark.parametrize("builder", [_matroska, _flv, _avi])
+    def test_a_truncated_container_yields_nothing_and_raises_nothing(self, builder) -> None:
+        data = builder()
+        marker_start = data.index(LABEL)
+        # A header-only stub, and a file cut through the middle of the marker.
+        for cut in (4, marker_start + 10):
+            assert container_readers.read_container_findings(data[:cut]) == ()
+
+    @pytest.mark.parametrize(
+        ("builder", "kwargs"),
+        [(_matroska, {}), (_flv, {"long": True}), (_avi, {})],
+    )
+    def test_an_oversized_marker_yields_nothing_and_raises_nothing(
+        self, builder, kwargs
+    ) -> None:
+        data = builder(_OVERSIZED_LABEL, **kwargs)
+        assert container_readers.read_container_findings(data) == ()
+
+    @pytest.mark.parametrize(
+        "data",
+        [
+            b"",
+            b"\x1aE\xdf\xa3",
+            b"\x1aE\xdf\xa3" + b"\xff" * 32,
+            b"RIFF",
+            b"FLV",
+            b"\x00" * 64,
+        ],
+    )
+    def test_garbage_bytes_return_nothing_and_raise_nothing(self, data) -> None:
+        assert container_readers.read_container_findings(data) == ()
+
+    def test_the_oversized_label_is_refused_for_size_not_for_malformation(self) -> None:
+        """Negative control: the oversized value is valid JSON carrying a TC260
+        field, so the empty result above comes from the bound, not bad content."""
+        assert json.loads(_OVERSIZED_LABEL)["Label"] == "1"
+        assert parse_tc260_aigc_json(_OVERSIZED_LABEL) is None
