@@ -16,6 +16,41 @@ from morphomod import Raster, VisiblePlan, encode_png
 from rewrite_text import RewritePlan
 
 
+def test_image_pixel_plan_composes_all_pixel_concerns() -> None:
+    from clean_asset import ImagePixelPlan
+
+    pixel = ImagePixelPlan(
+        visible=VisiblePlan(box=(0, 0, 2, 2), backend="simple"),
+        degrade=ImageDegradePlan(strategy="jpeg", strength=0.4, seed=7),
+        remove_synthid=True,
+        synthid_strength=0.8,
+        wmct_marker=True,
+        external_backend="ctrlregen",
+    )
+    plan = CleanPlan(forced_kind="image", pixel=pixel)
+
+    assert plan.pixel == pixel
+    assert plan.pixel.visible is pixel.visible
+    assert plan.pixel.degrade is pixel.degrade
+    assert plan.pixel.remove_synthid is True
+    assert plan.pixel.external_backend == "ctrlregen"
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("missing-backend", {"supported": False, "available": False, "executed": False}),
+        ("ctrlregen", {"supported": True, "available": False, "executed": False}),
+    ],
+)
+def test_pixel_backend_capability_fails_closed(name: str, expected: dict[str, bool]) -> None:
+    from clean_asset import pixel_backend_capability
+
+    capability = pixel_backend_capability(name)
+
+    assert {key: capability[key] for key in expected} == expected
+
+
 def test_clean_asset_returns_semantics_without_printing_or_exit_code(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -86,7 +121,7 @@ def test_clean_asset_preserves_residual_as_typed_state(
     source.write_bytes(b"%PDF-1.4\n%%EOF\n")
     destination = tmp_path / "output.pdf"
 
-    def fake_clean_container(path: Path, dest: Path) -> dict:
+    def fake_clean_container(path: Path, dest: Path, *, also_layer_a_text: bool = True) -> dict:
         dest.write_bytes(path.read_bytes())
         return {
             "input": str(path),
