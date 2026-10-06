@@ -373,6 +373,121 @@ def microsoft_invismark_signal(watermark_id: Any) -> dict[str, Any]:
     }
 
 
+# The pixel-evidence family names the signal adapter recognizes (the
+# ``artifacts`` layer is deliberately absent: it identifies the source image).
+PIXEL_EVIDENCE_FAMILIES = ("dct", "fft", "noise", "ela", "gradient", "color")
+
+# The forensic-metadata record sections the signal adapter summarizes.
+FORENSIC_METADATA_SECTIONS = frozenset(
+    (
+        "png_chunks",
+        "png_post_iend_bytes",
+        "png_late_metadata_chunks",
+        "jpeg",
+        "jpeg_forensics",
+        "webp_chunks",
+        "webp_late_metadata_chunks",
+        "isobmff",
+        "pil",
+        "iptc",
+        "exif",
+        "c2pa_store",
+        "raw_metadata_windows",
+        "download_source_urls",
+        "quarantine",
+        "live_photo_content_id",
+        "has_exif_thumbnail",
+    )
+)
+
+
+def pixel_evidence_signal(payload: Any) -> dict[str, Any]:
+    """Map a collected pixel-evidence transport payload onto the vocabulary.
+
+    Pure mapping, fail-soft: ``payload`` is the versioned ``PixelEvidence.to_dict``
+    output the ``pixel_evidence`` collector reported, or ``None``/junk when no
+    pixel evidence was collected. The statistics describe residual, spectral and
+    encoder structure — they never assert AI provenance, so ``asserts_ai`` is
+    always False and a finding line only says what was measured. An absent,
+    undecodable, or malformed payload stays ``unknown``; absence is never a
+    clean verdict. The image-identifying artifacts layer is never forwarded
+    here (a thumbnail is a picture; asking for it is the caller's explicit
+    decision, not this signal's business).
+    """
+    if not isinstance(payload, dict) or not payload:
+        return {
+            "status": "unknown",
+            "families": [],
+            "asserts_ai": False,
+            "finding": None,
+            "note": (
+                "no pixel evidence collected — absence is never clean "
+                "(pixel statistics describe structure, they do not clear a source)"
+            ),
+        }
+    status = payload.get("status")
+    if not isinstance(status, str):
+        status = "unknown"
+    families = sorted(name for name in PIXEL_EVIDENCE_FAMILIES if payload.get(name))
+    finding = (
+        f"pixel forensics measured {len(families)}/{len(PIXEL_EVIDENCE_FAMILIES)} "
+        f"families (status {status})"
+        if families
+        else None
+    )
+    return {
+        "status": status,
+        "families": families,
+        "asserts_ai": False,
+        "finding": finding,
+        "note": (
+            "pixel statistics are structure evidence, not a verdict; an "
+            "empty or failed family is unknown, never a clean measurement"
+        ),
+    }
+
+
+def forensic_metadata_signal(record: Any) -> dict[str, Any]:
+    """Map a collected forensic-metadata record onto the vocabulary (read-only).
+
+    Pure mapping, fail-soft: ``record`` is the versioned record from
+    ``forensic_metadata.collect_forensic_metadata`` (04's collector), consumed
+    read-only — the signal only names which evidence sections are present; the
+    raw dump stays with the caller. Metadata structure is provenance evidence,
+    not an AI assertion, so a present record is a finding about what was
+    collected, and absence is unknown, never clean.
+    """
+    if not isinstance(record, dict) or not record:
+        return {
+            "present": False,
+            "record_type": None,
+            "sections": [],
+            "finding": None,
+            "note": (
+                "no forensic metadata record collected — absence is never clean "
+                "(stripped metadata is not proof of a clean origin)"
+            ),
+        }
+    sections = sorted(str(key) for key in record if key in FORENSIC_METADATA_SECTIONS)
+    record_type = record.get("record_type")
+    finding = (
+        f"forensic metadata record collected ({len(sections)} evidence sections: "
+        f"{', '.join(sections)})"
+        if sections
+        else None
+    )
+    return {
+        "present": True,
+        "record_type": record_type if isinstance(record_type, str) else None,
+        "sections": sections,
+        "finding": finding,
+        "note": (
+            "raw container/metadata evidence consumed read-only; structure is "
+            "not an AI assertion and absence of a section is unknown"
+        ),
+    }
+
+
 def identify_file(path: Path) -> ProvenanceVerdict:
     """Collect once from ``path`` and judge — the file-side entry point.
 
@@ -401,10 +516,12 @@ def identify_from_json(payload: str | bytes) -> ProvenanceVerdict:
 __all__ = [
     "PROVENANCE_VERDICT_SCHEMA_VERSION",
     "ProvenanceVerdict",
+    "forensic_metadata_signal",
     "identify_file",
     "identify_from_json",
     "identify_from_record",
     "invisible_watermark_signal",
     "microsoft_invismark_signal",
+    "pixel_evidence_signal",
     "unknown_verdict",
 ]

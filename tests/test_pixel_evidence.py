@@ -370,3 +370,79 @@ def test_pixel_decode_registers_optional_heif_opener(
 def _dump(path: Path, pixels: np.ndarray) -> Path:
     Image.fromarray(pixels).save(path)
     return path
+
+
+class TestIdentifySignal:
+    """The identify-side seam: pure adapters that map collected evidence onto
+    the finding vocabulary. They never run a collector, never raise, and never
+    turn absent evidence into a clean verdict."""
+
+    def test_a_collected_payload_maps_to_a_structured_finding(self, tmp_path: Path) -> None:
+        from identify import pixel_evidence_signal
+        from pixel_evidence import extract_pixel_evidence
+
+        payload = extract_pixel_evidence(_textured(tmp_path / "textured.png")).to_dict()
+
+        signal = pixel_evidence_signal(payload)
+
+        assert signal["asserts_ai"] is False  # statistics never assert provenance
+        assert signal["finding"] is not None
+        assert set(signal["families"]) == set(FAMILIES)
+        assert signal["status"] == "complete"
+        assert "artifacts" not in json.dumps(signal)  # image content never crosses
+        assert "never" in signal["note"]
+
+    def test_absence_is_unknown_never_clean(self) -> None:
+        from identify import pixel_evidence_signal
+
+        for absent in (None, {}, "nonsense", 42):
+            signal = pixel_evidence_signal(absent)
+
+            assert signal["asserts_ai"] is False
+            assert signal["finding"] is None
+            assert signal["status"] == "unknown"
+            assert "never" in signal["note"]
+
+    def test_a_decode_failure_is_reported_not_hidden(self, tmp_path: Path) -> None:
+        from identify import pixel_evidence_signal
+        from pixel_evidence import extract_pixel_evidence
+
+        path = tmp_path / "broken.png"
+        path.write_bytes(b"not an image")
+
+        signal = pixel_evidence_signal(extract_pixel_evidence(path).to_dict())
+
+        assert signal["status"] == "error"
+        assert signal["families"] == []
+        assert signal["finding"] is None  # nothing measured: nothing claimed
+
+    def test_forensic_metadata_record_maps_to_a_read_only_summary(self) -> None:
+        from identify import forensic_metadata_signal
+
+        record = {
+            "record_type": "forensic_metadata",
+            "schema_version": 1,
+            "png_chunks": [],
+            "exif": {},
+            "c2pa_store": {},
+            "sha256": "ab" * 32,
+        }
+
+        signal = forensic_metadata_signal(record)
+
+        assert signal["present"] is True
+        assert signal["record_type"] == "forensic_metadata"
+        assert set(signal["sections"]) == {"c2pa_store", "exif", "png_chunks"}
+        assert signal["finding"] is not None
+        assert "read-only" in signal["note"]
+
+    def test_forensic_metadata_absence_is_unknown_never_clean(self) -> None:
+        from identify import forensic_metadata_signal
+
+        for absent in (None, {}, "junk"):
+            signal = forensic_metadata_signal(absent)
+
+            assert signal["present"] is False
+            assert signal["finding"] is None
+            assert signal["sections"] == []
+            assert "never" in signal["note"]
