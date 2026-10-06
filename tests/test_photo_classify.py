@@ -256,9 +256,7 @@ class TestPureGates:
     def test_provider_only_runs_for_ai_labels(self) -> None:
         import classify
 
-        result = classify.classify_from_scores(
-            0.0, 0.0, {"openai": 9.0, "no_ai": 0.0}, receipt_threshold=2.0
-        )
+        result = classify.classify_from_scores(0.0, 0.0, {"openai": 9.0, "no_ai": 0.0})
         assert result.label == "human"
         assert result.provider is None
 
