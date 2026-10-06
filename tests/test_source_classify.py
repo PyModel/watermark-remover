@@ -148,3 +148,229 @@ def test_spectral_stack_abstains_when_numpy_is_absent(monkeypatch: pytest.Monkey
         assert source_spectral.feature_from_image(image, None) is None
     finally:
         source_spectral.make_geometry.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# E2: source_classify — the abstaining source-export-pipeline classifier
+# ---------------------------------------------------------------------------
+
+
+def _write_synthetic_mlp(path: Path, *, thresholds: tuple[float, float] = (0.5, 0.5)) -> str:
+    """Build a source_classify-schema npz whose scores are constants.
+
+    layer0/layer1 weights are zero, so both hidden layers collapse to
+    gelu(0)=0 and the raw scores equal output_bias exactly:
+    openai=1.0, google=0.0, unknown=0.0 — fully deterministic, no network.
+    Returns the synthetic file's SHA-256 (the loader pin, substituted in tests).
+    """
+    import hashlib
+
+    import numpy as np
+    import source_classify
+
+    payload = {
+        "classes": np.array(source_classify.CLASSES),
+        "kind": np.array("fused"),
+        "activation": np.array("gelu_exact"),
+        "mean": np.zeros(source_classify.FEATURE_WIDTH, dtype=np.float64),
+        "scale": np.ones(source_classify.FEATURE_WIDTH, dtype=np.float64),
+        "margins": np.array(thresholds, dtype=np.float64),
+        "layer0_weight": np.zeros((128, source_classify.FEATURE_WIDTH), dtype=np.float32),
+        "layer0_bias": np.zeros(128, dtype=np.float32),
+        "layer1_weight": np.zeros((64, 128), dtype=np.float32),
+        "layer1_bias": np.zeros(64, dtype=np.float32),
+        "output_weight": np.zeros((3, 64), dtype=np.float32),
+        "output_bias": np.array([1.0, 0.0, 0.0], dtype=np.float32),
+    }
+    with open(path, "wb") as sink:
+        np.savez(sink, **payload)
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _noise_png(path: Path, size: int = 512, seed: int = 11) -> Path:
+    import numpy as np
+    from PIL import Image
+
+    rng = np.random.default_rng(seed)
+    pixels = rng.integers(0, 256, size=(size, size, 3), dtype=np.uint8)
+    Image.fromarray(pixels).save(path)
+    return path
+
+
+@pytest.fixture()
+def synthetic_weights(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Point WEIGHTS_ENV at a directory holding the synthetic npz."""
+
+    import source_classify
+
+    weights = tmp_path / "sub" / source_classify.MODEL_FILE
+    weights.parent.mkdir()
+    digest = _write_synthetic_mlp(weights)
+    monkeypatch.setenv(source_classify.WEIGHTS_ENV, str(weights.parent))
+    monkeypatch.setattr(source_classify, "MODEL_SHA256", digest)
+    # the loader is lru_cached on (path, sha); drop entries from earlier tests
+    source_classify._load_model.cache_clear()
+    yield weights
+    source_classify._load_model.cache_clear()
+
+
+def test_classify_source_labels_openai_when_the_margin_clears(
+    tmp_path: Path, synthetic_weights: Path
+) -> None:
+    import source_classify
+
+    image = _noise_png(tmp_path / "image.png")
+    result = source_classify.classify_source(str(image))
+    assert result.label == "openai"
+    assert result.reason == "classified"
+    assert result.scores["openai"] == pytest.approx(1.0)
+    assert result.scores["google"] == pytest.approx(0.0)
+    assert result.margins["openai"] == pytest.approx(1.0)
+    assert result.thresholds["openai"] == pytest.approx(0.5)
+    assert result.claim == source_classify.CLAIM
+    as_dict = result.to_dict()
+    assert as_dict["model_revision"] == source_classify.WEIGHTS_REVISION
+    assert as_dict["label"] == "openai"
+
+
+def test_classify_source_abstains_to_unknown_out_of_distribution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_weights: Path
+) -> None:
+    """Margins that clear nothing report unknown — abstention, never a verdict."""
+    import hashlib
+
+    import source_classify
+
+    # rebuild with thresholds nothing clears (the model's stored margins double
+    # as the calibrated thresholds), then re-point the fixture seam at it
+    digest = _write_synthetic_mlp(synthetic_weights, thresholds=(1e6, 1e6))
+    monkeypatch.setattr(source_classify, "MODEL_SHA256", digest)
+    source_classify._load_model.cache_clear()
+    image = _noise_png(tmp_path / "image.png")
+    result = source_classify.classify_source(str(image))
+    assert result.label == "unknown"
+    assert result.reason == "abstained"
+    assert result.scores  # evidence-only scores are still reported
+    assert result.to_dict()["label"] == "unknown"
+    assert hashlib.sha256(synthetic_weights.read_bytes()).hexdigest() == digest
+
+
+def test_classify_source_reports_feature_unavailable_below_the_geometry(
+    tmp_path: Path, synthetic_weights: Path
+) -> None:
+    import source_classify
+
+    image = _noise_png(tmp_path / "tiny.png", size=64)
+    result = source_classify.classify_source(str(image))
+    assert result.label == "unknown"
+    assert result.reason == "feature_unavailable"
+    assert result.scores == {}
+
+
+def test_model_loader_rejects_a_sha_or_schema_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import source_classify
+
+    weights = tmp_path / source_classify.MODEL_FILE
+    _write_synthetic_mlp(weights)
+    with pytest.raises(ValueError, match="SHA-256"):
+        source_classify._load_model(weights, "0" * 64)
+    source_classify._load_model.cache_clear()
+
+
+def test_weights_env_override_names_a_missing_file_clearly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import source_classify
+
+    monkeypatch.setenv(source_classify.WEIGHTS_ENV, str(tmp_path / "absent"))
+    with pytest.raises(RuntimeError, match=source_classify.WEIGHTS_ENV):
+        source_classify._model_path()
+
+
+def test_first_use_downloads_the_pinned_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No env override → hf_hub_download with repo/file/revision pins; no 'main'."""
+    import types
+
+    import source_classify
+
+    weights = tmp_path / source_classify.MODEL_FILE
+    digest = _write_synthetic_mlp(weights)
+    calls: list[dict] = []
+
+    def fake_download(**kwargs):
+        calls.append(kwargs)
+        return str(weights)
+
+    fake_hub = types.ModuleType("huggingface_hub")
+    fake_hub.hf_hub_download = fake_download  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
+    monkeypatch.delenv(source_classify.WEIGHTS_ENV, raising=False)
+    monkeypatch.setattr(source_classify, "MODEL_SHA256", digest)
+    source_classify._load_model.cache_clear()
+    try:
+        assert source_classify._model_path() == weights
+    finally:
+        source_classify._load_model.cache_clear()
+    assert calls == [
+        {
+            "repo_id": source_classify.WEIGHTS_REPO,
+            "filename": source_classify.MODEL_FILE,
+            "revision": source_classify.WEIGHTS_REVISION,
+        }
+    ]
+    # The pins are real content addresses, never a moving branch.
+    assert source_classify.WEIGHTS_REVISION != "main"
+    assert len(source_classify.WEIGHTS_REVISION) == 40
+    assert len(source_classify.MODEL_SHA256) == 64
+    int(source_classify.WEIGHTS_REVISION, 16)
+    int(source_classify.MODEL_SHA256, 16)
+
+
+def test_weights_download_failure_is_a_runtime_error_not_a_network_trip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import types
+
+    import source_classify
+
+    def failing_download(**kwargs):
+        raise OSError("offline")
+
+    fake_hub = types.ModuleType("huggingface_hub")
+    fake_hub.hf_hub_download = failing_download  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
+    monkeypatch.delenv(source_classify.WEIGHTS_ENV, raising=False)
+    with pytest.raises(RuntimeError):
+        source_classify._model_path()
+
+
+def test_model_loader_rejects_wrong_shapes_and_nonfinite_fields(tmp_path: Path) -> None:
+    import numpy as np
+    import source_classify
+
+    payload = {
+        "classes": np.array(source_classify.CLASSES),
+        "kind": np.array("fused"),
+        "activation": np.array("gelu_exact"),
+        "mean": np.zeros(source_classify.FEATURE_WIDTH - 1, dtype=np.float64),
+        "scale": np.ones(source_classify.FEATURE_WIDTH, dtype=np.float64),
+        "margins": np.array([0.5, 0.5], dtype=np.float64),
+        "layer0_weight": np.zeros((128, source_classify.FEATURE_WIDTH), dtype=np.float32),
+        "layer0_bias": np.zeros(128, dtype=np.float32),
+        "layer1_weight": np.zeros((64, 128), dtype=np.float32),
+        "layer1_bias": np.zeros(64, dtype=np.float32),
+        "output_weight": np.zeros((3, 64), dtype=np.float32),
+        "output_bias": np.zeros(3, dtype=np.float32),
+    }
+    bad = tmp_path / "bad.npz"
+    with open(bad, "wb") as sink:
+        np.savez(sink, **payload)
+    import hashlib
+
+    with pytest.raises(ValueError, match="mean"):
+        source_classify._load_model(bad, hashlib.sha256(bad.read_bytes()).hexdigest())
+    source_classify._load_model.cache_clear()
