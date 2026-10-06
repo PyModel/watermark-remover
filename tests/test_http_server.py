@@ -507,8 +507,9 @@ def test_visible_rejects_non_images(conn):
     assert status == 400
 
 
-def test_visible_output_never_aliases_the_upload_name(conn):
+@pytest.mark.parametrize("name", ["cleaned.png", "out.png", "out", "input"])
+def test_visible_output_never_aliases_the_upload_name(conn, name):
     status, body = _post(
-        conn, "/visible", {"file": _b64(_striped_png()), "name": "cleaned.png", "box": [8, 8, 8, 8]}
+        conn, "/visible", {"file": _b64(_striped_png()), "name": name, "box": [8, 8, 8, 8]}
     )
     assert status == 200, body

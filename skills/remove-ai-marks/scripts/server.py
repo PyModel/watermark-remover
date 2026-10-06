@@ -880,13 +880,14 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError(f"backend must be one of: {', '.join(WEB_VISIBLE_BACKENDS)}")
         if classify_bytes(data, Path(name).suffix) != "image":
             raise ValueError("visible-mark removal takes a PNG or JPEG image")
-        with tempfile.TemporaryDirectory(prefix="wm-visible-") as tmp:
-            tmpdir = Path(tmp)
-            src = _tmp_path(tmpdir, name or "input")
+        # Input and output get separate temp dirs, so no upload name can alias the output.
+        with (
+            tempfile.TemporaryDirectory(prefix="wm-visible-") as tmp,
+            tempfile.TemporaryDirectory(prefix="wm-visible-out-") as out_dir,
+        ):
+            src = _tmp_path(Path(tmp), name or "input")
             src.write_bytes(data)
-            # Own directory, so no upload name can alias the output.
-            (tmpdir / "out").mkdir()
-            dest = tmpdir / "out" / "cleaned.png"
+            dest = Path(out_dir) / "cleaned.png"
             plan = VisiblePlan(
                 box=(box[0], box[1], box[2], box[3]), backend=backend, publish_mask=False
             )
