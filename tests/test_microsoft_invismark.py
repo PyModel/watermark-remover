@@ -10,8 +10,10 @@ remover touches pixels, and every refusal leaves the output path untouched.
 
 from __future__ import annotations
 
+import struct
 import sys
 import uuid
+import zlib
 from pathlib import Path
 
 import numpy as np
@@ -24,7 +26,10 @@ sys.path.insert(0, str(SCRIPTS))
 
 pytest.importorskip("numpy")
 
-from microsoft_invismark import detect_local_invismark
+from microsoft_invismark import (
+    detect_local_invismark,
+    invismark_id_from_c2pa_info,
+)
 
 #: The GUID the synthetic writer encodes (independent expected value).
 _WATERMARK_ID = uuid.UUID("83424621-03cb-40e3-9808-a9fae837156d")
@@ -169,3 +174,139 @@ def test_disruption_refuses_images_the_reader_cannot_validate(tmp_path: Path) ->
     assert not refused.exists()
     # The refusal must not touch the source either.
     assert detect_local_invismark(malformed) is None
+
+
+# ---------------------------------------------------------------------------
+# C2PA watermark-id helpers (wheel-optional, stdlib caBX fallback)
+# ---------------------------------------------------------------------------
+
+
+def test_c2pa_uuid_requires_exact_algorithm_and_one_valid_value() -> None:
+    info = {
+        "soft_binding_algorithm": "com.microsoft.invismark.1",
+        "soft_binding_value": str(_WATERMARK_ID),
+    }
+
+    assert invismark_id_from_c2pa_info(info) == _WATERMARK_ID
+    assert invismark_id_from_c2pa_info({**info, "soft_binding_algorithm": "io.iscc.v0"}) is None
+    assert (
+        invismark_id_from_c2pa_info(
+            {**info, "soft_binding_value": f"{_WATERMARK_ID}, {uuid.uuid4()}"}
+        )
+        is None
+    )
+    assert invismark_id_from_c2pa_info({**info, "soft_binding_value": "not-a-uuid"}) is None
+    assert invismark_id_from_c2pa_info({}) is None
+
+
+def _png_chunk(kind: bytes, payload: bytes) -> bytes:
+    return (
+        struct.pack(">I", len(payload))
+        + kind
+        + payload
+        + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+    )
+
+
+def _cabx_png(path: Path, cabx_payload: bytes) -> Path:
+    """Write a minimal PNG with one caBX chunk before IDAT (1x1 RGBA)."""
+    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0)
+    raw_idat = zlib.compress(b"\x00\x00\x00\x00")
+    path.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", ihdr)
+        + _png_chunk(b"caBX", cabx_payload)
+        + _png_chunk(b"IDAT", raw_idat)
+        + _png_chunk(b"IEND", b"")
+    )
+    return path
+
+
+def test_c2pa_file_fallback_scans_a_cabx_chunk_and_stays_fail_soft(tmp_path: Path) -> None:
+    from microsoft_invismark import invismark_id_from_c2pa
+
+    # Real caBX payloads are c2pa/JUMBF structures; the token keeps the chunk
+    # recognizable to the same scanner the provenance record uses.
+    signed = _cabx_png(
+        tmp_path / "signed.png",
+        (
+            '{"c2pa.soft-binding": {"alg": "com.microsoft.invismark.1",'
+            f' "value": "{_WATERMARK_ID}"}}}}'
+        ).encode(),
+    )
+    other = _cabx_png(
+        tmp_path / "other.png",
+        f'{{"c2pa.soft-binding": {{"alg": "io.iscc.v0", "value": "{_WATERMARK_ID}"}}}}'.encode(),
+    )
+    ambiguous = _cabx_png(
+        tmp_path / "ambiguous.png",
+        (
+            '{"c2pa.soft-binding": {"alg": "com.microsoft.invismark.1",'
+            f' "value": "{_WATERMARK_ID}, {uuid.uuid4()}"}}}}'
+        ).encode(),
+    )
+    bare = tmp_path / "bare.png"
+    Image.fromarray(np.zeros((8, 8, 3), dtype=np.uint8), "RGB").save(bare)
+    unreadable = tmp_path / "unreadable.png"
+    unreadable.write_bytes(b"not a png")
+
+    assert invismark_id_from_c2pa(signed) == _WATERMARK_ID
+    assert invismark_id_from_c2pa(other) is None
+    assert invismark_id_from_c2pa(ambiguous) is None
+    assert invismark_id_from_c2pa(bare) is None
+    assert invismark_id_from_c2pa(unreadable) is None
+
+
+def test_c2pa_wheel_path_parses_a_manifest_store(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The optional c2pa wheel is authoritative when it answers; garbage is None."""
+    import json
+    import types
+
+    from microsoft_invismark import invismark_id_from_c2pa
+
+    source = tmp_path / "signed.png"
+    Image.fromarray(np.zeros((8, 8, 3), dtype=np.uint8), "RGB").save(source)
+    store = {
+        "manifests": {
+            "paint": {
+                "assertions": [
+                    {
+                        "label": "c2pa.soft-binding",
+                        "data": {
+                            "alg": "com.microsoft.invismark.1",
+                            "blocks": [{"value": str(_WATERMARK_ID)}],
+                        },
+                    }
+                ]
+            }
+        }
+    }
+
+    class FakeReader:
+        def __init__(self, payload: bytes | None) -> None:
+            self._payload = payload
+
+        def __enter__(self) -> FakeReader:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def json(self) -> str:
+            return "" if self._payload is None else self._payload.decode("utf-8")
+
+    def make_module(payload: bytes | None) -> types.ModuleType:
+        module = types.ModuleType("c2pa")
+        module.Reader = types.SimpleNamespace(try_create=lambda _path: FakeReader(payload))
+        return module
+
+    monkeypatch.setitem(sys.modules, "c2pa", make_module(json.dumps(store).encode("utf-8")))
+    assert invismark_id_from_c2pa(source) == _WATERMARK_ID
+
+    monkeypatch.setitem(sys.modules, "c2pa", make_module(None))
+    assert invismark_id_from_c2pa(source) is None
+
+    monkeypatch.setitem(sys.modules, "c2pa", make_module(b"{not json"))
+    assert invismark_id_from_c2pa(source) is None
