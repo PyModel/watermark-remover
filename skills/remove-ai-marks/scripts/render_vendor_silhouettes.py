@@ -262,17 +262,32 @@ def _fit_font(
     *,
     index: int = 0,
 ) -> Any:
-    """Return the smallest 8-200 px font that reaches a render target."""
+    """Return the smallest 8-200 px font that reaches a render target.
+
+    Fonts load with Raqm layout, which the committed assets were shaped with.
+    Pillow falls back to basic layout (shifted glyphs, different bytes) when it
+    cannot load FriBiDi at runtime, so that case is refused, not rendered.
+    """
     ImageFont = _import_pixel("PIL.ImageFont")
+    if not _import_pixel("PIL.features").check_feature("raqm"):
+        raise image_io.PixelDependencyUnavailable(
+            "render_vendor_silhouettes needs Pillow's Raqm text layout, which "
+            "loads FriBiDi at runtime (macOS: brew install fribidi, with a "
+            "Python that searches /opt/homebrew/lib). Basic layout would not "
+            "reproduce the committed assets."
+        )
+
+    def load(size: int) -> Any:
+        return ImageFont.truetype(font_path, size, index=index, layout_engine=ImageFont.Layout.RAQM)
+
     low, high = 8, 200
     while low < high:
         size = (low + high) // 2
-        font = ImageFont.truetype(font_path, size, index=index)
-        if reaches_target(font):
+        if reaches_target(load(size)):
             high = size
         else:
             low = size + 1
-    return ImageFont.truetype(font_path, low, index=index)
+    return load(low)
 
 
 def render(text: str, width: int = 335, opts: dict[str, Any] | None = None) -> NDArray[Any]:

@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from conftest import load_toml
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
@@ -61,10 +62,7 @@ def conn():
 
 
 def _pyproject() -> dict:
-    import tomllib
-
-    with open(ROOT / "pyproject.toml", "rb") as handle:
-        return tomllib.load(handle)
+    return load_toml("pyproject.toml")
 
 
 def test_detect_extra_is_declared_and_checkable(monkeypatch: pytest.MonkeyPatch) -> None:

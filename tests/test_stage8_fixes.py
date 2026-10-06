@@ -6,10 +6,10 @@ commit messages reference the finding IDs.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
+from conftest import load_toml
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills" / "remove-ai-marks" / "scripts"
 ROOT = Path(__file__).resolve().parents[1]
@@ -112,12 +112,9 @@ class TestF2LearnedInpaintExtras:
         assert extra in status, f"extras_status() does not list {extra}"
         assert set(status[extra]) == {"available", "hint"}
 
-    @pytest.mark.skipif(sys.version_info < (3, 11), reason="tomllib requires Python 3.11+")
     @pytest.mark.parametrize("extra", ["migan", "lama"])
     def test_pyproject_declares_the_extra_with_runtime_requirements(self, extra: str):
-        import tomllib
-
-        pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        pyproject = load_toml("pyproject.toml")
         extras = pyproject["project"]["optional-dependencies"]
         assert extra in extras, f"pyproject.toml does not declare the {extra} extra"
         declared = {
@@ -125,12 +122,9 @@ class TestF2LearnedInpaintExtras:
         }
         assert {"onnxruntime", "huggingface-hub"} <= declared
 
-    @pytest.mark.skipif(sys.version_info < (3, 11), reason="tomllib requires Python 3.11+")
     def test_uv_lock_carries_the_learned_backend_extras(self):
         """The regenerated lock must contain the declared extras."""
-        import tomllib
-
-        lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
+        lock = load_toml("uv.lock")
         root = next(pkg for pkg in lock["package"] if pkg["name"] == "watermark-remover")
         extras = root.get("optional-dependencies", {})
         assert {"migan", "lama"} <= set(extras)

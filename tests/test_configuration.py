@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from conftest import load_toml
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
@@ -235,9 +236,7 @@ def test_pixel_extra_appears_in_extras_status_and_capabilities() -> None:
 @pytest.mark.skipif(sys.version_info < (3, 11), reason="tomllib requires Python 3.11+")
 def test_pyproject_declares_pixel_alongside_visible() -> None:
     """pyproject gains `pixel` (numpy, headless OpenCV, Pillow); `visible` keeps its deps."""
-    import tomllib
-
-    data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    data = load_toml("pyproject.toml")
     extras = data["project"]["optional-dependencies"]
     assert set(extras["pixel"]) == {"numpy", "opencv-python-headless", "Pillow"}
     assert set(extras["visible"]) == {"numpy", "Pillow", "opencv-python-headless"}

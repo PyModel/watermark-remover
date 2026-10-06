@@ -1,1 +1,3 @@
+wrote <TMP>/wm-out/wm-a.txt removed=3 replaced=1
+wrote <TMP>/wm-out/wm-b.txt removed=3 replaced=1
 done: 2 file(s), 0 with warnings/errors

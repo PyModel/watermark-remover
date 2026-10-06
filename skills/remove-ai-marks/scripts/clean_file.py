@@ -307,16 +307,19 @@ def main() -> int:
                 print(f"  - {action}")
     elif request.json:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
-    elif not request.quiet:
+    else:
         for result in results:
-            if result.get("residual") or result.get("exit_code") != 0:
-                eprint("warning: residual C2PA/AI/soft-binding signals may remain")
-            if result.get("skipped_text_transforms"):
+            # Errors surface even with --quiet; everything else is suppressible.
+            if result.get("error"):
+                eprint(f"error on {result['input']}: {result['error']}")
+            elif not request.quiet:
+                _present_result(result)
+            if result.get("skipped_text_transforms") and not request.quiet:
                 eprint(
                     f"note: {Path(result['input']).name} skipped "
                     f"{', '.join(result['skipped_text_transforms'])}"
                 )
-        if run.batch:
+        if run.batch and not request.quiet:
             errors = sum(r.get("exit_code", 0) != 0 for r in results)
             eprint(f"done: {len(results)} file(s), {errors} with warnings/errors")
     if all(r.get("exit_code", 0) == 0 for r in results):
@@ -353,29 +356,25 @@ def _write_audit(request: CleanRequest, payload: dict | list) -> None:
     )
 
 
-def _present_result(result, payload: dict, *, quiet: bool = False) -> None:
-    if quiet:
-        return
-    if result.kind == "text":
+def _present_result(payload: dict) -> None:
+    """Print what one cleaned file became; a nonzero exit_code means residual risk."""
+    output, residual = payload["output"], payload.get("exit_code", 0) != 0
+    if payload["kind"] == "text":
         stats = payload["stats"]
         eprint(
-            f"wrote {result.output} removed={stats['removed_count']} "
-            f"replaced={stats['replaced_count']}"
+            f"wrote {output} removed={stats['removed_count']} replaced={stats['replaced_count']}"
         )
+        if residual:
+            eprint("warning: residual hidden characters may remain")
         return
-    if result.kind == "image":
-        eprint(f"wrote {result.output} ({payload['bytes_in']} -> {payload['bytes_out']})")
-        for action in action_sentences(payload.get("action_details", ())):
-            eprint(f"  - {action}")
-        if result.residual:
-            eprint("warning: residual C2PA/AI/soft-binding signals may remain")
-        return
-
-    eprint(f"wrote {result.output} format={payload['format']}")
+    if payload["kind"] == "image":
+        eprint(f"wrote {output} ({payload['bytes_in']} -> {payload['bytes_out']})")
+    else:
+        eprint(f"wrote {output} format={payload['format']}")
     for action in action_sentences(payload.get("action_details", ())):
         eprint(f"  - {action}")
-    if result.residual:
-        eprint("warning: residual C2PA/AI metadata remains")
+    if residual:
+        eprint("warning: residual C2PA/AI/soft-binding signals may remain")
         for finding in payload.get("post_findings") or []:
             eprint(f"  ! {finding}")
 

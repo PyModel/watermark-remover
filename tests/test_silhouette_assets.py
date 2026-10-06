@@ -10,12 +10,13 @@ asset names (upstream visible_alpha_solve outputs, gemini backgrounds).
 
 from __future__ import annotations
 
-import os
+from collections.abc import Iterable
 from pathlib import Path
 
 import pytest
 import render_pill_silhouette
 import render_vendor_silhouettes
+from conftest import repo_files
 from render_vendor_silhouettes import AssetSpec
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills" / "remove-ai-marks" / "scripts"
@@ -38,7 +39,6 @@ _FORBIDDEN_NAME_FRAGMENTS = (
     "receipt-gate",  # captured receipt npz
 )
 
-_SKIP_DIRS = {".git", "__pycache__", ".venv", "node_modules", ".pytest_cache"}
 
 #: PROVENANCE.md column header -> canonical row key.
 CANONICAL_COLUMNS = {
@@ -51,20 +51,9 @@ CANONICAL_COLUMNS = {
 }
 
 
-def _forbidden_asset_hits(root: Path) -> list[Path]:
-    """Paths under ``root`` whose file name carries a forbidden fragment.
-
-    Walks with pruning: _SKIP_DIRS and *.egg-info payloads are never entered.
-    """
-    hits: list[Path] = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS and not d.endswith(".egg-info")]
-        hits.extend(
-            Path(dirpath) / name
-            for name in filenames
-            if any(f in name for f in _FORBIDDEN_NAME_FRAGMENTS)
-        )
-    return hits
+def _forbidden_asset_hits(paths: Iterable[Path]) -> list[Path]:
+    """The paths whose file name carries a forbidden fragment."""
+    return [p for p in paths if any(f in p.name for f in _FORBIDDEN_NAME_FRAGMENTS)]
 
 
 def _parse_provenance_table(path: Path) -> dict[str, dict[str, str]]:
@@ -93,8 +82,28 @@ def _parse_provenance_table(path: Path) -> dict[str, dict[str, str]]:
     return rows
 
 
+def _skip_unless_renderable(*, raqm: bool) -> None:
+    """Skip a regen test where the committed bytes cannot be reproduced.
+
+    The renderers draw with macOS system fonts; the vendor set also needs
+    Pillow's Raqm layout (FriBiDi loaded at runtime). Elsewhere, Linux CI
+    included, the bytes are not expected to match, so the test says why.
+    """
+    if not Path(render_vendor_silhouettes._FONT).is_file():
+        pytest.skip("the renderers draw with macOS system fonts, which are absent here")
+    try:
+        import cv2  # noqa: F401
+        import numpy  # noqa: F401
+        from PIL import features
+    except ImportError as exc:
+        pytest.skip(f"the pixel extra is not installed ({exc})")
+    if raqm and not features.check_feature("raqm"):
+        pytest.skip("Pillow cannot load FriBiDi here, so Raqm text layout is unavailable")
+
+
 def test_pill_asset_regenerates_deterministically(tmp_path: Path) -> None:
     """The committed jimeng_pill.png reproduces byte-for-byte from the renderer."""
+    _skip_unless_renderable(raqm=False)
     out = render_pill_silhouette.render_to_dir(tmp_path)
     assert out == tmp_path / render_pill_silhouette.ASSET_NAME
     assert out.read_bytes() == (ASSETS / render_pill_silhouette.ASSET_NAME).read_bytes()
@@ -107,6 +116,7 @@ def test_pill_asset_regenerates_deterministically(tmp_path: Path) -> None:
 )
 def test_vendor_asset_regenerates_deterministically(spec: AssetSpec, tmp_path: Path) -> None:
     """Every committed vendor silhouette reproduces byte-for-byte in isolation."""
+    _skip_unless_renderable(raqm=True)
     paths = render_vendor_silhouettes.render_to_dir(tmp_path, names=[spec.name])
     assert paths == [tmp_path / spec.name]
     assert (tmp_path / spec.name).read_bytes() == (ASSETS / spec.name).read_bytes()
@@ -125,9 +135,9 @@ def test_forbidden_capture_derived_assets_absent_from_tree(tmp_path: Path) -> No
     planted_dir = tmp_path / "carrier"
     planted_dir.mkdir()
     (planted_dir / "gemini_bg_96.png").write_bytes(b"PNG")
-    hits = _forbidden_asset_hits(tmp_path)
+    hits = _forbidden_asset_hits(tmp_path.rglob("*"))
     assert [p.name for p in hits] == ["gemini_bg_96.png"]
-    assert _forbidden_asset_hits(_REPO) == []
+    assert _forbidden_asset_hits(repo_files()) == []
 
 
 #: The 17 registry marks tickets 07-09 ship (gemini defers: pending-provenance).

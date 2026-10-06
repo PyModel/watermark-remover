@@ -195,8 +195,8 @@ def test_keyboard_interrupt_terminates_command_process_group(tmp_path: Path) -> 
     marker = tmp_path / "descendant-survived"
     child = (
         "import sys, time; from pathlib import Path; "
-        "Path(sys.argv[1]).write_text('ready'); "
-        "time.sleep(0.4); Path(sys.argv[2]).write_text('survived')"
+        "import os; Path(sys.argv[1]).write_text(str(os.getpid())); "
+        "time.sleep(30); Path(sys.argv[2]).write_text('survived')"
     )
     runner = (
         "import sys; "
@@ -204,28 +204,45 @@ def test_keyboard_interrupt_terminates_command_process_group(tmp_path: Path) -> 
         "from external_command import run_command; "
         "run_command("
         "[sys.executable, '-c', sys.argv[1], sys.argv[2], sys.argv[3]], "
-        "timeout=5, output_limit=1024)"
+        "timeout=60, output_limit=1024)"
     )
     worker = subprocess.Popen(
         [sys.executable, "-c", runner, child, str(ready), str(marker)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    deadline = time.monotonic() + 2
-    while not ready.exists() and worker.poll() is None and time.monotonic() < deadline:
+    # Generous deadlines: they bound a slow CI runner, they are not the assertion.
+    deadline = time.monotonic() + 15
+    while not (ready.exists() and ready.read_text()) and worker.poll() is None:
+        assert time.monotonic() < deadline, "command never started"
         time.sleep(0.01)
 
     try:
-        assert ready.exists()
+        child_pid = int(ready.read_text())
         worker.send_signal(signal.SIGINT)
-        assert worker.wait(timeout=2) != 0
+        assert worker.wait(timeout=15) != 0
     finally:
         if worker.poll() is None:
             worker.kill()
-            worker.wait(timeout=2)
+            worker.wait(timeout=5)
 
-    time.sleep(0.6)
+    # The descendant must be gone, not merely quiet for a fixed interval.
+    deadline = time.monotonic() + 15
+    while _pid_alive(child_pid):
+        assert time.monotonic() < deadline, f"descendant {child_pid} survived the interrupt"
+        time.sleep(0.05)
     assert not marker.exists()
+
+
+def _pid_alive(pid: int) -> bool:
+    """Whether *pid* exists. Orphans are reparented to init/launchd and reaped promptly."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 @pytest.mark.skipif(os.name != "posix", reason="process-group semantics are POSIX-specific")

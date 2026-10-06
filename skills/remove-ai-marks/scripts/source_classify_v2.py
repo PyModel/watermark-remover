@@ -16,11 +16,11 @@ This classifier does not decode SynthID or establish watermark presence.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 from dataclasses import dataclass
 from functools import lru_cache
-from hashlib import file_digest
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
@@ -118,8 +118,11 @@ def _model_path() -> Path:
 def _load_model(path: Path, expected_sha256: str) -> _Model:
     import numpy as np
 
+    digest = hashlib.sha256()  # hashlib.file_digest is 3.11+; the package supports 3.10
     with path.open("rb") as source:
-        actual_sha256 = file_digest(source, "sha256").hexdigest()
+        for chunk in iter(lambda: source.read(1 << 20), b""):
+            digest.update(chunk)
+    actual_sha256 = digest.hexdigest()
     if actual_sha256 != expected_sha256:
         raise ValueError("image-source model SHA-256 mismatch")
     required = {

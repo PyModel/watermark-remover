@@ -469,7 +469,8 @@ class TestDetectImageWiring:
     These exercise the in-process HTTP server like tests/test_detect_wiring.py."""
 
     @pytest.fixture(scope="class")
-    def conn(self):
+    @classmethod
+    def conn(cls):
         import http.client
         import threading
 

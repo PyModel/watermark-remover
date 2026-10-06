@@ -20,6 +20,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from conftest import load_toml
 from domain_types import InpaintRequest
 from morphomod import Mask, Raster, box_mask, decode_png, encode_png, write_pgm
 
@@ -485,11 +486,7 @@ class TestPyprojectExtras:
 
     @staticmethod
     def _extras() -> dict:
-        import tomllib
-
-        root = Path(__file__).resolve().parents[1]
-        data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
-        return data["project"]["optional-dependencies"]
+        return load_toml("pyproject.toml")["project"]["optional-dependencies"]
 
     @pytest.mark.parametrize("extra", ["migan", "lama"])
     def test_onnx_extra_declares_runtime_hub_and_pixel(self, extra) -> None:

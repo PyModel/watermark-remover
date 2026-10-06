@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from conftest import load_toml
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -201,9 +202,7 @@ def test_unavailable_decoder_yields_no_finding_not_a_crash(
 
 
 def test_pyproject_declares_the_trustmark_extra() -> None:
-    import tomllib
-
-    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    project = load_toml("pyproject.toml")["project"]
     extras = project["optional-dependencies"]
     trustmark = extras["trustmark"]
     assert any(pkg.split(">=")[0].strip().lower() == "trustmark" for pkg in trustmark), trustmark

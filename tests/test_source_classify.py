@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from conftest import load_toml
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills" / "remove-ai-marks" / "scripts"
 if str(SCRIPTS) not in sys.path:
@@ -422,11 +423,7 @@ def test_source_classify_extra_missing_deps_report_install_hint(
 
 def test_pyproject_declares_the_source_classify_extra() -> None:
     """The manifest carries the pixel stack + the hub client, never a weight."""
-    import tomllib
-
-    root = Path(__file__).resolve().parents[1]
-    with open(root / "pyproject.toml", "rb") as handle:
-        extras = tomllib.load(handle)["project"]["optional-dependencies"]
+    extras = load_toml("pyproject.toml")["project"]["optional-dependencies"]
     stack = extras["source-classify"]
     assert any(pkg.lower() == "numpy" for pkg in stack), stack
     assert any(pkg.startswith("opencv") for pkg in stack), stack

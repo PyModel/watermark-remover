@@ -12,14 +12,13 @@ import importlib
 from pathlib import Path
 
 import pytest
+from conftest import load_toml
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
 def _pyproject() -> dict:
-    import tomllib
-
-    return tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    return load_toml("pyproject.toml")
 
 
 def test_classify_and_classify_onnx_join_the_registry() -> None:

@@ -61,6 +61,7 @@ def test_edge_sentence_goldens_match_base_smoke_outputs(tmp_path):
         "-o",
         tmp_path / "wm-out",
     )
+    wm_output = wm_output.replace(str(tmp_path), "<TMP>").replace("\\", "/")  # Windows
     assert wm_output == (fixtures / "t05_wm_cli.golden.txt").read_text()
 
     smoke_image = fixtures / "t05_smoke.png"

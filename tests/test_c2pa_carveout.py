@@ -17,6 +17,8 @@ import sys
 import zlib
 from pathlib import Path
 
+from conftest import repo_files
+
 sys.path.insert(
     0, str(Path(__file__).resolve().parents[1] / "skills" / "remove-ai-marks" / "scripts")
 )
@@ -49,17 +51,7 @@ CC_BY_SNAPSHOT_TOKENS = (
     b"softbinding-algorithm-list",
 )
 
-_PRUNED_DIRS = {".git", ".venv", "node_modules", "__pycache__", ".pytest_cache", ".ruff_cache"}
 _MAX_GREP_FILE_BYTES = 10 * 1024 * 1024
-
-
-def _tree_files():
-    for path in REPO_ROOT.rglob("*"):
-        if path.is_dir():
-            continue
-        if _PRUNED_DIRS.intersection(path.relative_to(REPO_ROOT).parts):
-            continue
-        yield path
 
 
 def _png_chunk(kind: bytes, payload: bytes) -> bytes:
@@ -173,7 +165,7 @@ _FIRST_PARTY_TOKEN_EXCEPTIONS = {
 
 def test_no_cc_by_snapshot_data_anywhere_in_tree():
     self_path = Path(__file__).resolve()
-    for path in _tree_files():
+    for path in repo_files():
         if path == self_path:
             continue  # this file carries only the guard tokens themselves, not registry rows
         if path.stat().st_size > _MAX_GREP_FILE_BYTES:

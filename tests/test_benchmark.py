@@ -48,7 +48,8 @@ def test_generator_persists_jpeg_bytes_at_advertised_path(tmp_path) -> None:
     assert len(items) == 1
     assert items[0].watermark_path.suffix == ".jpg"
     assert items[0].watermark_path.read_bytes().startswith(b"\xff\xd8\xff")
-    assert PIL_IMAGE.open(items[0].watermark_path).format == "JPEG"
+    with PIL_IMAGE.open(items[0].watermark_path) as image:
+        assert image.format == "JPEG"
 
 
 def test_changed_pixels_are_contained_by_ground_truth_mask() -> None:

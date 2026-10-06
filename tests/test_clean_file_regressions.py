@@ -240,6 +240,31 @@ def test_quiet_suppresses_success_output_but_not_errors(tmp_path: Path) -> None:
     assert "not a" in result.stderr or "error" in result.stderr
 
 
+def test_success_reports_what_was_written(tmp_path: Path) -> None:
+    # Without --quiet each cleaned file is reported, and a failure names its reason
+    # (not a generic residual warning), with or without --quiet.
+    src = _text_source(tmp_path)
+    dest = tmp_path / "output.txt"
+    result = _run(str(src), "-o", str(dest))
+    assert result.returncode == 0, result.stderr
+    assert f"wrote {dest} removed=" in result.stderr
+
+    stubs = tmp_path / "blocked-opencv"
+    stubs.mkdir()
+    _write_broken_opencv(stubs)
+    image = tmp_path / "input.png"
+    image.write_bytes(encode_png(Raster(16, 16, 3, bytearray([9, 8, 7] * 256))))
+    mask = tmp_path / "mask.pgm"
+    write_pgm(box_mask(16, 16, (7, 7, 1, 1)), mask)
+    args = (str(image), "-o", str(tmp_path / "out.png"), "--visible-mask", str(mask))
+    backend = ("--visible-backend", "cv2-telea")
+    env = {**os.environ, "PYTHONPATH": str(stubs)}
+    for quiet in ((), ("--quiet",)):
+        result = _run(*args, *backend, *quiet, env=env)
+        assert result.returncode != 0
+        assert f"error on {image}: cv2-telea backend is unavailable" in result.stderr
+
+
 def test_audit_writes_report_only_when_requested(tmp_path: Path) -> None:
     # F3: no audit trail by default (frictionless); --audit writes a JSON report.
     src = _text_source(tmp_path)

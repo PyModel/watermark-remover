@@ -494,7 +494,7 @@ def make_visible(dirpath: Path) -> Path:
 def check_visible(src: Path, out: Path) -> None:
     orig, new = Image.open(src).convert("RGB"), Image.open(out).convert("RGB")
     require(new.size == orig.size, "visible clean changed dimensions")
-    region = list(new.crop((10, 10, 30, 30)).getdata())
+    region = [new.getpixel((x, y)) for y in range(10, 30) for x in range(10, 30)]
     require(any(p != (255, 0, 0) for p in region), "logo region still solid red: mask not filled")
     # The pipeline dilates the 20x20 box by radius 3 -> effective 26x26 mask
     # (7..33). That halo is expected to change; everything beyond it must not.
@@ -537,9 +537,12 @@ def check_robustness(dirpath: Path) -> None:
 
 def check_report_honesty(report: dict, src: Path) -> None:
     """The honesty contract: whatever was removed is enumerated in the report."""
-    has_actions = isinstance(report.get("actions"), list)
+    details = report.get("action_details")
+    has_actions = isinstance(details, list) and all(
+        isinstance(d, dict) and d.get("code") and d.get("text") for d in details
+    )
     has_stats = isinstance(report.get("stats"), dict) and "removed" in report["stats"]
-    require(has_actions or has_stats, "report lacks actions list and removal stats")
+    require(has_actions or has_stats, "report lacks action_details and removal stats")
     require(
         report.get("bytes_out") is not None or report.get("stats") is not None,
         "report lacks byte/char accounting",
