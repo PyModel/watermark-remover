@@ -112,7 +112,9 @@ def _model_path() -> Path:
         raise RuntimeError(
             "Install 'watermark-remover[source-classify]' for image-source weights"
         ) from error
-    return Path(hub.hf_hub_download(repo_id=WEIGHTS_REPO, filename=MODEL_FILE, revision=WEIGHTS_REVISION))
+    return Path(
+        hub.hf_hub_download(repo_id=WEIGHTS_REPO, filename=MODEL_FILE, revision=WEIGHTS_REVISION)
+    )
 
 
 @lru_cache(maxsize=2)
@@ -140,13 +142,21 @@ def _load_model(path: Path, expected_sha256: str) -> _Model:
                 raise ValueError(f"invalid {name} mean")
             if precision.shape != mean.shape or precision.dtype != np.float32:
                 raise ValueError(f"invalid {name} precision")
-            if not np.all(np.isfinite(mean)) or not np.all(np.isfinite(precision)) or np.any(precision < 0):
+            if (
+                not np.all(np.isfinite(mean))
+                or not np.all(np.isfinite(precision))
+                or np.any(precision < 0)
+            ):
                 raise ValueError(f"nonfinite or negative {name} filter")
             loaded_filters[name] = (mean, precision)
         templates: dict[str, NDArray[Any]] = {}
         for route in ROUTES:
             unit = payload[f"openai_{route}_unit"]
-            if unit.shape != (992, 992) or unit.dtype != np.float32 or not np.all(np.isfinite(unit)):
+            if (
+                unit.shape != (992, 992)
+                or unit.dtype != np.float32
+                or not np.all(np.isfinite(unit))
+            ):
                 raise ValueError(f"invalid {route} template")
             if not np.isclose(np.linalg.norm(unit), 1.0, rtol=1e-5):
                 raise ValueError(f"nonunit {route} template")
@@ -184,7 +194,10 @@ def _template_score(values: NDArray[Any], weights: tuple[NDArray[Any], NDArray[A
     mean, precision = weights
     numerator = np.real(values * np.conj(mean) * precision).sum(axis=(0, 1))
     denominator = max(
-        float(np.sqrt((np.abs(values) ** 2 * precision).sum() * (np.abs(mean) ** 2 * precision).sum())), 1e-12
+        float(
+            np.sqrt((np.abs(values) ** 2 * precision).sum() * (np.abs(mean) ** 2 * precision).sum())
+        ),
+        1e-12,
     )
     return float(numerator.sum() / denominator)
 
@@ -239,16 +252,23 @@ def classify_image_source(source: str | os.PathLike[str]) -> ImageSourceClassifi
     old_sigma24 = _template_score(_spectrum(rgb, 2.4), model.filters["old_google_sigma24"])
     limits = model.thresholds
     old_google = (
-        old_default / limits["old_google_default_parent"] + old_sigma24 / limits["old_google_sigma24_parent"]
+        old_default / limits["old_google_default_parent"]
+        + old_sigma24 / limits["old_google_sigma24_parent"]
     ) / 2
     r152_google = _template_score(regular, model.filters["r152_google"])
     r152_openai = _template_score(regular, model.filters["r152_openai"])
     r161_google = _template_score(regular, model.filters["r161_google"])
     r161_openai = _template_score(regular, model.filters["r161_openai"])
     aspect = _aspect(width, height)
-    r163_openai = _template_score(regular, model.filters[f"r163_{aspect}"]) if aspect in GROUPS else None
+    r163_openai = (
+        _template_score(regular, model.filters[f"r163_{aspect}"]) if aspect in GROUPS else None
+    )
     old_openai_scores = _openai_template_scores(rgb, model)
-    google = old_google >= 1.0 or r152_google >= limits["r152_google"] or r161_google >= limits["r161_google"]
+    google = (
+        old_google >= 1.0
+        or r152_google >= limits["r152_google"]
+        or r161_google >= limits["r161_google"]
+    )
     openai = (
         any(score >= limits[f"openai_{route}"] for route, score in old_openai_scores.items())
         or r152_openai >= limits["r152_openai"]
