@@ -191,6 +191,12 @@ def _run_ffprobe(
     if result.returncode != 0:
         log.warning("ffprobe could not inspect %s for %s", purpose, source)
         return None
+    if result.stdout_truncated:
+        # A bounded read that hit its limit is a partial answer. Returning the
+        # tail as if it were complete would invent frame timing, so it is no
+        # measurement at all.
+        log.warning("ffprobe %s output was truncated for %s", purpose, source)
+        return None
     return result.stdout_text
 
 
@@ -219,7 +225,7 @@ def probe_video_encode_profile(
         payload = json.loads(raw_profile)
         streams = payload.get("streams", [])
         stream = streams[0]
-    except (AttributeError, IndexError, TypeError, json.JSONDecodeError):
+    except (AttributeError, IndexError, KeyError, TypeError, json.JSONDecodeError):
         log.warning("ffprobe returned no usable video profile for %s; using defaults", source)
         return _labeled_default("ffprobe returned no usable video stream")
 

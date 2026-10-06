@@ -149,6 +149,7 @@ def test_a_probe_that_cannot_answer_labels_the_fallback(monkeypatch, tmp_path: P
         lambda *_a, **_k: fake_command_result(0, stdout="not json at all"),
         lambda *_a, **_k: fake_command_result(0, stdout=""),
         lambda *_a, **_k: fake_command_result(0, stdout='{"streams": []}'),
+        lambda *_a, **_k: fake_command_result(0, stdout='{"streams": {}}'),
         lambda *_a, **_k: fake_command_result(0, stdout="[]"),
     ]
     for runner in cases:
@@ -157,6 +158,19 @@ def test_a_probe_that_cannot_answer_labels_the_fallback(monkeypatch, tmp_path: P
         assert profile.is_default is True
         assert profile.pixel_format == "yuv420p"
         assert profile.frame_rate is None
+
+
+def test_a_truncated_probe_answer_is_not_a_measurement(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"not really a video; ffprobe is faked")
+    truncated = fake_command_result(0, stdout=_PROFILE_JSON)
+    truncated.stdout_truncated = True
+    monkeypatch.setattr(video_encoding, "run_command", lambda *_a, **_k: truncated)
+
+    profile = video_encoding.probe_video_encode_profile(source)
+
+    assert profile.is_default is True
+    assert video_encoding.probe_video_timestamps(source) == ()
 
 
 def test_component_depth_falls_back_to_the_probes_own_bit_depth(
@@ -250,11 +264,12 @@ def test_remux_copies_every_stream_and_publishes_atomically(monkeypatch, tmp_pat
 
 def test_remux_can_keep_metadata_when_asked(monkeypatch, tmp_path: Path) -> None:
     seen: list = []
-    monkeypatch.setattr(
-        video_encoding,
-        "run_command",
-        lambda argv, **_kwargs: (seen.append(argv), fake_command_result(0))[1],
-    )
+
+    def fake_run(argv, **_kwargs):
+        seen.append(argv)
+        return fake_command_result(0)
+
+    monkeypatch.setattr(video_encoding, "run_command", fake_run)
 
     video_encoding.remux_video(tmp_path / "clip.mp4", tmp_path / "out.mkv", strip_metadata=False)
 
