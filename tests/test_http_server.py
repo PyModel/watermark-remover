@@ -338,6 +338,140 @@ def test_oversized_body_413(conn, monkeypatch):
     assert status == 413
 
 
+def test_executor_failure_is_a_sanitized_500(conn, monkeypatch):
+    """An executor error payload is internal, not a client-visible 400.
+
+    _run_planned re-raised every executor error payload as ValueError, so a
+    failure inside clean_asset surfaced as 400 with the raw exception text.
+    Only planner/preflight refusals (ValueError out of plan_work) are client
+    errors; executor failures must map back to the sanitized 500 the direct
+    calls this endpoint replaced produced.
+    """
+
+    def _boom(*args: object, **kwargs: object) -> dict[str, object]:
+        return {
+            "kind": "unknown",
+            "error": "s3cr3t internal detail: /tmp/wm-clean-xyz/path.py:1",
+            "exit_code": 1,
+        }
+
+    monkeypatch.setattr(server, "run_clean_item", _boom)
+    status, body = _post(
+        conn, "/clean", {"file": _b64("Hello\u200bWorld!".encode()), "name": "note.txt"}
+    )
+    assert status == 500
+    assert body == {"ok": False, "error": "internal error"}
+    assert "s3cr3t" not in json.dumps(body)
+
+
+def test_clean_refuses_oversized_input_like_the_cli(conn, monkeypatch):
+    """The plan path's input cap gates /clean exactly as it gates the CLI.
+
+    A body under the HTTP cap can still decode to a file the planner refuses;
+    the direct-cleaning path this endpoint used to run had no size check, so a
+    request like this cleaned fine where ``wm`` would have refused.
+    """
+    import clean_request
+
+    monkeypatch.setattr(clean_request, "MAX_INPUT_BYTES", 64)
+    data = b"x" * 200
+    status, body = _post(conn, "/clean", {"file": _b64(data), "name": "x.txt"})
+    assert status == 400
+    assert "refusing input larger than 64 bytes" in body["error"]
+
+
+def test_clean_refuses_oversized_input_with_layer_a_skipped(conn, monkeypatch):
+    """The also_layer_a_text=False container branch inherits the shared preflight.
+
+    It used to call clean_container directly, skipping plan_work: a body under
+    the HTTP cap that decodes over the input cap cleaned with 200 where every
+    other branch returns the planner's refusal.
+    """
+    import clean_request
+
+    monkeypatch.setattr(clean_request, "MAX_INPUT_BYTES", 64)
+    data = (ROOT / "tests" / "fixtures" / "sample_ai.md").read_bytes()
+    assert len(data) > 64
+    status, body = _post(
+        conn,
+        "/clean",
+        {"file": _b64(data), "name": "note.md", "options": {"also_layer_a_text": False}},
+    )
+    assert status == 400
+    assert "refusing input larger than 64 bytes" in body["error"]
+
+
+def test_clean_container_layer_a_skip_still_honored_after_preflight(conn):
+    """Under the cap, also_layer_a_text=False keeps skipping the Layer-A scrub.
+
+    The branch now clears plan_work before cleaning; the option must keep its
+    meaning — the hidden text survives — where the default branch still scrubs
+    it. This pins the executor gap the direct clean_container call exists for:
+    the canonical plan cannot express the skip, so folding this branch's
+    execution into run_clean_item would silently run the scrub.
+    """
+    data = "---\ngenerator: Claude\n---\n\nhidden\u200bmark\n".encode("utf-8")
+    status, skipped = _post(
+        conn,
+        "/clean",
+        {"file": _b64(data), "name": "note.md", "options": {"also_layer_a_text": False}},
+    )
+    assert status == 200
+    assert skipped["kind"] == "container"
+    cleaned = base64.b64decode(skipped["cleaned"]).decode("utf-8")
+    assert "\u200b" in cleaned  # Layer-A text scrub skipped
+    assert "generator: Claude" not in cleaned  # metadata layer still ran
+    status, default = _post(conn, "/clean", {"file": _b64(data), "name": "note.md"})
+    assert status == 200
+    assert "\u200b" not in base64.b64decode(default["cleaned"]).decode("utf-8")
+
+
+def test_clean_text_report_key_order(conn):
+    status, body = _post(
+        conn, "/clean", {"file": _b64("Hello\u200bWorld\u00ad!".encode()), "name": "note.txt"}
+    )
+    assert status == 200
+    assert list(body["report"]) == ["kind", "stats", "length"]
+
+
+def test_clean_image_report_key_order(conn):
+    status, body = _post(conn, "/clean", {"file": _b64(_watermarked_png()), "name": "shot.png"})
+    assert status == 200
+    assert list(body["report"]) == [
+        "kind",
+        "format",
+        "actions",
+        "action_details",
+        "bytes_in",
+        "bytes_out",
+        "still_has_c2pa",
+        "still_has_ai_metadata",
+        "post_findings",
+        "synthid_before",
+        "synthid_after",
+        "synthid_removal",
+        "wmct_marker",
+    ]
+
+
+def test_clean_container_report_key_order(conn):
+    data = (ROOT / "tests" / "fixtures" / "sample_ai.md").read_bytes()
+    status, body = _post(conn, "/clean", {"file": _b64(data), "name": "note.md"})
+    assert status == 200
+    assert list(body["report"]) == [
+        "kind",
+        "format",
+        "actions",
+        "action_details",
+        "bytes_in",
+        "bytes_out",
+        "still_has_c2pa",
+        "still_has_ai_metadata",
+        "post_findings",
+        "meta",
+    ]
+
+
 def test_auth_required(conn, monkeypatch):
     monkeypatch.setattr(server, "API_KEY", "sekret")
     status, _ = _post(conn, "/health", {"anything": 1})

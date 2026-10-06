@@ -22,6 +22,8 @@ from urllib.parse import urlparse
 
 import external_command
 import pipeline_actions as act
+import tc260_label
+import tc260_verify
 from common import atomic_write_bytes, classify_finding_confidence, which
 from pipeline_actions import Action, report_actions
 from png_chunks import iter_png_chunks
@@ -298,11 +300,314 @@ def _text_chunk_is_ai(payload: bytes, ctype: bytes) -> bool:
 
     Flat markers (AI_META_HINTS + C2PA_MARKERS) match anywhere in the
     payload; generator product names only match generator-bearing key
-    values (see _generator_product_hits).
+    values (see _generator_product_hits); vendor delta markers (Samsung
+    trailer JSON, xAI signature pair, IPTC digital-source, hf-job-id) are
+    detected so targeted cleaning keeps detection and removal in parity.
     """
     if _contains_any(payload, AI_META_HINTS + C2PA_MARKERS):
         return True
-    return bool(_generator_product_hits(_png_text_entries(payload, ctype)))
+    entries = _png_text_entries(payload, ctype)
+    if _generator_product_hits(entries):
+        return True
+    if _xai_pair_among_entries(entries):
+        return True
+    return bool(payload_carries_vendor_ai(payload))
+
+
+# ---------------------------------------------------------------------------
+# Vendor metadata deltas (ported from wiltodelta/remove-ai-watermarks
+# src/remove_ai_watermarks/metadata.py, Apache-2.0; modified: folded into this
+# module's bounded inspect/strip seams as byte-scan detectors with this repo's
+# finding text and confidence buckets; the PIL/piexif field readers are
+# replaced by container-native byte scans plus EXIF IFD reads through
+# _parse_tiff_ifds)
+# ---------------------------------------------------------------------------
+
+#: Samsung Galaxy AI tools (Generative Edit, Sketch to Image, ...) record
+#: their re-edit data as a proprietary ``PhotoEditor_Re_Edit_Data`` JSON
+#: carrying a ``genAIType`` field; a non-zero value flags that a generative-AI
+#: tool produced or altered the pixels. The field is undocumented by Samsung,
+#: so detection is empirical and gated on the editor container so a stray
+#: ``genAIType`` token cannot false-positive. Galaxy appends the blob as a
+#: trailer AFTER the JPEG EOI, so the post-EOI tail must be scanned too.
+SAMSUNG_EDITOR_MARKER = b"PhotoEditor_Re_Edit_Data"
+_SAMSUNG_GENAI_RE = re.compile(rb'genAIType"\s*:\s*(-?\d+)')
+
+#: IPTC ``digitalSourceType`` values (IPTC Photo Metadata 2025.1) that flag AI
+#: provenance — the values Meta/Instagram/X read for "Made with AI" labels.
+#: ``trainedAlgorithmicMedia`` is fully generated from sampled training data;
+#: the composite-with-trained token (and ``compositeSynthetic``) is a real
+#: capture composited with AI parts — enhanced, not fully generated. Bare
+#: ``algorithmicMedia`` means "created purely by an algorithm, NOT from
+#: sampled training data" (procedural art) and is deliberately NOT an AI
+#: finding; it is not a case-sensitive substring of the included tokens.
+IPTC_GENERATED_SOURCE = b"trainedAlgorithmicMedia"
+IPTC_COMPOSITE_SOURCES = (b"compositeWithTrainedAlgorithmicMedia", b"compositeSynthetic")
+
+# xAI / Grok provenance signature scheme. A 64+ char base64 blob after
+# "Signature:" is far beyond any incidental description text, and the UUID
+# artist makes the pair xAI-specific — both required keeps the false-positive
+# rate near zero, and both must sit in the SAME metadata record (one RDF
+# description, one IPTC record, one EXIF IFD) so an unrelated UUID elsewhere
+# never completes the pair.
+_XAI_SIGNATURE_RE = re.compile(r"Signature:\s*[A-Za-z0-9+/=]{64,}")
+_UUID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE
+)
+_RDF_DESCRIPTION_RE = re.compile(
+    rb"<rdf:Description\b[^>]*>.*?</rdf:Description>", re.IGNORECASE | re.DOTALL
+)
+_XMP_DESCRIPTION_RE = re.compile(
+    rb"(?:<dc:description\b[^>]*>(.*?)</dc:description>|\bdc:description=[\"']([^\"']*)[\"'])",
+    re.IGNORECASE | re.DOTALL,
+)
+_XMP_CREATOR_RE = re.compile(
+    rb"(?:<dc:creator\b[^>]*>(.*?)</dc:creator>|\bdc:creator=[\"']([^\"']*)[\"'])",
+    re.IGNORECASE | re.DOTALL,
+)
+
+#: Higgsfield stamps the images it serves with this text-chunk key holding
+#: the job UUID (kept from an earlier reading as Hugging Face). It identifies
+#: the hosting job, not a model — a medium-confidence AI signal, so the UUID
+#: shape is required and the finding reads as a hint, never as proof.
+HF_JOB_KEY = b"hf-job-id"
+_HF_JOB_VALUE_RE = re.compile(
+    HF_JOB_KEY
+    + rb"[\x00=:]\s*([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
+)
+
+#: Tail window for a JPEG so truncated it has no findable EOI: fail closed on
+#: the tail rather than staying silent about a marker past the pixels.
+VENDOR_TAIL_BYTES = 64 * 1024
+
+
+def samsung_genai_in(data: bytes) -> int | None:
+    """Samsung's non-zero ``genAIType`` from metadata bytes, or None.
+
+    Gated on the ``PhotoEditor_Re_Edit_Data`` container so an incidental
+    ``genAIType`` token elsewhere cannot false-positive; malformed or missing
+    values are a stable None, never an exception.
+    """
+    if SAMSUNG_EDITOR_MARKER not in data:
+        return None
+    match = _SAMSUNG_GENAI_RE.search(data)
+    if match is None:
+        return None
+    try:
+        return int(match.group(1)) or None
+    except ValueError:
+        return None
+
+
+def xai_signature_pair(description: str, artist: str) -> bool:
+    """True when a description/creator pair has xAI/Grok's two value shapes."""
+    return (
+        _XAI_SIGNATURE_RE.match(description) is not None and _UUID_RE.fullmatch(artist) is not None
+    )
+
+
+def _strip_xmp_tags(raw: bytes) -> bytes:
+    """Remove XML tags from an XMP value, keeping the text content."""
+    return re.sub(rb"<[^>]+>", b"", raw).strip()
+
+
+def _xai_shapes_in(block: bytes) -> tuple[list[bytes], list[bytes]]:
+    """Tag-stripped description/creator candidates from one metadata record."""
+    descriptions = [
+        next(v for v in m.groups() if v is not None) for m in _XMP_DESCRIPTION_RE.finditer(block)
+    ]
+    creators = [
+        next(v for v in m.groups() if v is not None) for m in _XMP_CREATOR_RE.finditer(block)
+    ]
+    return [_strip_xmp_tags(d) for d in descriptions], [_strip_xmp_tags(c) for c in creators]
+
+
+def _xmp_xai_signature_pair(data: bytes) -> bool:
+    """Match the two xAI values only inside the same RDF description."""
+    for block_match in _RDF_DESCRIPTION_RE.finditer(data):
+        descriptions, creators = _xai_shapes_in(block_match.group())
+        if any(
+            xai_signature_pair(
+                d.decode("utf-8", "replace").strip(), c.decode("utf-8", "replace").strip()
+            )
+            for d in descriptions
+            for c in creators
+        ):
+            return True
+    return False
+
+
+def _iptc_dataset_values(data: bytes, dataset: int) -> list[bytes]:
+    """Bounded IPTC application-record values for one dataset number."""
+    values: list[bytes] = []
+    marker = bytes((0x1C, 0x02, dataset))
+    start = 0
+    while (index := data.find(marker, start)) >= 0:
+        length_start = index + len(marker)
+        if length_start + 2 > len(data):
+            break
+        length = int.from_bytes(data[length_start : length_start + 2], "big")
+        value_start = length_start + 2
+        value_end = value_start + length
+        if value_end <= len(data) and length <= 4096:
+            values.append(data[value_start:value_end])
+        start = length_start
+    return values
+
+
+def _iptc_xai_signature_pair(data: bytes) -> bool:
+    """The xAI pair across IPTC Caption-Abstract (2:120) / By-line (2:80)."""
+    descriptions = _iptc_dataset_values(data, 120)
+    creators = _iptc_dataset_values(data, 80)
+    # Some exports retain the field names instead of the binary datasets.
+    descriptions += re.findall(rb"Caption-Abstract\x00([^\x00]{1,4096})", data, re.IGNORECASE)
+    creators += re.findall(rb"By-line\x00([^\x00]{1,4096})", data, re.IGNORECASE)
+    return any(
+        xai_signature_pair(
+            d.decode("utf-8", "replace").strip(), c.decode("utf-8", "replace").strip()
+        )
+        for d in descriptions
+        for c in creators
+    )
+
+
+def _exif_xai_signature_pair(tiff: bytes) -> bool:
+    """The xAI pair across EXIF ImageDescription (270) / Artist (315) in one IFD."""
+    try:
+        _bo, _big, ifds = _parse_tiff_ifds(tiff)
+    except Exception:
+        return False
+    descriptions: list[str] = []
+    artists: list[str] = []
+    for ifd in ifds.values():
+        for ent in ifd["entries"]:
+            if ent["tag"] not in (270, 315):
+                continue
+            payload = _tiff_entry_payload(tiff, ent)
+            if payload is None:
+                continue
+            text = payload.decode("latin-1", "replace").rstrip("\x00").strip()
+            (descriptions if ent["tag"] == 270 else artists).append(text)
+    return any(xai_signature_pair(d, a) for d in descriptions for a in artists)
+
+
+def _xai_pair_among_entries(entries: list[tuple[str, str]]) -> bool:
+    """The xAI pair across PNG text-chunk Description x Author/Artist/Creator values."""
+    descriptions = [
+        v for k, v in entries if k.strip().lower() in ("description", "imagedescription")
+    ]
+    creators = [v for k, v in entries if k.strip().lower() in ("author", "artist", "creator")]
+    return any(xai_signature_pair(d, c) for d in descriptions for c in creators)
+
+
+def _xai_pair_in_payload(payload: bytes) -> bool:
+    """The xAI pair in one bounded metadata payload (EXIF, XMP, or IPTC form)."""
+    if payload.startswith(b"Exif\x00\x00") and _exif_xai_signature_pair(payload[6:]):
+        return True
+    return _xmp_xai_signature_pair(payload) or _iptc_xai_signature_pair(payload)
+
+
+def iptc_digital_source_finding(data: bytes) -> str | None:
+    """The labeled IPTC digital-source finding for *data*, or None.
+
+    Generated (``trainedAlgorithmicMedia``) and composite/enhanced (the
+    composite-with-trained tokens) each yield one labeled finding; bare
+    ``algorithmicMedia`` (procedural, non-ML media) yields None.
+    """
+    for token in IPTC_COMPOSITE_SOURCES:
+        if token in data:
+            return f"IPTC digital-source {token.decode('ascii')} (AI-composite/enhanced)"
+    if IPTC_GENERATED_SOURCE in data:
+        return f"IPTC digital-source {IPTC_GENERATED_SOURCE.decode('ascii')} (AI-generated)"
+    return None
+
+
+def hf_job_hint_in(data: bytes) -> str | None:
+    """The ``hf-job-id`` hosting-job UUID in metadata bytes, or None."""
+    match = _HF_JOB_VALUE_RE.search(data)
+    if match:
+        return match.group(1).decode("ascii")
+    return None
+
+
+def payload_carries_vendor_ai(payload: bytes) -> bool:
+    """True when one bounded payload carries a vendor-delta AI marker.
+
+    The single drop predicate shared by detection and every targeted strip
+    path, so a marker reported for removal can never survive a clean.
+    """
+    if samsung_genai_in(payload) is not None:
+        return True
+    if iptc_digital_source_finding(payload) is not None:
+        return True
+    if hf_job_hint_in(payload) is not None:
+        return True
+    return _xai_pair_in_payload(payload)
+
+
+def _vendor_findings(
+    payload: bytes, carrier: str, entries: list[tuple[str, str]] | None = None
+) -> list[str]:
+    """Labeled vendor-delta findings for one bounded metadata payload."""
+    found: list[str] = []
+    genai = samsung_genai_in(payload)
+    if genai is not None:
+        found.append(
+            f"{carrier}: Samsung Galaxy AI marker: PhotoEditor_Re_Edit_Data genAIType={genai}"
+        )
+    digital_source = iptc_digital_source_finding(payload)
+    if digital_source is not None:
+        found.append(f"{carrier}: {digital_source}")
+    job = hf_job_hint_in(payload)
+    if job is not None:
+        found.append(f"{carrier}: Higgsfield job hint marker: hf-job-id={job} (medium confidence)")
+    if _xai_pair_in_payload(payload) or (entries and _xai_pair_among_entries(entries)):
+        found.append(f"{carrier}: xAI/Grok provenance marker: Signature + artist UUID pair")
+    return found
+
+
+def _generic_hits_for_payload(payload: bytes, *, iptc_labeled: bool) -> list[str]:
+    """The flat hint hits for one payload, minus what the labeled IPTC finding
+    already names, minus bare ``algorithmicMedia`` when no trained/composite
+    token backs it (IPTC: procedural media is not AI)."""
+    hits = _contains_any(payload, AI_META_HINTS + C2PA_MARKERS)
+    lowered = {h.lower() for h in hits}
+    if iptc_labeled:
+        return [
+            h
+            for h in hits
+            if h.lower()
+            not in (
+                "digitalsourcetype",
+                "trainedalgorithmicmedia",
+                "compositewithtrainedalgorithmicmedia",
+                "algorithmicmedia",
+            )
+        ]
+    if "algorithmicmedia" in lowered and not lowered & {
+        "trainedalgorithmicmedia",
+        "compositewithtrainedalgorithmicmedia",
+    }:
+        # Bare algorithmicMedia is IPTC "not AI" (procedural media): neither the
+        # token nor the attribute that merely carries it is a finding.
+        return [h for h in hits if h.lower() not in ("algorithmicmedia", "digitalsourcetype")]
+    return hits
+
+
+def _tc260_label_of(payload: bytes, candidates: tuple[str, ...] = ()) -> dict[str, str] | None:
+    """The TC260 AIGC label in a bounded metadata payload, or None.
+
+    Oversized (> ``tc260_label.MAX_TC260_VALUE_BYTES``) and unparseable
+    payloads are findings-free refusals, never a crash.
+    """
+    if not payload or len(payload) > tc260_label.MAX_TC260_VALUE_BYTES:
+        return None
+    return tc260_label.label_from_metadata(payload, candidates)
+
+
+def _png_tc260_candidates(payload: bytes, ctype: bytes) -> tuple[str, ...]:
+    """Decoded text-chunk values a TC260 label can hide among."""
+    return tuple(value for _key, value in _png_text_entries(payload, ctype))
 
 
 def inspect_png(data: bytes) -> MetadataScan:
@@ -320,12 +625,15 @@ def inspect_png(data: bytes) -> MetadataScan:
                 findings.append(f"PNG chunk {name} (possible C2PA container)")
             if ctype in (b"tEXt", b"zTXt", b"iTXt", b"eXIf"):
                 payload = bytes(chunk.payload)
-                hits = _contains_any(payload, AI_META_HINTS + C2PA_MARKERS)
-                product_hits = (
-                    _generator_product_hits(_png_text_entries(payload, ctype))
-                    if ctype in (b"tEXt", b"zTXt", b"iTXt")
-                    else []
+                entries = _png_text_entries(payload, ctype)
+                vendor = _vendor_findings(payload, f"PNG {name}", entries)
+                if vendor:
+                    has_ai = True
+                    findings.extend(vendor)
+                hits = _generic_hits_for_payload(
+                    payload, iptc_labeled=any("IPTC digital-source" in v for v in vendor)
                 )
+                product_hits = _generator_product_hits(entries) if entries else []
                 if hits or product_hits:
                     has_ai = True
                     if any(hit.lower() in ("c2pa", "contentcredentials", "jumb") for hit in hits):
@@ -334,6 +642,10 @@ def inspect_png(data: bytes) -> MetadataScan:
                     if product_hits:
                         parts.append(f"AI generator ({', '.join(product_hits[:8])})")
                     findings.append(f"PNG {name}: {'; '.join(parts)}")
+                label = _tc260_label_of(payload, _png_tc260_candidates(payload, ctype))
+                if label:
+                    has_ai = True
+                    findings.extend(tc260_verify.tc260_label_findings(label, carrier=f"PNG {name}"))
     except ValueError as error:
         findings.append(str(error))
     whole = _contains_any(data, C2PA_MARKERS)
@@ -410,14 +722,43 @@ def inspect_jpeg(data: bytes) -> MetadataScan:
         # APP11 is only C2PA when the payload actually carries JUMBF/C2PA
         # markers; APP11 itself has other legitimate uses.
         if marker in (0xE1, 0xE2, 0xED, 0xEE, 0xEB):  # APP1,2,13,14,11
-            hits = _contains_any(payload, AI_META_HINTS + C2PA_MARKERS)
+            carrier = f"JPEG APP{marker - 0xE0}"
+            vendor = _vendor_findings(payload, carrier)
+            if vendor:
+                has_ai = True
+                findings.extend(vendor)
+            hits = _generic_hits_for_payload(
+                payload, iptc_labeled=any("IPTC digital-source" in v for v in vendor)
+            )
             if hits:
                 has_ai = True
                 if any(
                     h.lower() in ("c2pa", "contentcredentials", "jumb", "contentauth") for h in hits
                 ):
                     has_c2pa = True
-                findings.append(f"JPEG APP{marker - 0xE0}: {', '.join(hits[:8])}")
+                findings.append(f"{carrier}: {', '.join(hits[:8])}")
+            label = _tc260_label_of(payload)
+            if label:
+                has_ai = True
+                findings.extend(tc260_verify.tc260_label_findings(label, carrier=carrier))
+        elif marker == 0xFE:  # COM: vendor delta markers ride comments too
+            vendor = _vendor_findings(payload, "JPEG COM")
+            if vendor:
+                has_ai = True
+                findings.extend(vendor)
+
+    # Samsung Galaxy AI appends its re-edit blob as a trailer AFTER the JPEG EOI,
+    # past every segment walked above. When the file is so truncated that no EOI
+    # is findable, fail closed on the tail window instead of staying silent.
+    eoi = data.rfind(b"\xff\xd9")
+    trailer_start = eoi + 2 if eoi != -1 else max(0, len(data) - VENDOR_TAIL_BYTES)
+    trailer = data[trailer_start:]
+    genai = samsung_genai_in(trailer)
+    if genai is not None:
+        has_ai = True
+        findings.append(
+            f"JPEG trailer after EOI: Samsung Galaxy AI marker: PhotoEditor_Re_Edit_Data genAIType={genai}"
+        )
 
     whole = _contains_any(data, C2PA_MARKERS)
     if whole and not has_c2pa:
@@ -640,7 +981,13 @@ def strip_png(data: bytes, *, strip_all_text: bool = True) -> tuple[bytes, list[
             drop = True
             actions.append(act.drop_png_chunk(name))
         elif ctype == b"eXIf" or ctype in (b"tEXt", b"zTXt", b"iTXt"):
-            if strip_all_text or _text_chunk_is_ai(bytes(payload), ctype):
+            payload_bytes = bytes(payload)
+            if (
+                strip_all_text
+                or _text_chunk_is_ai(payload_bytes, ctype)
+                or _tc260_label_of(payload_bytes, _png_tc260_candidates(payload_bytes, ctype))
+                is not None
+            ):
                 drop = True
                 actions.append(act.drop_png_chunk(name))
         elif ctype == b"tIME":
@@ -706,6 +1053,19 @@ def add_wmct_marker(data: bytes, text: str = WMCT_TEXT) -> bytes:
     return bytes(out)
 
 
+def _vendor_drop_reason(payload: bytes) -> str | None:
+    """The specific vendor marker a targeted drop removes, for the step text."""
+    if samsung_genai_in(payload) is not None:
+        return "Samsung Galaxy AI marker"
+    if iptc_digital_source_finding(payload) is not None:
+        return "IPTC AI digital-source"
+    if hf_job_hint_in(payload) is not None:
+        return "Higgsfield hf-job-id"
+    if _xai_pair_in_payload(payload):
+        return "xAI/Grok signature pair"
+    return None
+
+
 def _find_jpeg_eoi(data: bytes, start: int) -> int | None:
     """Locate an unstuffed EOI marker in entropy-coded JPEG data."""
     i = start
@@ -748,6 +1108,12 @@ def strip_jpeg(data: bytes, *, strip_all_app: bool = True) -> tuple[bytes, list[
 
         if marker == 0xD9:  # EOI
             out.extend(b"\xff\xd9")
+            if SAMSUNG_EDITOR_MARKER in data[i:]:
+                # Galaxy AI's re-edit blob rides after the EOI; it is dropped
+                # with the rest of the tail and reported, not silently cut.
+                actions.append(
+                    act.drop_jpeg_segment("post-EOI trailer", reason="Samsung Galaxy AI trailer")
+                )
             saw_eoi = True
             break
         if marker == 0xD8:  # nested SOI?
@@ -771,6 +1137,10 @@ def strip_jpeg(data: bytes, *, strip_all_app: bool = True) -> tuple[bytes, list[
             out.extend(b"\xff\xda")
             out.extend(data[i : eoi + 2])
             actions.append(act.preserve_jpeg_scan())
+            if SAMSUNG_EDITOR_MARKER in data[eoi + 2 :]:
+                actions.append(
+                    act.drop_jpeg_segment("post-EOI trailer", reason="Samsung Galaxy AI trailer")
+                )
             saw_eoi = True
             break
 
@@ -786,7 +1156,11 @@ def strip_jpeg(data: bytes, *, strip_all_app: bool = True) -> tuple[bytes, list[
         keep = False
         drop = False
         if 0xE0 <= marker <= 0xEF:  # APPn
-            hits = _contains_any(payload, AI_META_HINTS + C2PA_MARKERS)
+            vendor_reason = _vendor_drop_reason(payload)
+            hits = _generic_hits_for_payload(
+                payload, iptc_labeled=vendor_reason == "IPTC AI digital-source"
+            )
+            carries_tc260 = _tc260_label_of(payload) is not None
             app11_is_c2pa = marker == 0xEB and any(
                 h.lower() in ("c2pa", "contentcredentials", "jumb", "contentauth") for h in hits
             )
@@ -797,15 +1171,20 @@ def strip_jpeg(data: bytes, *, strip_all_app: bool = True) -> tuple[bytes, list[
                 # keep APP0 (JFIF) by default
                 drop = True
                 actions.append(act.drop_jpeg_segment(f"APP{marker - 0xE0}"))
-            elif hits:
+            elif hits or carries_tc260 or vendor_reason:
                 drop = True
-                actions.append(
-                    act.drop_jpeg_segment(f"APP{marker - 0xE0}", reason="AI/C2PA markers")
+                reason = (
+                    "TC260 AIGC label" if carries_tc260 else (vendor_reason or "AI/C2PA markers")
                 )
+                actions.append(act.drop_jpeg_segment(f"APP{marker - 0xE0}", reason=reason))
             else:
                 keep = True
         elif marker == 0xFE:  # COM
-            if strip_all_app or _contains_any(payload, AI_META_HINTS + C2PA_MARKERS):
+            if (
+                strip_all_app
+                or _contains_any(payload, AI_META_HINTS + C2PA_MARKERS)
+                or _vendor_drop_reason(payload)
+            ):
                 drop = True
                 actions.append(act.drop_jpeg_segment("COM"))
             else:
@@ -873,7 +1252,13 @@ def inspect_webp(data: bytes) -> MetadataScan:
             findings.append("WebP C2PA chunk")
             continue
         if fourcc in (b"XMP ", b"EXIF"):
-            hits = _contains_any(payload, AI_META_HINTS + C2PA_MARKERS)
+            vendor = _vendor_findings(payload, f"WebP {name}")
+            if vendor:
+                has_ai = True
+                findings.extend(vendor)
+            hits = _generic_hits_for_payload(
+                payload, iptc_labeled=any("IPTC digital-source" in v for v in vendor)
+            )
             if hits:
                 has_ai = True
                 if any(
@@ -882,6 +1267,10 @@ def inspect_webp(data: bytes) -> MetadataScan:
                 ):
                     has_c2pa = True
                 findings.append(f"WebP {name}: {', '.join(hits[:8])}")
+            label = _tc260_label_of(payload)
+            if label:
+                has_ai = True
+                findings.extend(tc260_verify.tc260_label_findings(label, carrier=f"WebP {name}"))
     return has_c2pa, has_ai or has_c2pa, findings, []
 
 
@@ -900,7 +1289,12 @@ def strip_webp(data: bytes, *, strip_all_metadata: bool = True) -> tuple[bytes, 
     for fourcc, payload, padding in chunks:
         drop = fourcc.upper() == b"C2PA"
         if fourcc in metadata_flags:
-            drop = strip_all_metadata or bool(_contains_any(payload, AI_META_HINTS + C2PA_MARKERS))
+            drop = (
+                strip_all_metadata
+                or bool(_contains_any(payload, AI_META_HINTS + C2PA_MARKERS))
+                or _tc260_label_of(payload) is not None
+                or payload_carries_vendor_ai(payload)
+            )
         if drop:
             name = fourcc.decode("latin-1", errors="replace")
             actions.append(act.drop_webp_chunk(name))
@@ -977,7 +1371,13 @@ def inspect_bmp(data: bytes) -> MetadataScan:
     has_c2pa = False
     has_ai = False
     if trailing:
-        hits = _contains_any(trailing, AI_META_HINTS + C2PA_MARKERS)
+        vendor = _vendor_findings(trailing, "BMP trailing metadata")
+        if vendor:
+            has_ai = True
+            findings.extend(vendor)
+        hits = _generic_hits_for_payload(
+            trailing, iptc_labeled=any("IPTC digital-source" in v for v in vendor)
+        )
         if hits:
             has_ai = True
             if any(
@@ -1005,7 +1405,8 @@ def strip_bmp(data: bytes, *, strip_all_metadata: bool = True) -> tuple[bytes, l
         return data, [act.nothing_removed("bmp", "no BMP trailing metadata to strip")]
     trailing = data[end:]
     hits = _contains_any(trailing, AI_META_HINTS + C2PA_MARKERS)
-    if not strip_all_metadata and not hits:
+    vendor_hit = payload_carries_vendor_ai(trailing)
+    if not strip_all_metadata and not hits and not vendor_hit:
         return data, [act.keep_bmp_trailer()]
     out = bytearray(data[:end])
     out[2:6] = struct.pack("<I", end)
@@ -1078,8 +1479,21 @@ def inspect_gif(data: bytes) -> MetadataScan:
                 findings.append("truncated GIF extension block")
                 break
             end, label, payload = info
+            carrier = (
+                "GIF comment"
+                if label == 0xFE
+                else "GIF XMP app"
+                if label == 0xFF and payload[:11] == b"XMP DataXMP"
+                else "GIF application ext"
+            )
+            vendor = _vendor_findings(payload, carrier)
+            if vendor:
+                has_ai = True
+                findings.extend(vendor)
+            hits = _generic_hits_for_payload(
+                payload, iptc_labeled=any("IPTC digital-source" in v for v in vendor)
+            )
             if label == 0xFE:
-                hits = _contains_any(payload, AI_META_HINTS + C2PA_MARKERS)
                 if hits:
                     has_ai = True
                     if any(
@@ -1090,7 +1504,6 @@ def inspect_gif(data: bytes) -> MetadataScan:
                     findings.append(f"GIF comment: {', '.join(hits[:6])}")
             elif label == 0xFF:
                 if payload[:11] == b"XMP DataXMP":
-                    hits = _contains_any(payload, AI_META_HINTS + C2PA_MARKERS)
                     if hits:
                         has_ai = True
                         if any(
@@ -1099,11 +1512,9 @@ def inspect_gif(data: bytes) -> MetadataScan:
                         ):
                             has_c2pa = True
                         findings.append(f"GIF XMP app: {', '.join(hits[:6])}")
-                else:
-                    hits = _contains_any(payload, AI_META_HINTS + C2PA_MARKERS)
-                    if hits:
-                        has_ai = True
-                        findings.append(f"GIF application ext: {', '.join(hits[:6])}")
+                elif hits:
+                    has_ai = True
+                    findings.append(f"GIF application ext: {', '.join(hits[:6])}")
             pos = end
         elif block == 0x2C:
             end = _gif_image_end(data, pos, n)
@@ -1137,7 +1548,9 @@ def strip_gif(data: bytes, *, strip_all_metadata: bool = True) -> tuple[bytes, l
                 out.extend(data[pos:])
                 break
             end, label, payload = info
-            marker_hit = bool(_contains_any(payload, AI_META_HINTS + C2PA_MARKERS))
+            marker_hit = bool(_contains_any(payload, AI_META_HINTS + C2PA_MARKERS)) or (
+                payload_carries_vendor_ai(payload)
+            )
             drop = False
             name = "extension"
             if label == 0xFE:
@@ -1460,7 +1873,13 @@ def inspect_tiff(data: bytes) -> MetadataScan:
         for ent in ifd["entries"]:
             tag = ent["tag"]
             payload = _tiff_entry_payload(data, ent)
-            hits = _contains_any(payload or b"", AI_META_HINTS + C2PA_MARKERS)
+            vendor = _vendor_findings(payload or b"", f"TIFF tag {tag}")
+            if vendor:
+                has_ai = True
+                findings.extend(vendor)
+            hits = _generic_hits_for_payload(
+                payload or b"", iptc_labeled=any("IPTC digital-source" in v for v in vendor)
+            )
             if hits:
                 if any(
                     h.lower() in ("c2pa", "contentcredentials", "jumb", "contentauth") for h in hits
@@ -1558,7 +1977,9 @@ def strip_tiff(data: bytes, *, strip_all_metadata: bool = True) -> tuple[bytes, 
         for ent in ifd["entries"]:
             tag = ent["tag"]
             payload = _tiff_entry_payload(data, ent)
-            marker_hit = bool(_contains_any(payload or b"", AI_META_HINTS + C2PA_MARKERS))
+            marker_hit = bool(_contains_any(payload or b"", AI_META_HINTS + C2PA_MARKERS)) or (
+                payload_carries_vendor_ai(payload or b"")
+            )
             if tag in _TIFF_SUBIFD_TAGS:
                 for ptr in _tiff_subifd_ptr(data, off_fmt, ent):
                     sub = ifds.get(ptr)

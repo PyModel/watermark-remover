@@ -45,11 +45,14 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from asset_kind import classify_bytes
+from batch_inputs import InputItem
+from clean_file import run_clean_item
+from clean_request import CleanRequest, plan_work
 from common import (
     MAX_INPUT_BYTES,
     eprint,
@@ -58,7 +61,8 @@ from common import (
     which,
 )
 from container_meta import clean_container, inspect_container
-from image_meta import clean_image, inspect_image, run_synthid_score
+from identify import identify_file, unknown_verdict
+from image_meta import inspect_image, run_synthid_score
 from layer_b_discovery import layer_b_status
 from layer_b_http import LayerBHTTPError
 from morphomod import VisiblePlan, remove_visible
@@ -66,7 +70,7 @@ from optional_deps import extras_status
 from rewrite_text import REWRITE_STRENGTHS, RewriteConfigurationError, RewritePlan, rewrite
 from score_stylometry import score_text_stylometry
 from text_detectors import detector_status, run_all_text_detectors, run_text_detectors
-from text_unicode import clean_text, inspect_text
+from text_unicode import inspect_text
 
 VERSION = os.environ.get("WATERMARKS_SERVER_VERSION", "dev")
 
@@ -392,6 +396,19 @@ _OPENAPI_PATHS: dict[str, dict[str, Any]] = {
     "/inspect": {
         "post": {
             "summary": "Inspect a file for AI provenance marks (text / image / container auto-routed)",
+            "parameters": [
+                {
+                    "name": "identify",
+                    "in": "query",
+                    "required": False,
+                    "schema": _schema(type="boolean"),
+                    "description": (
+                        "Also return one provenance verdict (tri-state AI-ness, "
+                        "platform, source kind, integrity clashes, C2PA validation) "
+                        "under ``identify``. Metadata only; classifiers are never run"
+                    ),
+                }
+            ],
             "requestBody": _schema(
                 required=True,
                 content={
@@ -434,6 +451,14 @@ _OPENAPI_PATHS: dict[str, dict[str, Any]] = {
                             ),
                         ),
                         "report": _schema(type="object"),
+                        "identify": _schema(
+                            type="object",
+                            description=(
+                                "Present only when ?identify=true. The six-field "
+                                "provenance verdict; is_ai_generated is true or null "
+                                "(unknown) — never asserted clean"
+                            ),
+                        ),
                     },
                 )
             },
@@ -540,7 +565,7 @@ _OPENAPI_PATHS: dict[str, dict[str, Any]] = {
     },
     "/detect": {
         "post": {
-            "summary": "Run watermark detectors on a file (text: vendor/statistical; image: SynthID score)",
+            "summary": "Run watermark detectors on a file (text: vendor/statistical; image: SynthID score, open DWT-DCT payload, pixel-evidence families, forensic-metadata dump)",
             "requestBody": _schema(
                 required=True,
                 content={"application/json": _schema(schema=_file_request())},
@@ -605,6 +630,7 @@ def openapi_spec() -> dict[str, Any]:
                 "summary": op["summary"],
                 "responses": responses,
                 **((op.get("requestBody") and {"requestBody": op["requestBody"]}) or {}),
+                **((op.get("parameters") and {"parameters": op["parameters"]}) or {}),
             }
 
     spec: dict[str, Any] = {
@@ -666,6 +692,168 @@ def _decode_input(body: dict[str, Any]) -> tuple[bytes, str]:
     except (binascii.Error, ValueError):
         raise ValueError("'file' is not valid base64") from None
     return data, _safe_name(name or "")
+
+
+# Payload keys the canonical executor adds to its payload for the CLI/TUI
+# that the /clean response has never exposed: the executor's input/output
+# paths, its exit_code, and the note naming text-only options a non-text
+# asset skips. Dropping exactly these (and nothing else) keeps the
+# endpoint's report byte-identical to the pre-plan shape.
+_PAYLOAD_BOOKKEEPING = frozenset({"input", "output", "exit_code", "skipped_text_transforms"})
+
+
+def _compose_clean_request(options: dict[str, Any], dest: Path, kind: str) -> CleanRequest:
+    """Map the whitelisted /clean options onto the canonical ``CleanRequest``.
+
+    The whitelist above is the whole accepted option surface, so the request
+    built here is the same object ``clean_file`` would build for these flags;
+    every other field stays at its CLI default. ``strip_all_metadata`` keeps
+    its historical meaning of an explicit override of
+    ``keep_non_ai_metadata`` (the endpoint has always let it win), expressed
+    through the single canonical field the planner derives strip-all from.
+    ``force_type`` carries the router's decision so the planner re-classifies
+    nothing and cannot disagree with ``classify_bytes`` above.
+    """
+    keep = bool(options.get("keep_non_ai_metadata"))
+    if "strip_all_metadata" in options:
+        keep = not bool(options["strip_all_metadata"])
+    return CleanRequest(
+        output=dest,
+        force_type=kind,
+        nfkc=bool(options.get("nfkc")),
+        aggressive_homoglyphs=bool(options.get("aggressive_homoglyphs")),
+        keep_non_ai_metadata=keep,
+        remove_synthid=bool(options.get("remove_synthid")),
+        wmct_marker=bool(options.get("wmct_marker")),
+        json=True,  # the HTTP handler owns presentation; the executor stays silent
+    )
+
+
+def _run_planned(src: Path, dest: Path, request: CleanRequest) -> dict[str, Any]:
+    """Preflight and clean one asset through the canonical plan executor.
+
+    ``plan_work`` resolves the destination and refuses oversized inputs,
+    aliased outputs, and binary-as-text before the first write — the same
+    refusals the CLI gets, now inherited here. Only that preflight is a
+    client-visible 400: the executor reports internal failures as error
+    payloads, and those re-raise as non-ValueError so the handler maps them
+    back to the sanitized 500 the direct calls this replaced produced.
+    """
+    item = InputItem(path=src, relative=Path(src.name))
+    ((_, output, plan),) = plan_work([item], request, batch=False)
+    payload = run_clean_item(item.path, output, request, plan)
+    if "error" in payload:
+        raise RuntimeError(payload["error"])
+    return payload
+
+
+def _plan_preflight(src: Path, dest: Path, request: CleanRequest) -> None:
+    """Run the canonical preflight for one asset without executing it.
+
+    The ``also_layer_a_text=False`` container branch cannot hand the executor
+    the client's value (``CleanPlan`` has no container option yet), but its
+    requests must still clear the same ``plan_work`` refusals — the input
+    size cap, aliased outputs — that ``_run_planned`` gives every other
+    branch. Raises ``ValueError`` with the planner's message, exactly like
+    the executed paths.
+    """
+    item = InputItem(path=src, relative=Path(src.name))
+    plan_work([item], request, batch=False)
+
+
+def _identify_query(target: str) -> bool:
+    """The ``?identify=`` query flag of a request target (opt-in, truthy spellings)."""
+    parsed = parse_qs(urlparse(target).query)
+    return parsed.get("identify", [""])[0].strip().lower() in ("true", "1", "yes")
+
+
+def _invisible_watermark_detection(path: Path) -> dict[str, Any]:
+    """The open DWT-DCT detector entry for ``/detect`` images: fail-soft.
+
+    Runs ``invisible_watermark.detect_invisible_watermark`` when the
+    ``detect`` extra is installed and reports what it found through the
+    identify signal vocabulary. Every failure mode is an explicit entry — an
+    absent extra or a crashed decoder never produces a negative finding, and
+    a clean-looking decode carries the "absence is never clean" note.
+    """
+    import invisible_watermark
+    from identify import invisible_watermark_signal
+
+    entry: dict[str, Any] = {"detector": "invisible_watermark"}
+    try:
+        if not invisible_watermark.is_available():
+            entry["available"] = False
+            entry["error"] = (
+                "detect extra not installed (numpy/cv2/pywt); "
+                "install watermark-remover[detect] to decode open DWT-DCT payloads"
+            )
+            return entry
+        entry["available"] = True
+        scheme = invisible_watermark.detect_invisible_watermark(path)
+    except Exception as exc:
+        entry["available"] = True
+        entry["error"] = f"invisible-watermark detection failed: {exc!r}"
+        return entry
+    entry.update(invisible_watermark_signal(scheme))
+    entry["found"] = scheme is not None
+    return entry
+
+
+def _pixel_evidence_detection(path: Path) -> dict[str, Any]:
+    """The pixel-forensics evidence entry for ``/detect`` images: fail-soft.
+
+    Collects the six statistic families through the ``pixel_evidence``
+    collector — bounded by construction (the 2048px analysis cap bounds every
+    array) — and reports the identify signal vocabulary plus the versioned
+    payload. The image-identifying artifacts layer is never requested here: a
+    ``/detect`` response carries aggregates, not image content. Every failure
+    mode is an explicit entry — an absent numeric stack or a crashed collector
+    never produces a negative finding, and nothing measured is never claimed.
+    """
+    import pixel_evidence
+    from identify import pixel_evidence_signal
+
+    entry: dict[str, Any] = {"detector": "pixel_evidence"}
+    try:
+        if not pixel_evidence.is_available():
+            entry["available"] = False
+            entry["error"] = (
+                "pixel numeric stack not installed (numpy); install "
+                "watermark-remover[pixel] to collect pixel evidence"
+            )
+            return entry
+        entry["available"] = True
+        evidence = pixel_evidence.extract_pixel_evidence(path)
+    except Exception as exc:
+        entry["error"] = f"pixel evidence collection failed: {exc!r}"
+        return entry
+    payload = evidence.to_dict()
+    entry.update(pixel_evidence_signal(payload))
+    entry["evidence"] = payload
+    return entry
+
+
+def _forensic_metadata_detection(path: Path) -> dict[str, Any]:
+    """The raw forensic-metadata dump for ``/detect`` images: fail-soft.
+
+    ``forensic_metadata.collect_forensic_metadata`` (04's collector) is
+    consumed read-only: the entry carries the identify signal summary plus the
+    versioned record verbatim — the dump is forwarded, not re-interpreted. A
+    collection failure is an explicit error entry; it is never a negative
+    finding and never a clean verdict.
+    """
+    import forensic_metadata
+    from identify import forensic_metadata_signal
+
+    entry: dict[str, Any] = {"detector": "forensic_metadata"}
+    try:
+        record = forensic_metadata.collect_forensic_metadata(path)
+    except Exception as exc:
+        entry["error"] = f"forensic metadata collection failed: {exc!r}"
+        return entry
+    entry.update(forensic_metadata_signal(record))
+    entry["record"] = record
+    return entry
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -828,7 +1016,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             if path == "/inspect":
-                self._handle_inspect(data, name, body)
+                identify = _identify_query(self.path)
+                self._handle_inspect(data, name, body, identify=identify)
             elif path == "/detect":
                 self._handle_detect(data, name)
             elif path == "/rewrite":
@@ -847,25 +1036,28 @@ class Handler(BaseHTTPRequestHandler):
                 HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": "internal error"}
             )
 
-    def _handle_inspect(self, data: bytes, name: str, body: dict[str, Any]) -> None:
+    def _handle_inspect(
+        self, data: bytes, name: str, body: dict[str, Any], *, identify: bool = False
+    ) -> None:
         kind = classify_bytes(data, Path(name).suffix)
         if kind == "unknown":
-            self._respond(
-                HTTPStatus.OK,
-                {
-                    "ok": True,
-                    "kind": "unknown",
-                    "report": {
-                        "note": "unrecognized format; use a filename with a known extension",
-                    },
-                    "suspicious": False,
-                    "detection_status": "NOT_RUN",
+            response: dict[str, Any] = {
+                "ok": True,
+                "kind": "unknown",
+                "report": {
+                    "note": "unrecognized format; use a filename with a known extension",
                 },
-            )
+                "suspicious": False,
+                "detection_status": "NOT_RUN",
+            }
+            if identify:
+                response["identify"] = unknown_verdict().to_dict()
+            self._respond(HTTPStatus.OK, response)
             return
         run_detect = body.get("detect") is True
         if run_detect and PUBLIC:
             raise ValueError("detectors are turned off on this server")
+        verdict = None
         with tempfile.TemporaryDirectory(prefix="wm-inspect-") as tmp:
             path = _tmp_path(Path(tmp), name or "input")
             path.write_bytes(data)
@@ -880,10 +1072,16 @@ class Handler(BaseHTTPRequestHandler):
                 report["stylometry"] = s_rep.to_dict()
                 if run_detect:
                     report["text_detectors"] = run_all_text_detectors(raw_text)
+                if identify:
+                    # Provenance identification is a metadata question about
+                    # binary assets; a text asset carries none — unknown.
+                    verdict = unknown_verdict()
             elif kind == "image":
                 report = inspect_image(path).to_dict()
             else:
                 report = inspect_container(path).to_dict()
+            if identify and verdict is None:
+                verdict = identify_file(path)
         detection_status = _text_detection_status(report.get("text_detectors") or [])
         suspicious = (
             bool(report.get("suspicious_total"))
@@ -891,16 +1089,18 @@ class Handler(BaseHTTPRequestHandler):
             or bool(report.get("stylometry", {}).get("score", 0.0) >= 0.65)
             or detection_status in {"DETECTED", "INCONCLUSIVE"}
         )
-        self._respond(
-            HTTPStatus.OK,
-            {
-                "ok": True,
-                "kind": kind,
-                "report": report,
-                "suspicious": suspicious,
-                "detection_status": detection_status,
-            },
-        )
+        response = {
+            "ok": True,
+            "kind": kind,
+            "report": report,
+            "suspicious": suspicious,
+            "detection_status": detection_status,
+        }
+        if identify:
+            # One provenance verdict from the already-collected evidence;
+            # classifiers stay opt-in and are never triggered by the param.
+            response["identify"] = (verdict or unknown_verdict()).to_dict()
+        self._respond(HTTPStatus.OK, response)
 
     def _handle_detect(self, data: bytes, name: str) -> None:
         kind = classify_bytes(data, Path(name).suffix)
@@ -942,7 +1142,12 @@ class Handler(BaseHTTPRequestHandler):
                     }
                 else:
                     score.setdefault("detector", "synthid")
-                detections = [score]
+                detections = [
+                    score,
+                    _invisible_watermark_detection(path),
+                    _pixel_evidence_detection(path),
+                    _forensic_metadata_detection(path),
+                ]
             else:
                 detections = []
                 report = inspect_container(path).to_dict()
@@ -1062,52 +1267,45 @@ class Handler(BaseHTTPRequestHandler):
             tmpdir = Path(tmp)
             src = _tmp_path(tmpdir, name or "input")
             src.write_bytes(data)
+            # The cleaned output is staged in its own directory so a client
+            # filename can never alias it, whatever the asset kind.
+            outdir = Path(tempfile.mkdtemp(dir=tmpdir, prefix="out-"))
             if kind == "text":
                 if looks_binary(data):
                     raise ValueError(
                         "refusing to clean bytes that look like a binary container as text"
                     )
                 text = data.decode("utf-8", errors="surrogateescape")
-                detect_before = bool(options.get("detect_before"))
-                detect_after = bool(options.get("detect_after"))
                 detector_reports: dict[str, Any] = {}
-                if detect_before:
+                if bool(options.get("detect_before")):
                     detector_reports["before"] = run_text_detectors(text)
-                cleaned, stats = clean_text(
-                    text,
-                    nfkc=bool(options.get("nfkc")),
-                    aggressive_homoglyphs=bool(options.get("aggressive_homoglyphs")),
-                )
-                if detect_after:
+                dest = outdir / "out.txt"
+                request = _compose_clean_request(options, dest, kind)
+                payload = _run_planned(src, dest, request)
+                cleaned = dest.read_text(encoding="utf-8", errors="surrogateescape")
+                report: dict[str, Any] = {
+                    "kind": "text",
+                    "stats": payload["stats"],
+                    "length": len(cleaned),
+                }
+                if bool(options.get("detect_after")):
                     detector_reports["after"] = run_text_detectors(cleaned)
-                cleaned_bytes = cleaned.encode("utf-8", errors="surrogateescape")
-                report: dict[str, Any] = {"kind": "text", "stats": stats, "length": len(cleaned)}
                 if detector_reports:
                     report["text_detectors"] = detector_reports
+                cleaned_bytes = dest.read_bytes()
             elif kind == "image":
-                dest = tmpdir / "out.png"
-                strip_all = not bool(options.get("keep_non_ai_metadata"))
-                if "strip_all_metadata" in options:
-                    strip_all = bool(options["strip_all_metadata"])
                 remove_pixel = options.get("remove_pixel")
                 if remove_pixel not in (None, "ctrlregen", "diffusion"):
                     raise ValueError("remove_pixel must be one of: ctrlregen, diffusion")
-                # OURS clean_image doesn't expose remove_pixel yet; it does
-                # expose remove_synthid + wmct_marker as additive keys (Phase 9
-                # plan). Pixel backends (ctrlregen / diffusion) are wired
-                # through a future image_meta port; mark unavailable in the
-                # report rather than failing the request.
-                remove_synthid = bool(options.get("remove_synthid"))
-                wmct_marker = bool(options.get("wmct_marker"))
-                result = clean_image(
-                    src,
-                    dest,
-                    strip_all_metadata=strip_all,
-                    remove_synthid=remove_synthid,
-                    wmct_marker=wmct_marker,
-                )
+                dest = outdir / "out.png"
+                request = _compose_clean_request(options, dest, kind)
+                payload = _run_planned(src, dest, request)
+                report = {k: v for k, v in payload.items() if k not in _PAYLOAD_BOOKKEEPING}
                 if remove_pixel:
-                    result["pixel_removal"] = {
+                    # Pixel backends (ctrlregen / diffusion) are wired through
+                    # the image_meta port; mark unavailable in the report
+                    # rather than failing the request.
+                    report["pixel_removal"] = {
                         "available": False,
                         "error": (
                             f"remove_pixel={remove_pixel!r} is reserved for the future "
@@ -1115,19 +1313,31 @@ class Handler(BaseHTTPRequestHandler):
                             "clean_image"
                         ),
                     }
-                if bool(options.get("detect_before")) and result.get("synthid_before") is None:
-                    result["synthid_before"] = run_synthid_score(src)
-                if bool(options.get("detect_after")) and result.get("synthid_after") is None:
-                    result["synthid_after"] = run_synthid_score(dest)
+                if bool(options.get("detect_before")) and report.get("synthid_before") is None:
+                    report["synthid_before"] = run_synthid_score(src)
+                if bool(options.get("detect_after")) and report.get("synthid_after") is None:
+                    report["synthid_after"] = run_synthid_score(dest)
                 cleaned_bytes = dest.read_bytes()
-                report = {"kind": "image", **result}
             else:
-                dest = _tmp_path(tmpdir, f"out{Path(name).suffix}")
-                result = clean_container(
-                    src, dest, also_layer_a_text=bool(options.get("also_layer_a_text", True))
-                )
+                dest = outdir / f"out{Path(name).suffix}"
+                if options.get("also_layer_a_text") is False:
+                    # The one whitelisted option the canonical CleanPlan cannot
+                    # express yet: skipping the Layer-A text scrub of container
+                    # bodies has no plan field, so the executor would run the
+                    # scrub the client asked to skip. The request still clears
+                    # the shared preflight — the same refusals _run_planned
+                    # inherits — and only execution falls to clean_container
+                    # with the client's value. When CleanPlan grows a container
+                    # option, this branch folds into _run_planned like every
+                    # other case.
+                    _plan_preflight(src, dest, _compose_clean_request(options, dest, kind))
+                    result = clean_container(src, dest, also_layer_a_text=False)
+                    report = {"kind": "container", **result}
+                else:
+                    request = _compose_clean_request(options, dest, kind)
+                    payload = _run_planned(src, dest, request)
+                    report = {k: v for k, v in payload.items() if k not in _PAYLOAD_BOOKKEEPING}
                 cleaned_bytes = dest.read_bytes()
-                report = {"kind": "container", **result}
             report.pop("input", None)
             report.pop("output", None)
         self._respond(

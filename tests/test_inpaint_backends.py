@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import shlex
 import sys
+import types
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
+import optional_deps
 import pytest
 from domain_types import InpaintRequest
 from inpaint_backends import (
@@ -186,3 +188,160 @@ class TestExternalCommandBackend:
         backend = ExternalCommandBackend("echo hello")
         with pytest.raises(FrozenInstanceError):
             backend.command = "other"
+
+
+# ---------------------------------------------------------------------------
+# Registry bootstrap: cv2 fill backends join and leave with OpenCV itself
+# ---------------------------------------------------------------------------
+
+
+def _install_stub_opencv(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
+    """Make OpenCV importable process-wide with a minimal cv2 stand-in.
+
+    Mirrors the stub-module prior art (test_stability_server.py ships a real
+    cv2.py; test_opencv_inpaint.py fakes numpy via sys.modules).  Both patch
+    points are needed: ``optional_deps.cv2`` gates registry bootstrap while
+    ``has_visible()`` resolves through ``importlib.import_module``.
+    """
+    stub = types.ModuleType("cv2")
+    stub.INPAINT_TELEA = 1
+    stub.INPAINT_NS = 2
+    monkeypatch.setitem(sys.modules, "cv2", stub)
+    monkeypatch.setattr(optional_deps, "cv2", stub)
+    return stub
+
+
+@pytest.fixture
+def fresh_registry(monkeypatch: pytest.MonkeyPatch):
+    """Rebuild the backend registry from scratch, restoring it afterwards."""
+    import inpaint_backends
+
+    saved = list(inpaint_backends._REGISTRY)
+    saved_flag = inpaint_backends._bootstrapped
+    inpaint_backends._REGISTRY.clear()
+    inpaint_backends._bootstrapped = False
+    try:
+        yield inpaint_backends
+    finally:
+        inpaint_backends._REGISTRY.clear()
+        inpaint_backends._REGISTRY.extend(saved)
+        inpaint_backends._bootstrapped = saved_flag
+
+
+def test_bootstrap_registers_cv2_backends_when_opencv_present(
+    monkeypatch: pytest.MonkeyPatch, fresh_registry
+) -> None:
+    _install_stub_opencv(monkeypatch)
+
+    names = [backend.name for backend in fresh_registry.get_backends()]
+
+    assert "cv2-telea" in names
+    assert "cv2-ns" in names
+
+
+def test_bootstrap_excludes_cv2_backends_without_opencv(
+    monkeypatch: pytest.MonkeyPatch, fresh_registry
+) -> None:
+    # Forced-absent regardless of the ambient environment: the incumbent
+    # pair must stay intact and no half-registered cv2 backend may appear.
+    monkeypatch.setattr(optional_deps, "cv2", None)
+
+    names = [backend.name for backend in fresh_registry.get_backends()]
+
+    assert names == ["texture-patch", "simple"]
+
+
+# ---------------------------------------------------------------------------
+# Fill-tier resolution: auto order + labeled-unavailable (ticket 03)
+# ---------------------------------------------------------------------------
+
+
+class _FakeLearnedBackend:
+    """Registry stand-in for a learned (ONNX) tier: availability only.
+
+    Resolution is availability-based; inpaint() is never reached in these tests
+    (morphomod owns the call path and t04 ships the real learned backends).
+    """
+
+    def __init__(self, name: str, available: bool) -> None:
+        self.name = name
+        self._available = available
+
+    @property
+    def available(self) -> bool:
+        return self._available
+
+    def supports(self, request: InpaintRequest) -> bool:
+        return True
+
+    def inpaint(self, request: InpaintRequest) -> None:
+        raise AssertionError("resolution tests never inpaint")
+
+
+class TestResolveBackend:
+    def test_auto_order_is_learned_then_cv2_then_pure(self) -> None:
+        from inpaint_backends import FILL_RESOLVE_ORDER
+
+        assert FILL_RESOLVE_ORDER == ("lama", "migan", "cv2-telea", "texture-patch", "simple")
+
+    def test_auto_skips_unregistered_learned_tiers(
+        self, monkeypatch: pytest.MonkeyPatch, fresh_registry
+    ) -> None:
+        _install_stub_opencv(monkeypatch)
+
+        assert fresh_registry.resolve_backend("auto").name == "cv2-telea"
+
+    def test_auto_lands_on_texture_patch_without_opencv(
+        self, monkeypatch: pytest.MonkeyPatch, fresh_registry
+    ) -> None:
+        monkeypatch.setattr(optional_deps, "cv2", None)
+
+        assert fresh_registry.resolve_backend("auto").name == "texture-patch"
+
+    def test_auto_prefers_registered_available_lama(
+        self, monkeypatch: pytest.MonkeyPatch, fresh_registry
+    ) -> None:
+        _install_stub_opencv(monkeypatch)
+        fresh_registry.register_backend(_FakeLearnedBackend("lama", True))
+
+        assert fresh_registry.resolve_backend("auto").name == "lama"
+
+    def test_auto_skips_registered_but_unavailable_lama(
+        self, monkeypatch: pytest.MonkeyPatch, fresh_registry
+    ) -> None:
+        _install_stub_opencv(monkeypatch)
+        fresh_registry.register_backend(_FakeLearnedBackend("lama", False))
+
+        assert fresh_registry.resolve_backend("auto").name == "cv2-telea"
+
+    def test_named_cv2_backend_resolves_through_registry(
+        self, monkeypatch: pytest.MonkeyPatch, fresh_registry
+    ) -> None:
+        _install_stub_opencv(monkeypatch)
+
+        assert fresh_registry.resolve_backend("cv2-ns").name == "cv2-ns"
+
+    @pytest.mark.parametrize("name", ["migan", "lama"])
+    def test_named_learned_tier_is_labeled_unavailable(self, name: str) -> None:
+        from inpaint_backends import resolve_backend
+
+        # Not registered in this build (the migan/lama extras land with ticket 04):
+        # a named selection must fail soft with the canonical install hint, never
+        # silently degrade to another tier.
+        with pytest.raises(ValueError, match=rf"watermark-remover\[{name}\]"):
+            resolve_backend(name)
+
+    def test_named_registered_but_unavailable_tier_raises_labeled(
+        self, monkeypatch: pytest.MonkeyPatch, fresh_registry
+    ) -> None:
+        _install_stub_opencv(monkeypatch)
+        fresh_registry.register_backend(_FakeLearnedBackend("lama", False))
+
+        with pytest.raises(ValueError, match=r"watermark-remover\[lama\]"):
+            fresh_registry.resolve_backend("lama")
+
+    def test_unknown_backend_raises_labeled(self) -> None:
+        from inpaint_backends import resolve_backend
+
+        with pytest.raises(ValueError, match="warp"):
+            resolve_backend("warp")

@@ -145,6 +145,21 @@ def _build_parser() -> argparse.ArgumentParser:
     visible.add_argument("--visible-mask", type=Path)
     visible.add_argument("--visible-box", type=_parse_box, metavar="X,Y,W,H")
     visible.add_argument("--detect-command", help="Detector template: {input} {mask} {prompt}")
+    visible.add_argument(
+        "--mark",
+        default=None,
+        help="Registry-driven visible-mark removal: 'auto' scans every registered "
+        "mark, or name one key. Opt-in; absent, the explicit-mask behavior is "
+        "unchanged. Requires the pixel extra and a PNG destination",
+    )
+    p.add_argument(
+        "--sensitivity",
+        choices=("auto", "strict"),
+        default="auto",
+        help="Trust policy for --mark: 'auto' relaxes a mark's gate only on "
+        "same-product evidence (TC260 producer metadata or a strict sibling "
+        "mark); 'strict' never relaxes. Requires --mark",
+    )
     p.add_argument("--dilate", type=int, default=None, metavar="RADIUS")
     p.add_argument(
         "--visible-backend",
@@ -214,6 +229,12 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Replace removed provenance with a truthful wmCt marker (PNG output). "
         "Default: strip-without-replacement (frictionless)",
+    )
+    p.add_argument(
+        "--humanize",
+        action="store_true",
+        help="Image: humanizing post-stage (film grain, chromatic aberration, unsharp, "
+        "adaptive polish); off by default. Requires PNG output and the pixel extra",
     )
 
     # Artifact / audit-trail control
@@ -329,6 +350,8 @@ def dry_run_payload(
         localization = f"mask:{visible.mask_path}"
     elif visible.box is not None:
         localization = f"box:{','.join(map(str, visible.box))}"
+    elif visible.mark is not None:
+        localization = f"registry:{visible.mark}"
     else:
         localization = "external-detector"
     actions = [

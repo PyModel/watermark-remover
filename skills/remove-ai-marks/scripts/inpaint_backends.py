@@ -248,6 +248,12 @@ def _bootstrap_registry() -> None:
     """Populate the backend registry."""
     _REGISTRY.append(TexturePatchBackend())
     _REGISTRY.append(SimpleFillBackend())
+    # Deferred import: opencv_inpaint imports this module, so the cycle must
+    # be broken at call time.  Without OpenCV installed this registers nothing
+    # and the incumbent backends stay exactly as they were.
+    import opencv_inpaint
+
+    _REGISTRY.extend(opencv_inpaint.get_opencv_backends())
 
 
 _bootstrapped = False
@@ -265,3 +271,62 @@ def get_backends() -> list[InpaintBackend]:
 def register_backend(backend: InpaintBackend) -> None:
     """Add a backend to the registry (call before first use)."""
     get_backends().append(backend)
+
+
+# ---------------------------------------------------------------------------
+# Fill-tier resolution
+# ---------------------------------------------------------------------------
+
+#: Fill-tier resolution order for ``auto``, best-quality first: the learned ONNX
+#: tiers, then the OpenCV classical fill, then the pure backends as the final
+#: fallback (matching upstream FILL_BACKENDS semantics). Names are registry
+#: backend names; region_eraser's ``cv2`` tier maps to the cv2-telea/cv2-ns pair
+#: here. ``auto`` skips tiers that are not registered (their extra is not
+#: installed) or registered but unavailable. Kept as a literal so tests can pin
+#: the order without importing any pixel-tier module.
+FILL_RESOLVE_ORDER: tuple[str, ...] = ("lama", "migan", "cv2-telea", "texture-patch", "simple")
+
+#: Canonical extra + availability reason for selectable tiers the registry may
+#: not have registered, used for the labeled-unavailable error.
+_TIER_EXTRAS: dict[str, tuple[str, str]] = {
+    "cv2-telea": ("visible", "OpenCV (cv2) is not installed"),
+    "cv2-ns": ("visible", "OpenCV (cv2) is not installed"),
+    "migan": ("migan", "onnxruntime is not installed"),
+    "lama": ("lama", "onnxruntime is not installed"),
+}
+
+
+def _labeled_unavailable(name: str) -> ValueError:
+    """The labeled ValueError for a selected-but-unavailable fill tier."""
+    import optional_deps
+
+    extra, reason = _TIER_EXTRAS.get(name, (name, f"{name} is not a registered fill backend"))
+    if name in ("migan", "lama") and optional_deps._import_safe("onnxruntime") is not None:
+        reason = "onnxruntime is installed but no learned backend is registered in this build"
+    hint = optional_deps.BackendAvailability(available=False, extra=extra, reason=reason).hint
+    return ValueError(f"{name} backend is unavailable. {hint}")
+
+
+def resolve_backend(name: str) -> InpaintBackend:
+    """Resolve a fill backend through the registry; fail soft when unavailable.
+
+    ``auto`` walks :data:`FILL_RESOLVE_ORDER` best-first and returns the first
+    registered, available backend -- tiers whose extra is missing are skipped,
+    and the pure backends (always available) are the final fallback. A named
+    tier never silently degrades: an unregistered or unavailable selection
+    raises ValueError carrying the canonical install hint (e.g.
+    ``watermark-remover[migan]``), leaving the exit contract to the caller.
+    """
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("backend name must be a non-empty string")
+    registered = {backend.name: backend for backend in get_backends()}
+    if name == "auto":
+        for tier in FILL_RESOLVE_ORDER:
+            backend = registered.get(tier)
+            if backend is not None and backend.available:
+                return backend
+        raise RuntimeError("no fill backend is available (registry exhausted)")
+    backend = registered.get(name)
+    if backend is not None and backend.available:
+        return backend
+    raise _labeled_unavailable(name)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import sys
 from pathlib import Path
 
@@ -11,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+import optional_deps
 from configuration import (
     ConfigSource,
     _bool_from_str,
@@ -186,3 +188,56 @@ def test_server_port_env_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     summary = load_configuration(tmp_path)
     assert summary.settings["server_port"].value == 9000
     assert summary.settings["server_port"].source is ConfigSource.ENV_VAR
+
+
+# ---------------------------------------------------------------------------
+# Optional-dependency extras registry (the `pixel` extra)
+# ---------------------------------------------------------------------------
+
+
+def test_pixel_extra_is_registered_and_checkable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The `pixel` extra joins the registry alongside — not instead of — `visible`."""
+    assert "pixel" in optional_deps.KNOWN_EXTRAS
+    assert "visible" in optional_deps.KNOWN_EXTRAS
+
+    monkeypatch.setattr(importlib, "import_module", lambda name: object())
+    availability = optional_deps.check_optional("pixel")
+    assert availability.available is True
+    assert availability.extra == "pixel"
+
+
+def test_pixel_extra_missing_deps_report_install_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def missing(name: str):
+        raise ImportError(f"missing {name}")
+
+    monkeypatch.setattr(importlib, "import_module", missing)
+    availability = optional_deps.check_optional("pixel")
+    assert availability.available is False
+    assert "unknown extra" not in availability.reason
+    assert "Install watermark-remover[pixel]" in availability.hint
+
+
+def test_pixel_extra_appears_in_extras_status_and_capabilities() -> None:
+    """The status output and the server /capabilities report both list pixel."""
+    status = optional_deps.extras_status()
+    assert "pixel" in status
+    assert set(status["pixel"]) == {"available", "hint"}
+
+    import server
+
+    extras = server.capabilities()["extras"]
+    assert "pixel" in extras
+    assert "visible" in extras
+
+
+@pytest.mark.skipif(sys.version_info < (3, 11), reason="tomllib requires Python 3.11+")
+def test_pyproject_declares_pixel_alongside_visible() -> None:
+    """pyproject gains `pixel` (numpy, headless OpenCV, Pillow); `visible` keeps its deps."""
+    import tomllib
+
+    data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    extras = data["project"]["optional-dependencies"]
+    assert set(extras["pixel"]) == {"numpy", "opencv-python-headless", "Pillow"}
+    assert set(extras["visible"]) == {"numpy", "Pillow", "opencv-python-headless"}

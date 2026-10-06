@@ -22,7 +22,7 @@ Use it as an **agent skill**, install the **PyPI command-line package**, or run 
 | --- | --- | --- | --- |
 | **A** | Hidden Unicode, bidi controls, tags, exotic spaces | Context-aware deterministic scrub | Verifiable |
 | **B** | Token-distribution text watermarks | Paraphrase, back-translation, structural rewrite, or TSAPA-style evolutionary search | Best-effort |
-| **V** | Visible image logos and overlays | Mask, hole fill, dilation, inpaint, restore | Mask removal verifiable, fidelity best-effort |
+| **V** | Visible image logos and overlays | Supplied mask/box/detector or opt-in `--mark` registry detection; hole fill, dilation, inpaint, restore | Mask removal verifiable, fidelity best-effort |
 | **M** | C2PA, EXIF, XMP, document properties | Format-aware metadata rewrite | Verifiable per format |
 | Soft binding | Remote manifests, in-content binding | Detection and warning only | Detection only |
 | SynthID | Pixel-domain SynthID-class signal | Optional external adapter | Score + best-effort removal |
@@ -83,7 +83,7 @@ wm draft.md -o draft.cleaned.md --json --audit
 wm-tui ./drafts
 ```
 
-Installed commands: `wm` cleans, `wm-tui` is the terminal UI, `wm-serve` exposes the HTTP API, and `wm-audit-dir` / `wm-audit-site` inspect directories/sites. Optional extras: `[visible]`, `[quality]`, `[ai]`, `[provenance]`, `[all]`; none is required for the core clean.
+Installed commands: `wm` cleans, `wm-tui` is the terminal UI, `wm-serve` exposes the HTTP API, and `wm-audit-dir` / `wm-audit-site` inspect directories/sites. Optional extras: `[visible]`, `[quality]`, `[ai]`, `[provenance]`, `[detect]`, `[source-classify]`, `[classify]`, `[classify-onnx]`, `[trustmark]`, `[all]`; none is required for the core clean. `[detect]` and `[source-classify]` join `[all]`; `[trustmark]`, `[classify]`, and `[classify-onnx]` stay standalone (torch is opt-in). Detection extras only ever report evidence — absence of a signal is unknown, never clean.
 
 ### 3. Clone — CLI or local TUI development
 
@@ -326,6 +326,42 @@ python3 "$SCRIPTS/clean_file.py" input.png -o output.png \
 The stdlib dilation is non-cascading and runs in O(width × height). PNG decoding supports non-interlaced 8-bit grayscale, RGB, and RGBA. The default `texture` backend searches nearby patches by boundary error and fully replaces the refined mask; optional feathering is available at the module interface. `simple` is retained for uniform backgrounds only. Neither is marketed as LaMa quality. JPEG visible cleaning requires an external backend, and that backend owns JPEG compositing.
 
 Paper-reported MorphoMod improvements are not this implementation's measured results. The report includes initial and refined mask pixels and requires manual fidelity review.
+
+### Automatic mark detection (opt-in)
+
+`--mark auto` (or a named key such as `--mark doubao`) replaces the manual mask
+with a registry of known vendor marks: each registered mark is localized,
+filled through one shared inpaint backend, and re-checked by the same detector.
+
+```bash
+wm input.png -o output.png --mark auto
+wm input.png -o output.png --mark auto --sensitivity strict
+wm input.png -o output.png --mark jimeng --visible-backend lama
+```
+
+- Opt-in only: without `--mark`, the explicit-mask behavior is unchanged.
+- Detection and removal are best-effort. Every removal is re-validated by the
+  same detector that found the mark — a self-consistency check, not an
+  independent oracle — and the report states `cleaned`, `partial`,
+  `unvalidated`, `error`, or `no_mark` per pass. Nothing certifies a mark is
+  gone; inspect the output.
+- `--sensitivity auto` (default) relaxes a mark's detection gate only when the
+  file's own metadata names that product (TC260 producer codes, Samsung
+  genAIType metadata, or a declared platform token in generator fields);
+  `strict` never relaxes.
+- Fills resolve through the backend stack. The `migan` or `lama` extra
+  (`pip install 'watermark-remover[migan]'` — onnxruntime + huggingface-hub)
+  enables the learned ONNX models; their weights are pinned to published
+  commits and downloaded on first use. cv2 is the no-extra floor, and
+  `--visible-backend` selects a specific tier. `--visible-backend external` is
+  not applicable to registry marks (the report warns and names the backend that
+  actually ran).
+- The mark pass runs whole-image (auto-tiling applies only to explicit-mask
+  plans, and the report says when tiling was skipped for this reason), and the
+  registered engines own their dilation: `--dilate` is not applied there, the
+  report states `engine-controlled (0 user-applied)`.
+- `--humanize` is a separate, default-off post-stage (film grain, chromatic
+  aberration, unsharp); it never runs unless asked.
 
 ### Image degradation (opt-in Layer V extension)
 

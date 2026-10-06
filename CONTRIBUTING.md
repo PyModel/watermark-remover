@@ -75,6 +75,25 @@ existing release updates it rather than failing.
 6. **Batch orchestration** — share discovery through `batch_inputs.py`; do not
    duplicate traversal/output-path logic in CLI modules.
 
+## Ported code provenance
+
+Portions of this project are ported from
+[`wiltodelta/remove-ai-watermarks`](https://github.com/wiltodelta/remove-ai-watermarks),
+which is licensed under the Apache License, Version 2.0 (this project is MIT;
+the root `NOTICE` records the attribution). Every ported file must start with
+a provenance header stating where it came from and what changed:
+
+```
+# Ported from wiltodelta/remove-ai-watermarks <path>, Apache-2.0; modified: <what>
+```
+
+- `<path>` is the file's path inside the upstream project.
+- `<what>` summarizes the adaptation (e.g. "rebased onto clean_asset plan
+  path; renamed module-level helpers; dropped upstream test helpers"). Omit
+  the `modified:` clause only when the file is a verbatim copy.
+- Keep the header on the first lines of the file so it survives grepping and
+  review. New files that are original to this repo carry no header.
+
 ## Checklist for a change
 
 - [ ] Behaviour matches `SKILL.md` / `references/removal-matrix.md` when relevant

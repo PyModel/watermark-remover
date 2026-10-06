@@ -109,3 +109,79 @@ def test_format_sarif_structure():
     c2pa_res = next(r for r in results if r["ruleId"] == "AI-WATERMARK-C2PA")
     assert c2pa_res["level"] == "error"
     assert "logo.png" in c2pa_res["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+
+
+def _item(findings: list[str], confidences: list[str], has_c2pa: bool = False) -> dict:
+    return {
+        "path": "/workspace/project/img.jpg",
+        "kind": "jpeg",
+        "has_c2pa": has_c2pa,
+        "has_ai_metadata": bool(findings),
+        "findings": findings,
+        "confidence": confidences,
+    }
+
+
+def test_new_finding_classes_get_distinct_sarif_rules():
+    report = {
+        "root": "/workspace/project",
+        "files": [
+            _item(
+                [
+                    "JPEG trailer after EOI: Samsung Galaxy AI marker: PhotoEditor_Re_Edit_Data genAIType=1",
+                    "JPEG APP1: xAI/Grok provenance marker: Signature + artist UUID pair",
+                    "JPEG APP1: IPTC digital-source trainedAlgorithmicMedia (AI-generated)",
+                    "JPEG COM: Higgsfield job hint marker: hf-job-id=7c9e6679-7425-40de-944b-e07fc1f90ae7 (medium confidence)",
+                    "JPEG APP1: TC260 AIGC label (Label=1, ContentProducer=ByteDance)",
+                ],
+                ["probable", "probable", "confirmed", "probable", "probable"],
+            )
+        ],
+    }
+    sarif = format_sarif(report)
+    rules = {r["id"]: r for r in sarif["runs"][0]["tool"]["driver"]["rules"]}
+    assert {
+        "AI-WATERMARK-SAMSUNG",
+        "AI-WATERMARK-XAI",
+        "AI-WATERMARK-IPTC",
+        "AI-WATERMARK-HF-JOB",
+        "AI-WATERMARK-TC260",
+    } <= set(rules)
+    by_rule = {}
+    for result in sarif["runs"][0]["results"]:
+        by_rule.setdefault(result["ruleId"], []).append(result)
+    assert len(by_rule["AI-WATERMARK-SAMSUNG"]) == 1
+    assert len(by_rule["AI-WATERMARK-XAI"]) == 1
+    assert len(by_rule["AI-WATERMARK-IPTC"]) == 1
+    assert len(by_rule["AI-WATERMARK-HF-JOB"]) == 1
+    assert len(by_rule["AI-WATERMARK-TC260"]) == 1
+    # Confirmed digital-source semantics stays an error; hints stay warnings.
+    assert by_rule["AI-WATERMARK-IPTC"][0]["level"] == "error"
+    assert by_rule["AI-WATERMARK-SAMSUNG"][0]["level"] == "warning"
+    assert by_rule["AI-WATERMARK-HF-JOB"][0]["level"] == "warning"
+    assert by_rule["AI-WATERMARK-TC260"][0]["level"] == "warning"
+
+
+def test_existing_sarif_classes_are_unchanged():
+    report = {
+        "root": "/workspace/project",
+        "files": [
+            _item(["marker:C2PA manifest"], ["confirmed"], has_c2pa=True),
+            _item(["meta: ai"], ["probable"]),
+            _item(["layer-a [space] U+2002 x3"], ["probable"]),
+        ],
+    }
+    sarif = format_sarif(report)
+    rules = {r["id"] for r in sarif["runs"][0]["tool"]["driver"]["rules"]}
+    assert {
+        "AI-WATERMARK-C2PA",
+        "AI-WATERMARK-METADATA",
+        "AI-WATERMARK-UNICODE-LAYER-A",
+        "AI-STYLES-HIGH-PROBABILITY",
+    } <= rules
+    by_rule = {}
+    for result in sarif["runs"][0]["results"]:
+        by_rule.setdefault(result["ruleId"], []).append(result)
+    assert by_rule["AI-WATERMARK-C2PA"][0]["level"] == "error"
+    assert by_rule["AI-WATERMARK-METADATA"][0]["level"] == "warning"
+    assert by_rule["AI-WATERMARK-UNICODE-LAYER-A"][0]["level"] == "warning"
