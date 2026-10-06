@@ -395,6 +395,20 @@ def _write_broken_opencv(directory: Path) -> None:
     )
 
 
+def _write_broken_onnxruntime(directory: Path) -> None:
+    """Shadow onnxruntime the same way, for the learned-tier fail-soft tests.
+
+    Ticket 04 registers the MI-GAN/LaMa tiers whenever onnxruntime imports,
+    so on machines where it IS installed the subprocess would reach a real
+    model download instead of the labeled-unavailable path. The stub puts
+    the child on the no-runtime side of the boundary deterministically.
+    """
+    (directory / "onnxruntime.py").write_text(
+        "raise ModuleNotFoundError('onnxruntime is not installed (blocked by test)')\n",
+        encoding="utf-8",
+    )
+
+
 def test_clean_file_cv2_backend_fails_soft_without_opencv(tmp_path: Path) -> None:
     # Block the cv2 import at the same boundary backend resolution probes
     # (optional_deps -> importlib.import_module("cv2")) rather than trusting
@@ -471,29 +485,46 @@ def test_visible_plan_accepts_learned_backend_names(backend: str) -> None:
 
 
 @pytest.mark.parametrize("backend", ["migan", "lama"])
-def test_remove_visible_learned_backend_fails_soft_labeled(tmp_path, backend: str) -> None:
-    # No learned backend is registered in this build (the migan/lama ONNX
-    # backends land with ticket 04), so resolution must take the labeled-
-    # unavailable path deterministically -- registration is code-driven, not
-    # environment-driven.
-    src = tmp_path / "input.png"
-    src.write_bytes(encode_png(Raster(16, 16, 3, bytearray([9, 8, 7] * 256))))
-    mask = tmp_path / "mask.pgm"
-    write_pgm(box_mask(16, 16, (7, 7, 1, 1)), mask)
-    dest = tmp_path / "cleaned.png"
+def test_remove_visible_learned_backend_fails_soft_labeled(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, backend: str
+) -> None:
+    # The labeled-unavailable path is forced, not assumed: ticket 04 makes
+    # learned-tier registration environment-driven (onnxruntime present ->
+    # registered), so the gates are forced off and the global registry is
+    # rebuilt to pin the both-extras-absent state deterministically.
+    import inpaint_backends
+    import lama_fill
+    import migan_fill
 
-    with pytest.raises(ValueError, match=rf"watermark-remover\[{backend}\]"):
-        remove_visible(
-            src,
-            dest,
-            VisiblePlan(
-                mask_path=mask,
-                backend=backend,
-                dilation_radius=0,
-                mask_output=tmp_path / "out.mask.pgm",
-            ),
-        )
-    assert not dest.exists()
+    monkeypatch.setattr(migan_fill, "onnxruntime_available", lambda: False)
+    monkeypatch.setattr(lama_fill, "onnxruntime_available", lambda: False)
+    saved_registry = list(inpaint_backends._REGISTRY)
+    saved_flag = inpaint_backends._bootstrapped
+    inpaint_backends._REGISTRY.clear()
+    inpaint_backends._bootstrapped = False
+    try:
+        src = tmp_path / "input.png"
+        src.write_bytes(encode_png(Raster(16, 16, 3, bytearray([9, 8, 7] * 256))))
+        mask = tmp_path / "mask.pgm"
+        write_pgm(box_mask(16, 16, (7, 7, 1, 1)), mask)
+        dest = tmp_path / "cleaned.png"
+
+        with pytest.raises(ValueError, match=rf"watermark-remover\[{backend}\]"):
+            remove_visible(
+                src,
+                dest,
+                VisiblePlan(
+                    mask_path=mask,
+                    backend=backend,
+                    dilation_radius=0,
+                    mask_output=tmp_path / "out.mask.pgm",
+                ),
+            )
+        assert not dest.exists()
+    finally:
+        inpaint_backends._REGISTRY.clear()
+        inpaint_backends._REGISTRY.extend(saved_registry)
+        inpaint_backends._bootstrapped = saved_flag
 
 
 @pytest.mark.parametrize("backend", ["migan", "lama"])
@@ -503,6 +534,14 @@ def test_clean_file_learned_backend_choice_parses_and_fails_soft(
     # The flag parses (choices widened for the learned tiers); the failure is
     # the labeled unavailability on the normal runtime error path -- exit code
     # unchanged (FAILED -> 1), install hint in stderr, no output written.
+    # The onnxruntime import is blocked in the child (the t01 boundary
+    # technique) so the labeled path is taken on any host, including ones
+    # where ticket 04's learned tiers would otherwise register.
+    stubs = tmp_path / "blocked-onnxruntime"
+    stubs.mkdir()
+    _write_broken_onnxruntime(stubs)
+    env = {**os.environ, "PYTHONPATH": str(stubs)}
+
     src = tmp_path / "input.png"
     src.write_bytes(encode_png(Raster(16, 16, 3, bytearray([9, 8, 7] * 256))))
     mask = tmp_path / "mask.pgm"
@@ -519,6 +558,7 @@ def test_clean_file_learned_backend_choice_parses_and_fails_soft(
         "0",
         "--visible-backend",
         backend,
+        env=env,
     )
 
     assert result.returncode == 1

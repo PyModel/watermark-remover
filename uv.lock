@@ -3471,13 +3471,23 @@ detect = [
 ]
 lama = [
     { name = "huggingface-hub" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
+    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "onnxruntime", version = "1.23.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "onnxruntime", version = "1.30.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "opencv-python-headless" },
+    { name = "pillow" },
 ]
 migan = [
     { name = "huggingface-hub" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
+    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "onnxruntime", version = "1.23.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "onnxruntime", version = "1.30.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "opencv-python-headless" },
+    { name = "pillow" },
 ]
 pixel = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -3516,8 +3526,8 @@ visible = [
 requires-dist = [
     { name = "c2pa-python", marker = "extra == 'provenance'" },
     { name = "huggingface-hub", marker = "extra == 'classify'", specifier = ">=0.20.0,<2" },
-    { name = "huggingface-hub", marker = "extra == 'lama'" },
-    { name = "huggingface-hub", marker = "extra == 'migan'" },
+    { name = "huggingface-hub", marker = "extra == 'lama'", specifier = ">=0.20,<2" },
+    { name = "huggingface-hub", marker = "extra == 'migan'", specifier = ">=0.20,<2" },
     { name = "huggingface-hub", marker = "extra == 'source-classify'", specifier = ">=0.20.0,<2" },
     { name = "numpy", marker = "extra == 'classify'" },
     { name = "numpy", marker = "extra == 'detect'" },
@@ -3525,8 +3535,8 @@ requires-dist = [
     { name = "numpy", marker = "extra == 'source-classify'" },
     { name = "numpy", marker = "extra == 'visible'" },
     { name = "onnxruntime", marker = "extra == 'classify-onnx'" },
-    { name = "onnxruntime", marker = "extra == 'lama'" },
-    { name = "onnxruntime", marker = "extra == 'migan'" },
+    { name = "onnxruntime", marker = "extra == 'lama'", specifier = ">=1.20,<2" },
+    { name = "onnxruntime", marker = "extra == 'migan'", specifier = ">=1.20,<2" },
     { name = "opencv-python-headless", marker = "extra == 'classify'" },
     { name = "opencv-python-headless", marker = "extra == 'detect'" },
     { name = "opencv-python-headless", marker = "extra == 'pixel'" },
@@ -3546,6 +3556,8 @@ requires-dist = [
     { name = "watermark-remover", extras = ["ai"], marker = "extra == 'all'" },
     { name = "watermark-remover", extras = ["classify"], marker = "extra == 'classify-onnx'" },
     { name = "watermark-remover", extras = ["detect"], marker = "extra == 'all'" },
+    { name = "watermark-remover", extras = ["pixel"], marker = "extra == 'lama'" },
+    { name = "watermark-remover", extras = ["pixel"], marker = "extra == 'migan'" },
     { name = "watermark-remover", extras = ["provenance"], marker = "extra == 'all'" },
     { name = "watermark-remover", extras = ["quality"], marker = "extra == 'all'" },
     { name = "watermark-remover", extras = ["source-classify"], marker = "extra == 'all'" },

@@ -85,8 +85,9 @@ def check_optional(extra: str) -> BackendAvailability:
         # The pixel extra (numpy + headless OpenCV + Pillow) is the declared
         # home for pixel-tier work; `visible` stays its superset alias.
         "pixel": ("numpy", "cv2", "PIL"),
-        # The learned ONNX inpaint tiers (region_eraser): inference runtime plus
-        # the hub client that fetches the model on first use.
+        # The learned ONNX fill tiers (ticket 04): both probe the runtime and
+        # the hub client; the model weights themselves download pinned at
+        # first use into the HF cache and are never bundled.
         "migan": ("onnxruntime", "huggingface_hub"),
         "lama": ("onnxruntime", "huggingface_hub"),
         # The open DWT-DCT detector (dwt_dct.py + invisible_watermark.py):

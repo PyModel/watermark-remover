@@ -122,16 +122,20 @@ ai = [
 provenance = [
     "c2pa-python",
 ]
-# The learned ONNX inpaint tiers (region_eraser.py): each downloads its model
-# from Hugging Face on first use, so both need onnxruntime and huggingface-hub --
-# the exact pair the runtime install hints name.
+# The learned ONNX fill tiers (ticket 04). Both probe onnxruntime + the
+# Hugging Face hub client; the model weights download pinned to an audited
+# commit at first use into the user's HF cache and are never bundled:
+#   migan: andraniksargsyan/migan (MIT, ~28 MB)
+#   lama:  Carve/LaMa-ONNX (Apache-2.0, ~200 MB)
 migan = [
-    "onnxruntime",
-    "huggingface-hub",
+    "watermark-remover[pixel]",
+    "onnxruntime>=1.20,<2",
+    "huggingface-hub>=0.20,<2",
 ]
 lama = [
-    "onnxruntime",
-    "huggingface-hub",
+    "watermark-remover[pixel]",
+    "onnxruntime>=1.20,<2",
+    "huggingface-hub>=0.20,<2",
 ]
 all = [
     "watermark-remover[visible]",
