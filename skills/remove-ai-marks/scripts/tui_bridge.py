@@ -62,7 +62,7 @@ import tui as launcher
 from asset_kind import classify_asset
 from batch_inputs import InputItem, InputSelection
 from clean_asset import CleanPlan
-from clean_file import dry_run_payload, run_clean_item
+from clean_pipeline import execute, execute_item
 from clean_request import CleanRequest, select_request_inputs
 from inspect_file import inspect_asset
 from rewrite_text import LIVE_REWRITE_BACKENDS
@@ -756,18 +756,14 @@ class Bridge:
         request: CleanRequest,
         plan: CleanPlan,
     ) -> dict[str, Any]:
-        """``run_clean_item`` with its Layer B stream sent as ``token`` frames.
-
-        One file failing is a row, not the end of the batch, so an exception
-        becomes an error payload.
-        """
+        """Execute one item through the canonical seam with token frames."""
         coalescer = None
         if plan.text.rewrite_plan is not None:
             coalescer = TokenCoalescer(
                 lambda text: self.event(rid, "token", {"index": index, "text": text})
             )
         try:
-            return run_clean_item(
+            return execute_item(
                 path,
                 output,
                 request,
@@ -777,7 +773,6 @@ class Bridge:
         except (Exception, SystemExit) as error:
             return {"exit_code": 1, "error": f"{type(error).__name__}: {error}"}
         finally:
-            # Joined before file_done, so no token frame can follow it.
             if coalescer is not None:
                 coalescer.close()
 
@@ -786,10 +781,12 @@ class Bridge:
     ) -> None:
         """Describe a visible-mark clean without writing, as ``wm --dry-run`` does."""
         total = len(work)
-        for index, (item, output, plan) in enumerate(work):
+        for index, (item, output, _plan) in enumerate(work):
             display = display_path(item.path)
             self.event(rid, "file_start", {"index": index, "total": total, "display": display})
-            payload = dry_run_payload(item.path, output, plan, request.in_place)
+            payload = (
+                execute(replace(request.with_paths((item.path,)), output=output)).results[0].payload
+            )
             done = _file_done(
                 index,
                 display,

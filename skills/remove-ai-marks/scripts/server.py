@@ -43,6 +43,7 @@ import threading
 import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -50,9 +51,8 @@ from urllib.parse import parse_qs, urlparse
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from asset_kind import classify_bytes
-from batch_inputs import InputItem
-from clean_file import run_clean_item
-from clean_request import CleanRequest, plan_work
+from clean_pipeline import execute
+from clean_request import CleanRequest
 from common import (
     MAX_INPUT_BYTES,
     eprint,
@@ -60,17 +60,21 @@ from common import (
     read_flag_env,
     which,
 )
-from container_meta import clean_container, inspect_container
 from identify import identify_file, unknown_verdict
-from image_meta import inspect_image, run_synthid_score
+from inspect_file import inspect_asset
 from layer_b_discovery import layer_b_status
 from layer_b_http import LayerBHTTPError
 from morphomod import VisiblePlan, remove_visible
 from optional_deps import extras_status
+from pipeline_actions import action_sentences
 from rewrite_text import REWRITE_STRENGTHS, RewriteConfigurationError, RewritePlan, rewrite
 from score_stylometry import score_text_stylometry
 from text_detectors import detector_status, run_all_text_detectors, run_text_detectors
-from text_unicode import inspect_text
+
+
+def run_synthid_score(path: Path) -> dict[str, Any] | None:
+    return import_module("image_meta").run_synthid_score(path)
+
 
 VERSION = os.environ.get("WATERMARKS_SERVER_VERSION", "dev")
 
@@ -176,18 +180,17 @@ def static_file(path: str) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
-ALLOWED_CLEAN_OPTIONS = {
-    "nfkc": bool,
-    "aggressive_homoglyphs": bool,
-    "keep_non_ai_metadata": bool,
-    "also_layer_a_text": bool,
-    "remove_pixel": str,
-    "strip_all_metadata": bool,
-    "detect_before": bool,
-    "detect_after": bool,
-    # OURS-only additive keys (Phase 9 plan)
-    "remove_synthid": bool,
-    "wmct_marker": bool,
+CLEAN_OPTION_TRANSLATIONS = {
+    "nfkc": ("nfkc", bool),
+    "aggressive_homoglyphs": ("aggressive_homoglyphs", bool),
+    "keep_non_ai_metadata": ("keep_non_ai_metadata", bool),
+    "also_layer_a_text": ("also_layer_a_text", bool),
+    "strip_all_metadata": ("keep_non_ai_metadata", bool),
+    "detect_before": ("detect_before", bool),
+    "detect_after": ("detect_after", bool),
+    "remove_synthid": ("remove_synthid", bool),
+    "wmct_marker": ("wmct_marker", bool),
+    "remove_pixel": ("pixel_backend", str),
 }
 
 
@@ -318,7 +321,7 @@ def _file_request(extra: dict[str, Any] | None = None) -> dict[str, Any]:
 
 def _clean_request_schema() -> dict[str, Any]:
     options: dict[str, Any] = {}
-    for key, kind in ALLOWED_CLEAN_OPTIONS.items():
+    for key, (_field, kind) in CLEAN_OPTION_TRANSLATIONS.items():
         if kind is bool:
             options[key] = _schema(type="boolean")
         else:
@@ -700,65 +703,44 @@ def _decode_input(body: dict[str, Any]) -> tuple[bytes, str]:
 # asset skips. Dropping exactly these (and nothing else) keeps the
 # endpoint's report byte-identical to the pre-plan shape.
 _PAYLOAD_BOOKKEEPING = frozenset({"input", "output", "exit_code", "skipped_text_transforms"})
+# Historical /clean report order. The pipeline payload carries the same fields
+# in its own order; the endpoint keeps the order clients already pin.
+_IMAGE_REPORT_ORDER = (
+    "kind",
+    "format",
+    "actions",
+    "action_details",
+    "bytes_in",
+    "bytes_out",
+    "still_has_c2pa",
+    "still_has_ai_metadata",
+    "post_findings",
+    "synthid_before",
+    "synthid_after",
+    "synthid_removal",
+    "wmct_marker",
+)
+_CONTAINER_REPORT_ORDER = (
+    "kind",
+    "format",
+    "actions",
+    "action_details",
+    "bytes_in",
+    "bytes_out",
+    "still_has_c2pa",
+    "still_has_ai_metadata",
+    "post_findings",
+    "meta",
+)
 
 
-def _compose_clean_request(options: dict[str, Any], dest: Path, kind: str) -> CleanRequest:
-    """Map the whitelisted /clean options onto the canonical ``CleanRequest``.
-
-    The whitelist above is the whole accepted option surface, so the request
-    built here is the same object ``clean_file`` would build for these flags;
-    every other field stays at its CLI default. ``strip_all_metadata`` keeps
-    its historical meaning of an explicit override of
-    ``keep_non_ai_metadata`` (the endpoint has always let it win), expressed
-    through the single canonical field the planner derives strip-all from.
-    ``force_type`` carries the router's decision so the planner re-classifies
-    nothing and cannot disagree with ``classify_bytes`` above.
-    """
-    keep = bool(options.get("keep_non_ai_metadata"))
-    if "strip_all_metadata" in options:
-        keep = not bool(options["strip_all_metadata"])
-    return CleanRequest(
-        output=dest,
-        force_type=kind,
-        nfkc=bool(options.get("nfkc")),
-        aggressive_homoglyphs=bool(options.get("aggressive_homoglyphs")),
-        keep_non_ai_metadata=keep,
-        remove_synthid=bool(options.get("remove_synthid")),
-        wmct_marker=bool(options.get("wmct_marker")),
-        json=True,  # the HTTP handler owns presentation; the executor stays silent
-    )
-
-
-def _run_planned(src: Path, dest: Path, request: CleanRequest) -> dict[str, Any]:
-    """Preflight and clean one asset through the canonical plan executor.
-
-    ``plan_work`` resolves the destination and refuses oversized inputs,
-    aliased outputs, and binary-as-text before the first write — the same
-    refusals the CLI gets, now inherited here. Only that preflight is a
-    client-visible 400: the executor reports internal failures as error
-    payloads, and those re-raise as non-ValueError so the handler maps them
-    back to the sanitized 500 the direct calls this replaced produced.
-    """
-    item = InputItem(path=src, relative=Path(src.name))
-    ((_, output, plan),) = plan_work([item], request, batch=False)
-    payload = run_clean_item(item.path, output, request, plan)
-    if "error" in payload:
-        raise RuntimeError(payload["error"])
-    return payload
-
-
-def _plan_preflight(src: Path, dest: Path, request: CleanRequest) -> None:
-    """Run the canonical preflight for one asset without executing it.
-
-    The ``also_layer_a_text=False`` container branch cannot hand the executor
-    the client's value (``CleanPlan`` has no container option yet), but its
-    requests must still clear the same ``plan_work`` refusals — the input
-    size cap, aliased outputs — that ``_run_planned`` gives every other
-    branch. Raises ``ValueError`` with the planner's message, exactly like
-    the executed paths.
-    """
-    item = InputItem(path=src, relative=Path(src.name))
-    plan_work([item], request, batch=False)
+def _ordered_report(payload: dict[str, Any], order: tuple[str, ...]) -> dict[str, Any]:
+    stripped = {key: value for key, value in payload.items() if key not in _PAYLOAD_BOOKKEEPING}
+    if "actions" not in stripped and "action_details" in stripped:
+        stripped["actions"] = action_sentences(stripped["action_details"])
+    ordered = {key: stripped[key] for key in order if key in stripped}
+    ordered.update({key: value for key, value in stripped.items() if key not in ordered})
+    return ordered
 
 
 def _identify_query(target: str) -> bool:
@@ -1067,21 +1049,30 @@ class Handler(BaseHTTPRequestHandler):
                         "refusing to inspect bytes that look like a binary container as text"
                     )
                 raw_text = data.decode("utf-8", errors="surrogateescape")
-                report = inspect_text(raw_text).to_dict()
-                s_rep = score_text_stylometry(raw_text, path=name or "<text>")
-                report["stylometry"] = s_rep.to_dict()
+                inspected = inspect_asset(path, force_type=kind)
+                report = {
+                    key: value
+                    for key, value in inspected.items()
+                    if key not in {"kind", "path", "suspicious"}
+                }
+                report["stylometry"] = score_text_stylometry(
+                    raw_text, path=name or "<text>"
+                ).to_dict()
                 if run_detect:
                     report["text_detectors"] = run_all_text_detectors(raw_text)
                 if identify:
                     # Provenance identification is a metadata question about
                     # binary assets; a text asset carries none — unknown.
                     verdict = unknown_verdict()
-            elif kind == "image":
-                report = inspect_image(path).to_dict()
             else:
-                report = inspect_container(path).to_dict()
-            if identify and verdict is None:
-                verdict = identify_file(path)
+                inspected = inspect_asset(path, force_type=kind)
+                report = {
+                    key: value
+                    for key, value in inspected.items()
+                    if key not in {"kind", "path", "suspicious"}
+                }
+                if identify:
+                    verdict = identify_file(path)
         detection_status = _text_detection_status(report.get("text_detectors") or [])
         suspicious = (
             bool(report.get("suspicious_total"))
@@ -1150,7 +1141,7 @@ class Handler(BaseHTTPRequestHandler):
                 ]
             else:
                 detections = []
-                report = inspect_container(path).to_dict()
+                report = inspect_asset(path)
                 self._respond(
                     HTTPStatus.OK,
                     {
@@ -1248,21 +1239,51 @@ class Handler(BaseHTTPRequestHandler):
                 "unrecognized file format; use a filename with a known extension "
                 "(e.g. notes.txt) or a supported image/container name"
             )
-        options = body.get("options")
-        if options is None:
-            options = {}
+        options = body.get("options") or {}
         if not isinstance(options, dict):
             raise ValueError("'options' must be an object")
         if PUBLIC and (options.get("detect_before") or options.get("detect_after")):
             raise ValueError("detectors are turned off on this server")
+        values: dict[str, Any] = {}
         for key, value in options.items():
-            if key not in ALLOWED_CLEAN_OPTIONS:
+            translation = CLEAN_OPTION_TRANSLATIONS.get(key)
+            if translation is None:
                 raise ValueError(f"unknown option: {key}")
-            expected_type = ALLOWED_CLEAN_OPTIONS[key]
+            field, expected_type = translation
             if not isinstance(value, expected_type):
                 type_name = "boolean" if expected_type is bool else "string"
                 raise ValueError(f"option {key!r} must be a {type_name}")
-
+            if key == "strip_all_metadata":
+                values["keep_non_ai_metadata"] = not value
+            elif field == "pixel_backend":
+                values[field] = value
+            else:
+                values[field] = value
+        if "strip_all_metadata" in options:
+            # Historical contract: strip_all_metadata wins over keep_non_ai_metadata.
+            values["keep_non_ai_metadata"] = not options["strip_all_metadata"]
+        pixel = values.pop("pixel_backend", None)
+        if pixel is not None:
+            available = bool(capabilities()["pixel_backends"].get(pixel, False))
+            self._respond(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "kind": kind,
+                    "capability": {
+                        "requested": pixel,
+                        "supported": pixel in ("ctrlregen", "diffusion"),
+                        "available": available,
+                        "executed": False,
+                        "reason": (
+                            "pixel backend is unavailable"
+                            if not available
+                            else "pixel backend is not wired into the canonical pipeline"
+                        ),
+                    },
+                },
+            )
+            return
         with tempfile.TemporaryDirectory(prefix="wm-clean-") as tmp:
             tmpdir = Path(tmp)
             src = _tmp_path(tmpdir, name or "input")
@@ -1271,82 +1292,69 @@ class Handler(BaseHTTPRequestHandler):
             # filename can never alias it, whatever the asset kind.
             outdir = Path(tempfile.mkdtemp(dir=tmpdir, prefix="out-"))
             if kind == "text":
-                if looks_binary(data):
-                    raise ValueError(
-                        "refusing to clean bytes that look like a binary container as text"
+                dest_name = "out.txt"
+            elif kind == "image":
+                dest_name = "out.png"
+            else:
+                dest_name = f"out{Path(name).suffix}"
+            dest = outdir / dest_name
+            if kind == "text" and looks_binary(data):
+                raise ValueError(
+                    "refusing to clean bytes that look like a binary container as text"
+                )
+            detector_reports: dict[str, Any] = {}
+            if kind == "text" and values.get("detect_before"):
+                detector_reports["before"] = run_text_detectors(
+                    data.decode("utf-8", errors="surrogateescape")
+                )
+            request = CleanRequest(
+                paths=(src,),
+                output=dest,
+                force_type=kind,
+                **values,
+                json=True,
+            )
+            payload = execute(request).payload
+            if payload.get("error"):
+                # Preflight refusals raise ValueError inside execute and stay
+                # 400. An error payload is an execution failure: re-raise as
+                # RuntimeError so the handler keeps the sanitized 500.
+                raise RuntimeError(payload["error"])
+            cleaned_bytes = dest.read_bytes()
+            if kind == "text":
+                if values.get("detect_after"):
+                    detector_reports["after"] = run_text_detectors(
+                        cleaned_bytes.decode("utf-8", errors="surrogateescape")
                     )
-                text = data.decode("utf-8", errors="surrogateescape")
-                detector_reports: dict[str, Any] = {}
-                if bool(options.get("detect_before")):
-                    detector_reports["before"] = run_text_detectors(text)
-                dest = outdir / "out.txt"
-                request = _compose_clean_request(options, dest, kind)
-                payload = _run_planned(src, dest, request)
-                cleaned = dest.read_text(encoding="utf-8", errors="surrogateescape")
-                report: dict[str, Any] = {
+                result = {
                     "kind": "text",
                     "stats": payload["stats"],
-                    "length": len(cleaned),
+                    "length": len(cleaned_bytes.decode("utf-8", errors="surrogateescape")),
                 }
-                if bool(options.get("detect_after")):
-                    detector_reports["after"] = run_text_detectors(cleaned)
                 if detector_reports:
-                    report["text_detectors"] = detector_reports
-                cleaned_bytes = dest.read_bytes()
-            elif kind == "image":
-                remove_pixel = options.get("remove_pixel")
-                if remove_pixel not in (None, "ctrlregen", "diffusion"):
-                    raise ValueError("remove_pixel must be one of: ctrlregen, diffusion")
-                dest = outdir / "out.png"
-                request = _compose_clean_request(options, dest, kind)
-                payload = _run_planned(src, dest, request)
-                report = {k: v for k, v in payload.items() if k not in _PAYLOAD_BOOKKEEPING}
-                if remove_pixel:
-                    # Pixel backends (ctrlregen / diffusion) are wired through
-                    # the image_meta port; mark unavailable in the report
-                    # rather than failing the request.
-                    report["pixel_removal"] = {
-                        "available": False,
-                        "error": (
-                            f"remove_pixel={remove_pixel!r} is reserved for the future "
-                            "image_meta integration; not yet exposed via OURS "
-                            "clean_image"
-                        ),
-                    }
-                if bool(options.get("detect_before")) and report.get("synthid_before") is None:
-                    report["synthid_before"] = run_synthid_score(src)
-                if bool(options.get("detect_after")) and report.get("synthid_after") is None:
-                    report["synthid_after"] = run_synthid_score(dest)
-                cleaned_bytes = dest.read_bytes()
+                    result["text_detectors"] = detector_reports
             else:
-                dest = outdir / f"out{Path(name).suffix}"
-                if options.get("also_layer_a_text") is False:
-                    # The one whitelisted option the canonical CleanPlan cannot
-                    # express yet: skipping the Layer-A text scrub of container
-                    # bodies has no plan field, so the executor would run the
-                    # scrub the client asked to skip. The request still clears
-                    # the shared preflight — the same refusals _run_planned
-                    # inherits — and only execution falls to clean_container
-                    # with the client's value. When CleanPlan grows a container
-                    # option, this branch folds into _run_planned like every
-                    # other case.
-                    _plan_preflight(src, dest, _compose_clean_request(options, dest, kind))
-                    result = clean_container(src, dest, also_layer_a_text=False)
-                    report = {"kind": "container", **result}
-                else:
-                    request = _compose_clean_request(options, dest, kind)
-                    payload = _run_planned(src, dest, request)
-                    report = {k: v for k, v in payload.items() if k not in _PAYLOAD_BOOKKEEPING}
-                cleaned_bytes = dest.read_bytes()
-            report.pop("input", None)
-            report.pop("output", None)
+                order = _IMAGE_REPORT_ORDER if kind == "image" else _CONTAINER_REPORT_ORDER
+                result = _ordered_report(payload, order)
+                if (
+                    kind == "image"
+                    and values.get("detect_before")
+                    and result.get("synthid_before") is None
+                ):
+                    result["synthid_before"] = run_synthid_score(src)
+                if (
+                    kind == "image"
+                    and values.get("detect_after")
+                    and result.get("synthid_after") is None
+                ):
+                    result["synthid_after"] = run_synthid_score(dest)
         self._respond(
             HTTPStatus.OK,
             {
                 "ok": True,
                 "kind": kind,
                 "cleaned": base64.b64encode(cleaned_bytes).decode("ascii"),
-                "report": report,
+                "report": result,
             },
         )
 

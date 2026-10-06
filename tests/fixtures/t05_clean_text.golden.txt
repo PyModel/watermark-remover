@@ -1,0 +1,14 @@
+Hello world
+{
+  "input_length": 13,
+  "output_length": 12,
+  "removed": {
+    "U+200B ZERO WIDTH SPACE (Cf)": 1
+  },
+  "replaced": {},
+  "removed_count": 1,
+  "replaced_count": 0,
+  "preserved_semantic": {},
+  "preserved_count": 0,
+  "nfkc_changed": false
+}

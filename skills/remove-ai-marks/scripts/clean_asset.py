@@ -270,6 +270,7 @@ class CleanPlan:
     wmct_marker: bool = False
     humanize: bool = False
     humanize_seed: int | None = None
+    also_layer_a_text: bool = True
 
     def __post_init__(self) -> None:
         if self.forced_kind not in ("auto", "text", "image", "container"):
@@ -280,6 +281,7 @@ class CleanPlan:
             "inspect_soft_binding",
             "remove_synthid",
             "wmct_marker",
+            "also_layer_a_text",
         ):
             if not isinstance(getattr(self, name), bool):
                 raise TypeError(f"{name} must be a bool")
@@ -883,7 +885,7 @@ def _clean_image_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
 
 def _clean_container_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
     source = create_backup(path) if plan.in_place else path
-    report = clean_container(source, dest)
+    report = clean_container(source, dest, also_layer_a_text=plan.also_layer_a_text)
     report["input"] = str(path)
     residual = bool(report["still_has_c2pa"] or report["still_has_ai_metadata"])
     return CleanResult("container", path, dest, residual, report)

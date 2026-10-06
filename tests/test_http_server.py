@@ -341,21 +341,26 @@ def test_oversized_body_413(conn, monkeypatch):
 def test_executor_failure_is_a_sanitized_500(conn, monkeypatch):
     """An executor error payload is internal, not a client-visible 400.
 
-    _run_planned re-raised every executor error payload as ValueError, so a
-    failure inside clean_asset surfaced as 400 with the raw exception text.
     Only planner/preflight refusals (ValueError out of plan_work) are client
-    errors; executor failures must map back to the sanitized 500 the direct
-    calls this endpoint replaced produced.
+    errors; an error payload from execute must map back to the sanitized 500.
     """
 
-    def _boom(*args: object, **kwargs: object) -> dict[str, object]:
-        return {
+    def _boom(*args: object, **kwargs: object) -> object:
+        from pathlib import Path
+
+        from clean_pipeline import ItemResult, RunResult
+
+        payload = {
             "kind": "unknown",
             "error": "s3cr3t internal detail: /tmp/wm-clean-xyz/path.py:1",
             "exit_code": 1,
         }
+        return RunResult(
+            (ItemResult(path=Path("note.txt"), output=Path("out.txt"), payload=payload),),
+            False,
+        )
 
-    monkeypatch.setattr(server, "run_clean_item", _boom)
+    monkeypatch.setattr(server, "execute", _boom)
     status, body = _post(
         conn, "/clean", {"file": _b64("Hello\u200bWorld!".encode()), "name": "note.txt"}
     )

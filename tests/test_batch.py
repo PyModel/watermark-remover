@@ -380,7 +380,8 @@ def test_single_plan_preflight_preserves_json_error(tmp_path: Path):
     assert payload["input"] == str(image)
     assert payload["output"] == str(output)
     assert payload["exit_code"] == 1
-    assert payload["actions"] == [f"error: {payload['error']}"]
+    assert "actions" not in payload
+    assert payload["action_details"][0]["text"] == f"error: {payload['error']}"
     assert [d["code"] for d in payload["action_details"]] == ["failed"]
     assert "requires a localization source" in payload["error"]
     assert not output.exists()
@@ -414,7 +415,8 @@ def test_batch_plan_preflight_preserves_json_envelope(tmp_path: Path):
     assert payload["input"] == str(image)
     assert payload["output"] == str(output / image.name)
     assert payload["exit_code"] == 1
-    assert payload["actions"] == [f"error: {payload['error']}"]
+    assert "actions" not in payload
+    assert payload["action_details"][0]["text"] == f"error: {payload['error']}"
     assert [d["code"] for d in payload["action_details"]] == ["failed"]
     assert "requires a localization source" in payload["error"]
     assert not (output / text.name).exists()

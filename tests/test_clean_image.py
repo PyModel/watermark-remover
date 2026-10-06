@@ -195,13 +195,14 @@ def test_exiftool_nonzero_is_logged_as_failure(tmp_path: Path, monkeypatch):
         lambda *args, **kwargs: fake_command_result(7, stderr="denied"),
     )
     report = clean_image(src, dest)
-    assert any("exiftool failed (rc=7)" in action for action in report["actions"])
-    assert not any(action == "exiftool -all= pass" for action in report["actions"])
-    failure = report["action_details"][-1]
+    details = report["action_details"]
+    assert any("exiftool failed (rc=7)" in action["text"] for action in details)
+    assert not any(action["text"] == "exiftool -all= pass" for action in details)
+    failure = details[-1]
     assert failure == {
         "code": "tool_failed",
         "effect": "warning",
-        "text": report["actions"][-1],
+        "text": "exiftool failed (rc=7): denied",
         "params": {"tool": "exiftool", "returncode": 7, "detail": "denied"},
     }
 

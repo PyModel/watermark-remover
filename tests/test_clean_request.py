@@ -25,13 +25,13 @@ ZWSP = "a​b"
 
 def _parse(argv: list[str]) -> CleanRequest:
     args = clean_file._build_parser().parse_args(argv)
-    return CleanRequest.from_args(args)
+    return clean_file.request_from_cli(args)
 
 
 # --- the argparse adapter must stay mechanical -------------------------------
 
 
-def test_from_args_covers_every_parser_destination():
+def test_request_from_cli_covers_every_parser_destination():
     """Any flag added to the parser must be carried on CleanRequest.
 
     Without this, a new flag silently reaches the CLI and never the TUI — the

@@ -44,7 +44,7 @@ from common import (
 )
 from domain_types import InpaintRequest
 from image_meta import detect_format
-from pipeline_actions import Action, report_actions
+from pipeline_actions import Action, action_sentences, report_actions
 from png_chunks import iter_png_chunks
 
 DEFAULT_DILATION_RADIUS = 3
@@ -1529,7 +1529,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(report, indent=2, ensure_ascii=False))
     else:
         print(f"status={report['status']} output={report.get('output')}")
-        for action in report["actions"]:
+        for action in action_sentences(report.get("action_details", ())):
             print(f"  - {action}")
     return 0
 

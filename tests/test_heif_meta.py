@@ -373,7 +373,7 @@ def test_clean_image_avif_roundtrip(tmp_path: Path):
     assert report["format"] == "avif"
     assert report["still_has_c2pa"] is False
     assert report["still_has_ai_metadata"] is False
-    assert any("jumb" in a.lower() for a in report["actions"])
+    assert any("jumb" in detail["text"].lower() for detail in report["action_details"])
 
     inspect_rep = inspect_image(dest)
     assert inspect_rep.format == "avif"
@@ -390,7 +390,10 @@ def test_clean_image_heic_roundtrip(tmp_path: Path):
     assert dest.is_file()
     assert report["format"] == "heif"
     assert report["still_has_ai_metadata"] is False
-    assert any("uuid" in a.lower() or "xmp" in a.lower() for a in report["actions"])
+    assert any(
+        "uuid" in detail["text"].lower() or "xmp" in detail["text"].lower()
+        for detail in report["action_details"]
+    )
 
 
 def test_fixture_avif_and_heic_are_detected_and_cleaned(tmp_path: Path):
