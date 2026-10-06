@@ -105,8 +105,11 @@ export async function handle(request: Request, env: Env): Promise<Response> {
   const reserved = estimateNeurons(inputTokens, maxTokens)
   const day = utcDay()
   const budget = env.BUDGET.get(env.BUDGET.idFromName("global"))
-  const call = (op: string, payload: Record<string, unknown>) =>
-    budget.fetch(`https://budget/${op}`, { method: "POST", body: JSON.stringify({ day, ...payload }) })
+  const call = (op: string, params: Record<string, string | number>) =>
+    budget.fetch(`https://budget/${op}?${new URLSearchParams({ day, ...Object.fromEntries(Object.entries(params).map(([k, v]) => [k, String(v)])) })}`, {
+      method: "POST",
+      body: "",
+    })
   const grant = await call("reserve", { client: await clientKey(request, day), neurons: reserved })
   if (!grant.ok) {
     const { reason } = (await grant.json()) as { reason: string }
@@ -160,8 +163,8 @@ interface Day {
 }
 
 /**
- * One Durable Object holds today's spend and per-client counts. Its requests run one at a
- * time, so reserve-then-settle can't overspend under concurrency.
+ * One Durable Object holds today's spend and per-client counts, so every reservation sees
+ * every earlier one.
  * ponytail: a single global object serializes every reservation; shard by hash if traffic
  * ever outgrows one object (hundreds of requests per second).
  */
@@ -169,18 +172,23 @@ export class Budget {
   constructor(private readonly state: { storage: Storage }) {}
 
   async fetch(request: Request): Promise<Response> {
-    const op = new URL(request.url).pathname.slice(1)
-    const input = (await request.json()) as { day: string; client?: string; neurons?: number; delta?: number }
+    // Inputs come from the URL, not the body: the storage get is the only await before the put,
+    // and the runtime's input gate holds other requests while it is in flight. An awaited body
+    // read here would let two reservations read the same total and lose one update.
+    const url = new URL(request.url)
+    const op = url.pathname.slice(1)
+    const day = url.searchParams.get("day") ?? ""
+    const amount = Number(url.searchParams.get(op === "settle" ? "delta" : "neurons") ?? "0") || 0
     const saved = await this.state.storage.get<Day>("today")
-    const today: Day = saved?.day === input.day ? saved : { day: input.day, neurons: 0, clients: {} }
+    const today: Day = saved?.day === day ? saved : { day, neurons: 0, clients: {} }
     if (op === "reserve") {
-      const client = input.client ?? "unknown"
+      const client = url.searchParams.get("client") ?? "unknown"
       if ((today.clients[client] ?? 0) >= PER_CLIENT_DAILY) return json(429, { reason: "client" })
-      if (today.neurons + (input.neurons ?? 0) > DAILY_NEURONS) return json(429, { reason: "budget" })
+      if (today.neurons + amount > DAILY_NEURONS) return json(429, { reason: "budget" })
       today.clients[client] = (today.clients[client] ?? 0) + 1
-      today.neurons += input.neurons ?? 0
+      today.neurons += amount
     } else if (op === "settle") {
-      today.neurons = Math.max(0, today.neurons + (input.delta ?? 0))
+      today.neurons = Math.max(0, today.neurons + amount)
     } else {
       return json(404, { reason: "unknown" })
     }
