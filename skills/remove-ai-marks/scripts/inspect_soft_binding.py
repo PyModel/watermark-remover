@@ -151,10 +151,10 @@ def _trustmark_finding(path: Path) -> dict[str, Any]:
     ``trustmark`` extra (weights download on first use); decoding never raises
     out of this function.
     """
-    import trustmark_detector
-
     entry: dict[str, Any] = {"available": False, "scheme": None}
     try:
+        import trustmark_detector
+
         if not trustmark_detector.is_available():
             return entry
         entry["available"] = True
@@ -230,6 +230,13 @@ def main() -> int:
         print(f"Path: {report['path']}")
         print(f"C2PA present: {report['has_c2pa']}")
         print(f"Soft binding found: {sb['found']}")
+        tm = report["trustmark"]
+        if tm.get("scheme"):
+            print(f"  trustmark: {tm['scheme']}")
+        elif tm.get("error"):
+            print(f"  trustmark: unavailable ({tm['error']})")
+        elif not tm.get("available"):
+            print("  trustmark: not scanned (trustmark extra not installed)")
         for lbl in sb["labels"]:
             print(f"  label: {lbl}")
         for url in sb["manifest_urls"]:
