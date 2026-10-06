@@ -114,15 +114,78 @@ def _marker(container: str, label: dict[str, str]) -> dict:
     }
 
 
-def read_video_markers(path: Path) -> tuple[dict, ...]:
-    """Every supported provenance marker in one video file, in file order."""
+def _read_video(path: Path) -> tuple[str, tuple[dict, ...]]:
+    """Read one video once: its container name and every supported marker."""
     data = read_bytes_bounded(path, MAX_INPUT_BYTES, label="video")
-    return tuple(_marker(finding["container"], finding["label"]) for finding in read_container_findings(data))
+    container = _container_name(data)
+    markers = tuple(
+        _marker(finding["container"], finding["label"])
+        for finding in read_container_findings(data)
+    )
+    return container, markers
 
 
-def marker_key(marker: dict) -> tuple[str, str]:
+def _marker_key(marker: dict) -> tuple[str, str]:
     """A stable identity for one marker: container plus its canonical label."""
     return marker["container"], repr(sorted(marker["label"].items()))
+
+
+@dataclass(frozen=True, slots=True)
+class VideoCleanResult:
+    """The verifiable outcome of one metadata strip, plus the audio boundary."""
+
+    container: str
+    markers_detected: tuple[dict, ...]
+    markers_removed: tuple[dict, ...]
+    markers_remaining: tuple[dict, ...]
+    audio: str = AUDIO_UNVERIFIED
+
+    @property
+    def residual(self) -> bool:
+        """True when a provenance marker survived the strip: the clean fails."""
+        return bool(self.markers_remaining)
+
+    def to_dict(self) -> dict:
+        return {
+            "format": self.container,
+            "markers_detected": [dict(marker) for marker in self.markers_detected],
+            "markers_removed": [dict(marker) for marker in self.markers_removed],
+            "markers_remaining": [dict(marker) for marker in self.markers_remaining],
+            "audio": self.audio,
+            "audio_verified": False,
+        }
+
+
+def clean_video(
+    source: Path,
+    dest: Path,
+    plan: VideoPlan,
+    *,
+    timeout: float | None = None,
+) -> VideoCleanResult:
+    """Strip a video's provenance markers into ``dest`` and verify the result.
+
+    The source's markers are read before the write and the destination's after,
+    so every removed and every surviving marker is named. A survivor is not an
+    error: it is a reported residual that fails the clean. The remux copies
+    every stream, audio included, and stages the destination, so a failure
+    leaves ``dest`` untouched.
+    """
+    missing = video_runtime()
+    if missing:
+        raise ValueError(video_runtime_hint(missing))
+    source_container, detected = _read_video(source)
+    remux_kwargs = {} if timeout is None else {"timeout": timeout}
+    remux_video(source, dest, strip_metadata=plan.remove_metadata, **remux_kwargs)
+    dest_container, remaining = _read_video(dest)
+    remaining_keys = {_marker_key(marker) for marker in remaining}
+    removed = tuple(marker for marker in detected if _marker_key(marker) not in remaining_keys)
+    return VideoCleanResult(
+        container=dest_container if dest_container != "unknown" else source_container,
+        markers_detected=detected,
+        markers_removed=removed,
+        markers_remaining=remaining,
+    )
 
 
 def inspect_video(path: Path) -> dict:
@@ -132,12 +195,11 @@ def inspect_video(path: Path) -> dict:
     never reported as clean: only three fixed containers are read, so absence
     of a finding is not evidence of absence of a marker.
     """
-    data = read_bytes_bounded(path, MAX_INPUT_BYTES, label="video")
-    markers = [_marker(finding["container"], finding["label"]) for finding in read_container_findings(data)]
-    container = _container_name(data)
-    if markers:
+    container, markers = _read_video(path)
+    listed = [dict(marker) for marker in markers]
+    if listed:
         notes = [
-            f"{len(markers)} provenance marker(s) read from the {container} container; "
+            f"{len(listed)} provenance marker(s) read from the {container} container; "
             "a clean removes these"
         ]
     else:
@@ -148,7 +210,7 @@ def inspect_video(path: Path) -> dict:
         ]
     return {
         "format": container,
-        "markers": markers,
-        "verdict": "markers-found" if markers else "unknown",
+        "markers": listed,
+        "verdict": "markers-found" if listed else "unknown",
         "notes": notes,
     }

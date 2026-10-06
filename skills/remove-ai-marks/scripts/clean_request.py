@@ -52,7 +52,7 @@ from common import (
 from morphomod import DEFAULT_DILATION_RADIUS, VisiblePlan
 from perturb_text import MODES as PERTURB_MODES
 from rewrite_text import REWRITE_STRENGTHS, RewritePlan
-from video import video_runtime, video_runtime_hint
+from video import VideoPlan, video_runtime, video_runtime_hint
 
 #: Layer B strengths that ``--rewrite`` accepts.  ``tsapa`` is included so
 #: ``--rewrite tsapa`` and the older ``--tsapa`` flag mean the same thing.
@@ -441,11 +441,18 @@ def build_clean_plan(request: CleanRequest, dest: Path, kind: AssetKind) -> Clea
     """Compose the immutable ``CleanPlan`` for one asset."""
     if kind == "video":
         # This ticket's half of the video routing contract: no video asset
-        # reaches a write without its runtime. The video plan section itself is
-        # built behind this same gate by the video routing ticket.
+        # reaches a write without its runtime. The plan section itself is built
+        # behind the same gate, metadata-only by default.
         missing = missing_video_runtime()
         if missing:
             raise ValueError(video_runtime_hint(missing))
+        if request.visible_requested():
+            # A silent no-op would let a caller believe a visible mark was
+            # removed. Until the visible-video stage lands, refuse instead.
+            raise ValueError(
+                "visible cleaning is not available for video assets yet; "
+                "run without a visible flag to strip video metadata"
+            )
     if (request.degrade or request.morpho) and kind != "image":
         raise ValueError("--degrade/--morpho are only valid for image assets")
     if request.humanize and kind != "image":
@@ -521,6 +528,8 @@ def build_clean_plan(request: CleanRequest, dest: Path, kind: AssetKind) -> Clea
             external_backend=None,
         )
 
+    video_plan = VideoPlan() if kind == "video" else None
+
     return CleanPlan(
         forced_kind=kind,
         in_place=request.in_place,
@@ -536,6 +545,7 @@ def build_clean_plan(request: CleanRequest, dest: Path, kind: AssetKind) -> Clea
         humanize=request.humanize,
         humanize_seed=request.seed,
         also_layer_a_text=request.also_layer_a_text,
+        video=video_plan,
     )
 
 

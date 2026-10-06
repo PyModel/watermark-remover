@@ -42,6 +42,7 @@ from morphomod import (
     remove_visible,
     write_pgm,
 )
+from video import VideoPlan, clean_video
 
 _PIXEL_BACKENDS = {
     "ctrlregen": ("ctrlregen", "NOAI_WATERMARK_DIR"),
@@ -342,9 +343,11 @@ class CleanPlan:
     humanize: bool = False
     humanize_seed: int | None = None
     also_layer_a_text: bool = True
+    #: The frozen video policy, built only when the asset kind is video.
+    video: VideoPlan | None = None
 
     def __post_init__(self) -> None:
-        if self.forced_kind not in ("auto", "text", "image", "container"):
+        if self.forced_kind not in ("auto", "text", "image", "container", "video"):
             raise ValueError(f"unsupported forced asset kind: {self.forced_kind}")
         for name in (
             "in_place",
@@ -372,6 +375,8 @@ class CleanPlan:
                 raise ValueError("visible cleaning requires an inpainting backend")
         if self.degrade is not None and not isinstance(self.degrade, ImageDegradePlan):
             raise TypeError("degrade must be an ImageDegradePlan or None")
+        if self.video is not None and not isinstance(self.video, VideoPlan):
+            raise TypeError("video must be a VideoPlan or None")
         if not isinstance(self.humanize, bool):
             raise TypeError("humanize must be a bool")
         if self.humanize_seed is not None and (
@@ -978,6 +983,15 @@ def _clean_container_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResu
     return CleanResult("container", path, dest, residual, report)
 
 
+def _clean_video_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
+    """Clean one video: strip its metadata and verify the destination."""
+    if plan.video is None:
+        raise ValueError("video cleaning requires a video plan")
+    source = create_backup(path) if plan.in_place else path
+    result = clean_video(source, dest, plan.video)
+    return CleanResult("video", path, dest, result.residual, result.to_dict())
+
+
 def clean_asset(
     path: Path, dest: Path, plan: CleanPlan, *, on_token: TokenSink | None = None
 ) -> CleanResult:
@@ -997,7 +1011,11 @@ def clean_asset(
             ),
         )
     _validate_operation(path, dest, plan)
-    kind = classify_asset(path, forced_kind=plan.forced_kind)
+    # ``forced_kind`` may name video, which ``classify_asset`` deliberately does
+    # not accept as a forced kind yet; the plan itself is the routing decision.
+    kind: AssetKind = (
+        "video" if plan.forced_kind == "video" else classify_asset(path, forced_kind=plan.forced_kind)
+    )
     if kind == "unknown":
         # Contract (asset_kind.classify_asset): unknown binaries are never
         # mangled as text. The CLI preflight refuses earlier; any direct
@@ -1016,4 +1034,6 @@ def clean_asset(
         return _clean_text_asset(path, dest, plan, on_token)
     if kind == "image":
         return _clean_image_asset(path, dest, plan)
+    if kind == "video":
+        return _clean_video_asset(path, dest, plan)
     return _clean_container_asset(path, dest, plan)

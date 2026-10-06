@@ -189,3 +189,221 @@ def test_inspecting_a_video_never_falls_through_to_the_container_inspector(
 
     assert report["kind"] == "video"
     assert "unsupported container" not in json.dumps(report)
+
+
+# --- cleaning through the pipeline -----------------------------------------
+
+
+def _fake_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Satisfy the runtime preflight without depending on the host's tools."""
+    bindir = tmp_path / "tools"
+    bindir.mkdir(exist_ok=True)
+    for name in ("ffmpeg", "ffprobe"):
+        tool = bindir / name
+        tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        tool.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bindir))
+    monkeypatch.setitem(sys.modules, "av", types.ModuleType("av"))
+
+
+def _ffmpeg_writing(output: bytes):
+    """A command-runner fake that publishes ``output`` at the staged path."""
+
+    def fake_run(argv, **_kwargs):
+        Path(argv[-1]).write_bytes(output)
+        return fake_command_result(0)
+
+    return fake_run
+
+
+def _clean_video(src: Path, *, output: bytes, monkeypatch: pytest.MonkeyPatch):
+    import clean_pipeline
+    from clean_request import CleanRequest
+    import video_encoding
+
+    dest = src.with_name(f"{src.stem}-cleaned{src.suffix}")
+    monkeypatch.setattr(video_encoding, "run_command", _ffmpeg_writing(output))
+    run = clean_pipeline.execute(CleanRequest(paths=(src,), output=dest))
+    return run.payload, dest
+
+
+def test_cleaning_a_video_names_removed_markers_and_reports_audio_unverified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_runtime(tmp_path, monkeypatch)
+    src = tmp_path / "clip.mkv"
+    src.write_bytes(matroska(LABEL))
+
+    payload, dest = _clean_video(src, output=matroska(), monkeypatch=monkeypatch)
+
+    assert payload["kind"] == "video"
+    assert payload["format"] == "matroska"
+    assert [m["label"]["ContentProducer"] for m in payload["markers_detected"]] == [DOUBAO_USCC]
+    assert [m["label"]["ContentProducer"] for m in payload["markers_removed"]] == [DOUBAO_USCC]
+    assert payload["markers_remaining"] == []
+    assert payload["audio"] == "unverified"
+    assert payload["audio_verified"] is False
+    assert payload["exit_code"] == 0
+    assert dest.exists()
+
+
+def test_a_surviving_marker_is_named_and_fails_the_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_runtime(tmp_path, monkeypatch)
+    src = tmp_path / "clip.mkv"
+    src.write_bytes(matroska(LABEL))
+
+    # ffmpeg finished but kept the tag: the clean must fail closed.
+    payload, _dest = _clean_video(src, output=src.read_bytes(), monkeypatch=monkeypatch)
+
+    assert payload["markers_removed"] == []
+    assert [m["label"]["ContentProducer"] for m in payload["markers_remaining"]] == [DOUBAO_USCC]
+    assert payload["exit_code"] == 1
+    assert payload["audio"] == "unverified"
+
+
+def test_a_video_with_no_marker_is_cleaned_by_the_video_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_runtime(tmp_path, monkeypatch)
+    src = tmp_path / "bare.mkv"
+    src.write_bytes(matroska())
+
+    payload, dest = _clean_video(src, output=matroska(), monkeypatch=monkeypatch)
+
+    assert payload["kind"] == "video"
+    assert payload["markers_detected"] == []
+    assert payload["markers_removed"] == []
+    assert payload["markers_remaining"] == []
+    assert payload["exit_code"] == 0
+    assert dest.exists()
+    assert "unsupported container" not in json.dumps(payload)
+
+
+def test_the_default_video_plan_removes_metadata_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from clean_request import CleanRequest, plan_work, select_request_inputs
+
+    _fake_runtime(tmp_path, monkeypatch)
+    src = tmp_path / "clip.mkv"
+    src.write_bytes(matroska(LABEL))
+    request = CleanRequest(paths=(src,), output=tmp_path / "out.mkv")
+
+    selection = select_request_inputs(request)
+    work = plan_work(selection.items, request, selection.batch)
+    _item, _output, plan = work[0]
+
+    assert plan.forced_kind == "video"
+    assert plan.video is not None
+    assert plan.video.remove_metadata is True
+    # The default touches no pixel: no visible work and no image pixel plan.
+    assert plan.visible is None
+    assert plan.pixel is None
+
+
+def test_an_explicit_visible_flag_on_a_video_is_refused_not_silently_dropped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import clean_pipeline
+    from clean_request import CleanPlanPreflightError, CleanRequest
+
+    _fake_runtime(tmp_path, monkeypatch)
+    src = tmp_path / "clip.mkv"
+    src.write_bytes(matroska(LABEL))
+    dest = tmp_path / "out.mkv"
+    request = CleanRequest(
+        paths=(src,),
+        output=dest,
+        visible_box=(0, 0, 8, 8),
+        visible_backend="simple",
+    )
+
+    with pytest.raises(CleanPlanPreflightError, match="visible"):
+        clean_pipeline.execute(request)
+
+    # A refusal before the first write: no partial output.
+    assert not dest.exists()
+
+
+# --- real tools: the measurement a fake cannot make ------------------------
+
+_FFMPEG = shutil.which("ffmpeg")
+_FFPROBE = shutil.which("ffprobe")
+requires_video_tools = pytest.mark.skipif(
+    _FFMPEG is None or _FFPROBE is None,
+    reason="ffmpeg/ffprobe are not on PATH; their absence is the labeled-default path",
+)
+
+
+def _tool(argv: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(argv, capture_output=True, check=False, timeout=120.0)
+
+
+def _stream_md5(path: Path, stream: str) -> str:
+    """One elementary stream's bitstream hash, read with a stream copy."""
+    result = _tool(
+        [_FFMPEG, "-v", "error", "-i", str(path), "-map", stream, "-c", "copy", "-f", "md5", "-"]
+    )
+    assert result.returncode == 0, result.stderr.decode()
+    return result.stdout.decode().strip()
+
+
+@requires_video_tools
+def test_a_real_video_loses_its_marker_and_keeps_its_frames_and_audio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one measurement a fake cannot make: real ffmpeg, real bytes."""
+    import clean_pipeline
+    import container_readers
+    from clean_request import CleanRequest
+
+    monkeypatch.setitem(sys.modules, "av", types.ModuleType("av"))
+    src = tmp_path / "source.mkv"
+    created = _tool(
+        [
+            _FFMPEG,
+            "-y",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=64x48:rate=10:duration=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=44100:duration=1",
+            "-c:v",
+            "mpeg4",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-shortest",
+            "-metadata",
+            f"AIGC={LABEL.decode()}",
+            str(src),
+        ]
+    )
+    assert created.returncode == 0, created.stderr.decode()
+    assert container_readers.read_container_findings(src.read_bytes())
+    video_before = _stream_md5(src, "0:v:0")
+    audio_before = _stream_md5(src, "0:a:0")
+
+    dest = tmp_path / "cleaned.mkv"
+    run = clean_pipeline.execute(CleanRequest(paths=(src,), output=dest))
+    payload = run.payload
+
+    assert payload["kind"] == "video"
+    assert payload["exit_code"] == 0
+    assert [m["label"]["ContentProducer"] for m in payload["markers_removed"]] == [DOUBAO_USCC]
+    assert payload["markers_remaining"] == []
+    assert payload["audio"] == "unverified"
+    assert dest.exists()
+    # The marker is actually gone, read back from the output bytes.
+    assert container_readers.read_container_findings(dest.read_bytes()) == ()
+    # No frame changed, and the audio is the original bitstream.
+    assert _stream_md5(dest, "0:v:0") == video_before
+    assert _stream_md5(dest, "0:a:0") == audio_before
