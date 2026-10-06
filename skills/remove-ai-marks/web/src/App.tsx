@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react"
-import { ApiError, apiKey, capabilities, setApiKey, type Capabilities } from "./api"
+import { ApiError, apiKey, capabilities, setApiKey, usingHosted, type Capabilities } from "./api"
 import { onEngineStage } from "./engine"
 import { EngineView } from "./engine-view"
 import { BrandMark, Icon, type IconName } from "./icons"
@@ -103,7 +103,7 @@ export function App() {
             {BROWSER && (
               <span className="pill">
                 <Icon name="shield" />
-                Files stay on this device
+                {usingHosted() ? "Files stay here; Rewrite uses the hosted model" : "Files stay on this device"}
               </span>
             )}
             {connection.caps && (

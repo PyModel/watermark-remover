@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react"
-import { fromBase64, REWRITE_STRENGTHS, type Box, type Capabilities, type CleanOption, type CleanOptions, type Detection, type Kind, type Strength } from "./api"
+import { fromBase64, HOSTED_LIMITS, HOSTED_MODEL, modelServer, REWRITE_STRENGTHS, setModelServer, usingHosted, type Box, type Capabilities, type CleanOption, type CleanOptions, type Detection, type Kind, type Strength } from "./api"
+import { HostedChoice } from "./engine-view"
 import { BROWSER } from "./target"
 import { Icon } from "./icons"
 import type { Item, Queue, Tool } from "./queue"
@@ -23,6 +24,8 @@ interface ToolsProps {
   box: Box | null
   setBox: (box: Box | null) => void
   queue: Queue
+  /** Ask the engine for its capabilities again, after the Rewrite model changes. */
+  onReconnect: () => void
 }
 
 export function ToolsCard(props: ToolsProps) {
@@ -160,13 +163,40 @@ const STRENGTH_INFO: Record<Strength, [string, string]> = {
   tsapa: ["TSAPA search", "Evolves many candidate rewrites. Slow: many model calls, often minutes."],
 }
 
-function RewritePanel({ item, caps, queue }: ToolsProps) {
+function RewritePanel({ item, caps, queue, onReconnect }: ToolsProps) {
   const [strength, setStrength] = useState<Strength>("paraphrase")
   const [lang, setLang] = useState("French")
   const layerB = caps?.layer_b
   const ready = !!layerB?.configured && layerB.endpoint_allowed
+  const hosted = BROWSER && usingHosted()
+  const strengths = hosted ? REWRITE_STRENGTHS.filter((id) => id !== "tsapa") : REWRITE_STRENGTHS
+  const tooLong = hosted && (item.text?.length ?? 0) > HOSTED_LIMITS.chars
+  if (BROWSER && !ready && !modelServer()) {
+    return (
+      <>
+        <HostedChoice
+          onUse={() => {
+            setModelServer(HOSTED_MODEL)
+            onReconnect()
+          }}
+        />
+        <p className="card-note">Prefer your own model? Add it in the Engine view.</p>
+      </>
+    )
+  }
   return (
     <>
+      {hosted && (
+        <p className="card-note">
+          Rewritten by the free hosted model on Cloudflare Workers AI. Only this text is sent, and no copy is kept.
+        </p>
+      )}
+      {tooLong && (
+        <div className="notice">
+          <Icon name="alert" size={16} />
+          <p>This text is over the hosted model's {HOSTED_LIMITS.chars.toLocaleString()} characters. Use your own model server for it.</p>
+        </div>
+      )}
       {!ready && (
         <div className="notice">
           <Icon name="alert" size={16} />
@@ -182,7 +212,7 @@ function RewritePanel({ item, caps, queue }: ToolsProps) {
         </div>
       )}
       <div className="choices" role="radiogroup" aria-label="Rewrite strength">
-        {REWRITE_STRENGTHS.map((id) => (
+        {strengths.map((id) => (
           <label className="choice" key={id}>
             <input type="radio" name={`strength-${item.id}`} checked={strength === id} onChange={() => setStrength(id)} disabled={!ready} />
             <span>
@@ -201,7 +231,7 @@ function RewritePanel({ item, caps, queue }: ToolsProps) {
       <button
         type="button"
         className="button primary wide"
-        disabled={!ready || (strength === "backtranslate" && !lang.trim())}
+        disabled={!ready || tooLong || (strength === "backtranslate" && !lang.trim())}
         onClick={() => void queue.runRewrite(item.id, strength, strength === "backtranslate" ? lang.trim() : undefined)}
       >
         Rewrite text

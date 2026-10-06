@@ -1485,3 +1485,36 @@ mark,
   background: var(--well);
   user-select: all;
 }
+
+/* Radio pills: the same look as .segmented buttons, for a choice that is a form value. */
+.segmented label {
+  position: relative;
+  height: 36px;
+  padding: 0 16px;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.segmented label input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+.segmented label:has(input:checked) {
+  background: var(--navy);
+  border-color: var(--navy);
+  color: #fff;
+}
+.segmented label:has(input:focus-visible) {
+  box-shadow: var(--focus);
+}
+.hosted-choice {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+}

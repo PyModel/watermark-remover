@@ -142,6 +142,7 @@ export function Workspace({ queue, caps, offline, onReconnect, selected, setSele
                     box={boxes[item.id] ?? null}
                     setBox={(box) => setBoxes((all) => ({ ...all, [item.id]: box }))}
                     queue={queue}
+                    onReconnect={onReconnect}
                   />
                 )}
                 {item.result && <ResultCard item={item} />}
@@ -252,7 +253,7 @@ function Metrics({ items, caps }: { items: Item[]; caps: Capabilities | null }) 
             : rewriteOn
               ? "Token-level watermarks need a rewrite; hidden characters and metadata don't."
               : BROWSER
-                ? "Token-level watermarks need a rewrite. Add your own model server in the Engine view."
+                ? "Token-level watermarks need a rewrite. Turn on the free hosted model, or add your own server."
                 : "Token-level watermarks need a rewrite model set up on the server."}
         </p>
         <div className="metric-foot">

@@ -53,8 +53,21 @@ def handle(method: str, path: str, body: str | None = None) -> list:
 
 
 def configure(settings: str) -> None:
-    """Rewrite settings from the page (the visitor's own model server) -> the env Layer B reads."""
+    """Rewrite settings from the page -> the env Layer B reads.
+
+    Either the visitor's own model server on localhost, or "hosted": this site's own
+    /api (worker.ts), the one non-loopback endpoint the page may send text to.
+    """
     values = json.loads(settings)
+    if values.get("backend") == "hosted":
+        values = {
+            "backend": "openai-compatible",
+            "model": "hosted",
+            "base_url": values.get("base_url"),
+        }
+        os.environ["WATERMARKS_REWRITE_ALLOW_REMOTE"] = "1"
+    else:
+        os.environ.pop("WATERMARKS_REWRITE_ALLOW_REMOTE", None)
     for key, name in REWRITE_ENV.items():
         value = str(values.get(key) or "").strip()
         if value:

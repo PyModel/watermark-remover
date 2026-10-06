@@ -1,0 +1,22 @@
+[
+  {
+    "strength": "paraphrase",
+    "lead": "Rewrite the following text so that every sentence uses different wording and structure while preserving all facts, numbers, names, and technical identifiers. Do not add or remove claims. Output only the rewritten text."
+  },
+  {
+    "strength": "humanize",
+    "lead": "Rewrite the following text so it reads as if a human wrote it from scratch. Vary sentence rhythm and length, replace formulaic AI-style transitions and filler with concrete natural phrasing, and use plain, varied wording. Preserve all facts, numbers, names, and technical identifiers. Do not add or remove claims. Output only the rewritten text."
+  },
+  {
+    "strength": "code",
+    "lead": "Rewrite the natural-language parts of this code — comments, docstrings, and string literals — using different wording. Rename local variables, function parameters, and private helper names to semantically equivalent names. Preserve program behavior, public API names, and all values that affect output. Output only the rewritten code."
+  },
+  {
+    "strength": "backtranslate",
+    "lead": "Translate the text to __LANG__, then translate that result back to __ORIGINAL_LANG__. Preserve all facts, numbers, and names. Output only the final __ORIGINAL_LANG__ text."
+  },
+  {
+    "strength": "structural",
+    "lead": "First extract a bullet outline of all claims (no full sentences). Then write a complete document from that outline in a clear professional style without omitting any bullet. Output only the final document."
+  }
+]

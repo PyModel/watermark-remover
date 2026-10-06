@@ -27,6 +27,7 @@ web-check:
 PYTHON_PATH = $(if $(findstring /,$(PYTHON)),$(abspath $(PYTHON)),$(shell command -v $(PYTHON)))
 pages-check:
 	cd skills/remove-ai-marks/web && bun install --frozen-lockfile && bun run build:pages && WM_PYTHON="$(PYTHON_PATH)" bun run test:pages
+	git diff --exit-code --stat -- skills/remove-ai-marks/web/pages/rewrite-prompts.json
 
 pages-deploy: pages-check
 	cd skills/remove-ai-marks/web && bunx wrangler@4 deploy --config pages/wrangler.jsonc

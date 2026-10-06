@@ -206,6 +206,14 @@ function errorMessage(status: number, serverMessage: unknown): string {
   if (status === 403 && typeof serverMessage === "string" && serverMessage.includes("cross-origin")) {
     return "The server refused a request from another site."
   }
+  if (BROWSER && status === 502 && typeof serverMessage === "string" && usingHosted()) {
+    const code = /HTTP (\d{3})/.exec(serverMessage)?.[1]
+    if (code === "429") return "Today's free hosted rewrites are used up. Try again after midnight UTC, or add your own model server in the Engine view."
+    if (code === "413") return `This text is over the hosted model's ${HOSTED_LIMITS.chars.toLocaleString()} characters. Rewrite a shorter part, or use your own model server.`
+    if (code === "400" || code === "403") return "The hosted model only takes rewrites from this page. Reload the page and try again."
+    if (/timed out/.test(serverMessage)) return "The hosted model didn't answer in time. Try a shorter text."
+    return "The hosted model is unavailable right now. Try again in a minute."
+  }
   if (BROWSER && status === 502 && typeof serverMessage === "string" && /connection failed|timed out/.test(serverMessage)) {
     return /timed out/.test(serverMessage)
       ? "Your model server didn't answer in time. Try a shorter text or a lighter strength."
@@ -233,7 +241,10 @@ function sentenceCase(message: string): string {
 }
 
 export const capabilities = async () => {
-  if (BROWSER) await send({ type: "configure", settings: JSON.stringify(modelServer() ?? {}) })
+  if (BROWSER) {
+    const settings = usingHosted() ? { backend: "hosted", base_url: `${location.origin}/api` } : (modelServer() ?? {})
+    await send({ type: "configure", settings: JSON.stringify(settings) })
+  }
   return call<Capabilities>("/capabilities")
 }
 export const inspect = (file: string, name: string) => call<Inspection>("/inspect", { file, name })
@@ -247,13 +258,16 @@ export const removeVisible = (file: string, name: string, box: Box, backend: "te
 
 /** The visitor's own model server for Rewrite (static build only); kept in this browser. */
 export interface ModelServer {
-  backend: "ollama" | "openai-compatible"
+  /** "hosted": the free model behind this site's /api (pages/worker.ts) */
+  backend: "ollama" | "openai-compatible" | "hosted"
   base_url: string
   model: string
   api_key: string
 }
 const MODEL_SERVER = "wm-model-server"
 export const DEFAULT_MODEL_SERVER: ModelServer = { backend: "ollama", base_url: "http://localhost:11434", model: "", api_key: "" }
+export const HOSTED_MODEL: ModelServer = { backend: "hosted", base_url: "", model: "hosted", api_key: "" }
+export const HOSTED_LIMITS = { perDay: 20, chars: 8000 }
 
 function savedModelServer(): ModelServer | null {
   try {
@@ -267,6 +281,7 @@ function savedModelServer(): ModelServer | null {
 let current = savedModelServer()
 
 export const modelServer = (): ModelServer | null => current
+export const usingHosted = () => current?.backend === "hosted"
 
 export function setModelServer(value: ModelServer | null) {
   current = value

@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { DEFAULT_MODEL_SERVER, modelServer, setModelServer, type ModelServer } from "./api"
+import { DEFAULT_MODEL_SERVER, HOSTED_LIMITS, HOSTED_MODEL, modelServer, setModelServer, usingHosted, type ModelServer } from "./api"
 import type { Connection } from "./App"
 import { Icon } from "./icons"
 import { CapabilityTable } from "./server"
@@ -7,7 +7,8 @@ import { SITE_ORIGIN } from "./target"
 import { Card, Chip, StatRow, formatBytes } from "./ui"
 
 /** Ports the common local model servers listen on by default. */
-const DEFAULT_URL: Record<ModelServer["backend"], string> = {
+type Local = Exclude<ModelServer["backend"], "hosted">
+const DEFAULT_URL: Record<Local, string> = {
   ollama: "http://localhost:11434",
   "openai-compatible": "http://localhost:1234",
 }
@@ -36,7 +37,7 @@ export function EngineView({ connection, stage, onRetry }: { connection: Connect
     <>
       <section className="hero">
         <div>
-          <p className="eyebrow">Everything runs in this tab. Files are never uploaded.</p>
+          <p className="eyebrow">Cleaning runs in this tab. Files are never uploaded.</p>
           <h1>Engine</h1>
         </div>
         {connection.state === "offline" && (
@@ -65,11 +66,14 @@ export function EngineView({ connection, stage, onRetry }: { connection: Connect
         <Card title="Where data goes" icon="shield">
           <div className="rows">
             <StatRow icon="doc" label="Your files">Stay in this tab</StatRow>
-            <StatRow icon="link" label="This page fetches">Its own code only</StatRow>
-            <StatRow icon="layers" label="Rewrite sends text to">Your model server, if you add one</StatRow>
+            <StatRow icon="link" label="This page connects to">This site only</StatRow>
+            <StatRow icon="layers" label="Rewrite sends text to">
+              {usingHosted() ? "The hosted model (Cloudflare Workers AI)" : modelServer() ? "Your model server" : "Nowhere until you choose a model"}
+            </StatRow>
           </div>
           <p className="card-note">
             The page's security policy blocks every other address, so you can confirm this in your browser's network panel.
+            The hosted model is this site's own /api; it keeps no copy of your text.
           </p>
         </Card>
         <ModelServerCard connection={connection} onSaved={onRetry} />
@@ -84,80 +88,118 @@ export function EngineView({ connection, stage, onRetry }: { connection: Connect
 
 function ModelServerCard({ connection, onSaved }: { connection: Connection; onSaved: () => void }) {
   const saved = modelServer()
-  const [draft, setDraft] = useState<ModelServer>(saved ?? DEFAULT_MODEL_SERVER)
+  const [mode, setMode] = useState<"hosted" | "local">(saved?.backend === "hosted" ? "hosted" : "local")
+  const [draft, setDraft] = useState<ModelServer>(saved && saved.backend !== "hosted" ? saved : DEFAULT_MODEL_SERVER)
   const [error, setError] = useState<string | null>(null)
   const configured = connection.caps?.layer_b.configured ?? false
   const set = (patch: Partial<ModelServer>) => setDraft((previous) => ({ ...previous, ...patch }))
+  const save = (value: ModelServer | null) => {
+    setModelServer(value)
+    onSaved()
+  }
   return (
     <Card
-      title="Model server for Rewrite"
+      title="Model for Rewrite"
       icon="layers"
-      badge={<Chip tone={configured ? "ok" : "off"}>{configured ? "Added" : "Not added"}</Chip>}
+      badge={<Chip tone={configured ? "ok" : "off"}>{configured ? (usingHosted() ? "Hosted model" : "Your server") : "Not set up"}</Chip>}
     >
-      <form
-        className="model-form"
-        onSubmit={(event) => {
-          event.preventDefault()
-          const problem = localAddressError(draft.base_url.trim()) ?? (draft.model.trim() ? null : "Enter the model name, such as qwen3:4b.")
-          setError(problem)
-          if (problem) return
-          setModelServer({ ...draft, base_url: draft.base_url.trim(), model: draft.model.trim(), api_key: draft.api_key.trim() })
-          onSaved()
-        }}
-      >
-        <label className="field">
-          <span>Server</span>
-          <select
-            value={draft.backend}
-            onChange={(event) => {
-              const backend = event.currentTarget.value as ModelServer["backend"]
-              set({ backend, base_url: draft.base_url === DEFAULT_URL[draft.backend] ? DEFAULT_URL[backend] : draft.base_url })
-            }}
-          >
-            <option value="ollama">Ollama</option>
-            <option value="openai-compatible">OpenAI-compatible (LM Studio, llama.cpp, vLLM)</option>
-          </select>
+      <div className="segmented" role="radiogroup" aria-label="Which model rewrites">
+        <label>
+          <input type="radio" name="model-mode" checked={mode === "hosted"} onChange={() => setMode("hosted")} />
+          Free hosted model
         </label>
-        <label className="field">
-          <span>Address</span>
-          <input value={draft.base_url} onChange={(event) => set({ base_url: event.currentTarget.value })} inputMode="url" spellCheck={false} />
+        <label>
+          <input type="radio" name="model-mode" checked={mode === "local"} onChange={() => setMode("local")} />
+          Your own server
         </label>
-        <label className="field">
-          <span>Model</span>
-          <input value={draft.model} onChange={(event) => set({ model: event.currentTarget.value })} placeholder="qwen3:4b" spellCheck={false} />
-        </label>
-        {draft.backend === "openai-compatible" && (
+      </div>
+      {mode === "hosted" ? (
+        <HostedChoice onUse={() => save(HOSTED_MODEL)} onStop={usingHosted() ? () => save(null) : undefined} />
+      ) : (
+        <form
+          className="model-form"
+          onSubmit={(event) => {
+            event.preventDefault()
+            const problem = localAddressError(draft.base_url.trim()) ?? (draft.model.trim() ? null : "Enter the model name, such as qwen3:4b.")
+            setError(problem)
+            if (problem) return
+            save({ ...draft, base_url: draft.base_url.trim(), model: draft.model.trim(), api_key: draft.api_key.trim() })
+          }}
+        >
           <label className="field">
-            <span>API key, if your server asks for one</span>
-            <input type="password" autoComplete="off" value={draft.api_key} onChange={(event) => set({ api_key: event.currentTarget.value })} />
-          </label>
-        )}
-        {error && (
-          <p className="error-text" role="alert">
-            {error}
-          </p>
-        )}
-        <div className="form-actions">
-          <button type="submit" className="button primary">
-            Save model server
-          </button>
-          {saved && (
-            <button
-              type="button"
-              className="button"
-              onClick={() => {
-                setModelServer(null)
-                setDraft(DEFAULT_MODEL_SERVER)
-                onSaved()
+            <span>Server</span>
+            <select
+              value={draft.backend}
+              onChange={(event) => {
+                const backend = event.currentTarget.value as Local
+                const previous = draft.backend as Local
+                set({ backend, base_url: draft.base_url === DEFAULT_URL[previous] ? DEFAULT_URL[backend] : draft.base_url })
               }}
             >
-              Remove
-            </button>
+              <option value="ollama">Ollama</option>
+              <option value="openai-compatible">OpenAI-compatible (LM Studio, llama.cpp, vLLM)</option>
+            </select>
+          </label>
+          <label className="field">
+            <span>Address</span>
+            <input value={draft.base_url} onChange={(event) => set({ base_url: event.currentTarget.value })} inputMode="url" spellCheck={false} />
+          </label>
+          <label className="field">
+            <span>Model</span>
+            <input value={draft.model} onChange={(event) => set({ model: event.currentTarget.value })} placeholder="qwen3:4b" spellCheck={false} />
+          </label>
+          {draft.backend === "openai-compatible" && (
+            <label className="field">
+              <span>API key, if your server asks for one</span>
+              <input type="password" autoComplete="off" value={draft.api_key} onChange={(event) => set({ api_key: event.currentTarget.value })} />
+            </label>
           )}
-        </div>
-      </form>
-      <p className="card-note">Saved in this browser only. Text goes straight from this tab to that address.</p>
+          {error && (
+            <p className="error-text" role="alert">
+              {error}
+            </p>
+          )}
+          <div className="form-actions">
+            <button type="submit" className="button primary">
+              Save model server
+            </button>
+            {saved && saved.backend !== "hosted" && (
+              <button type="button" className="button" onClick={() => (setDraft(DEFAULT_MODEL_SERVER), save(null))}>
+                Remove
+              </button>
+            )}
+          </div>
+          <p className="card-note">Saved in this browser only. Text goes straight from this tab to that address.</p>
+        </form>
+      )}
     </Card>
+  )
+}
+
+/** The free hosted model, as a choice the visitor makes knowing the text leaves the device. */
+export function HostedChoice({ onUse, onStop }: { onUse: () => void; onStop?: () => void }) {
+  return (
+    <div className="hosted-choice">
+      <p className="card-text">
+        Rewrites run on a small model (Gemma 4) on Cloudflare Workers AI, at no cost. The text you rewrite is sent there; your
+        files and everything else stay in this tab.
+      </p>
+      <p className="card-note">
+        Up to {HOSTED_LIMITS.perDay} rewrites per connection per day, {HOSTED_LIMITS.chars.toLocaleString()} characters each, while the
+        day's free allowance lasts. TSAPA search isn't offered here.
+      </p>
+      <div className="form-actions">
+        {onStop ? (
+          <button type="button" className="button" onClick={onStop}>
+            Stop using the hosted model
+          </button>
+        ) : (
+          <button type="button" className="button primary" onClick={onUse}>
+            Use the free hosted model
+          </button>
+        )}
+      </div>
+    </div>
   )
 }
 

@@ -66,6 +66,26 @@ function cleaners(): string {
   return `/${name}`
 }
 
+/**
+ * The lead-in (before "\n\n---\n") of every single-call Layer B prompt, for the hosted model's
+ * allow-list (worker.ts). Regenerated each build; make pages-check fails when it drifts from git.
+ */
+function rewritePrompts(): void {
+  const code = `
+import json, sys
+sys.path.insert(0, ${JSON.stringify(SCRIPTS)})
+import rewrite_text as r
+out = []
+for s in ("paraphrase", "humanize", "code", "backtranslate", "structural"):
+    prompt = r.build_prompt(s, "", lang="__LANG__", original_lang="__ORIGINAL_LANG__")
+    out.append({"strength": s, "lead": prompt.split("\\n\\n---\\n", 1)[0]})
+print(json.dumps(out, indent=2, ensure_ascii=False))
+`
+  const run = Bun.spawnSync(["python3", "-I", "-c", code], { stderr: "inherit" })
+  if (run.exitCode !== 0) throw new Error("generating rewrite prompts failed")
+  writeFileSync(join(import.meta.dir, "rewrite-prompts.json"), run.stdout.toString())
+}
+
 // CSP: wm-serve's page policy plus what Pyodide needs (wasm compile, a same-origin worker) and the
 // visitor's own model server on this machine for Rewrite. Nothing else can be fetched, which is what
 // makes "your files never leave this device" checkable in the browser's network panel.
@@ -97,6 +117,7 @@ ${PYODIDE}*
 rmSync(OUT, { recursive: true, force: true })
 mkdirSync(RUNTIME, { recursive: true })
 const CLEANERS = cleaners()
+rewritePrompts()
 const build = await Bun.build({
   entrypoints: [join(WEB, "index.html"), join(WEB, "src", "engine.worker.ts")],
   outdir: OUT,
