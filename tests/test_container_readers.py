@@ -155,9 +155,7 @@ class TestContainerDispatch:
 
 # --- malformed input (boundary tier) ---------------------------------------
 
-_OVERSIZED_LABEL = (
-    b'{"Label":"1","ContentProducer":"' + b"x" * (MAX_TC260_VALUE_BYTES + 1) + b'"}'
-)
+_OVERSIZED_LABEL = b'{"Label":"1","ContentProducer":"' + b"x" * (MAX_TC260_VALUE_BYTES + 1) + b'"}'
 
 
 class TestMalformedContainers:
@@ -173,9 +171,7 @@ class TestMalformedContainers:
         ("builder", "kwargs"),
         [(_matroska, {}), (_flv, {"long": True}), (_avi, {})],
     )
-    def test_an_oversized_marker_yields_nothing_and_raises_nothing(
-        self, builder, kwargs
-    ) -> None:
+    def test_an_oversized_marker_yields_nothing_and_raises_nothing(self, builder, kwargs) -> None:
         data = builder(_OVERSIZED_LABEL, **kwargs)
         assert container_readers.read_container_findings(data) == ()
 
