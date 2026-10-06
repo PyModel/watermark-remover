@@ -127,6 +127,34 @@ constants in the two modules, this list, and the pinning tests.
   `0e94e565c181416e4f63a2bfc06cd5179f4201befda7481ac510f6a168c612f4`,
   offline override `RAIW_IMAGE_SOURCE_WEIGHTS`.
 
+## Photo-classifier weights (pinned download, never bundled)
+
+The metadata-free photo classifier (`classify.py` and its CLIP-L-ft embedder
+module) downloads its frozen weights from Hugging Face **at first use only**;
+neither the model files nor the receipt-gate npz are bundled in this tree (the
+forbidden-fragment guard stands). Without them the explicit classify verb
+reports `unavailable` — labeled, never a silent pass and never a clean verdict
+(absence of the classifier is unknown, never clean). The download is pinned to
+an immutable revision SHA via `snapshot_download`; the repo/revision/file pins
+are constants in `classify.py`, asserted by `tests/test_photo_classify.py`
+(which also monkeypatches the hub client to prove the pinned call happens — no
+test touches the network). The receipt-document gate ships inside the SAME
+snapshot (`receipt-gate.npz`, threshold inside the artifact): head and
+threshold always come from one file, and a snapshot missing the gate is a
+partial install that refuses rather than silently substituting a code-side
+threshold. The gate's training corpus (CORD-v2, CC BY 4.0 upstream) never
+enters this checkout. To re-pin, update the constants in `classify.py`, this
+list, and the pinning tests.
+
+- [`wiltodelta/raiw-photo-classify`](https://huggingface.co/wiltodelta/raiw-photo-classify)
+  @ revision `de668f0d8a53412923478cc21382a56890748310` — the torch snapshot:
+  `clip-l-ft.pt` (frozen CLIP-L-ft, Model 1 embedder), `detector.pt` (MLP
+  detector head), `probe-weights-clip-l-ft.npz` (ridge head + threshold),
+  `provider.pt` (124-d provider heads), `receipt-gate.npz` (document-domain
+  veto), `operating-point.json`, and the vision-only FP32 export
+  `clip-l-ft-vision-fp32.onnx` for the `[classify-onnx]` backend. Offline
+  override `RAIW_CLASSIFY_WEIGHTS`.
+
 ## Excluded capture-derived assets (must never enter this tree)
 
 `tests/test_silhouette_assets.py::test_forbidden_capture_derived_assets_absent_from_tree`

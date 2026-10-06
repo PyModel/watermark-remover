@@ -442,6 +442,24 @@ class TestWeightsArePinnedDownloadNeverBundled:
         assert classify.is_available() is True
         assert probed == ["torch", "transformers", "numpy", "cv2", "PIL"]
 
+    def test_provenance_records_pin_the_photo_classify_weight_source(self) -> None:
+        """The PROVENANCE sweep names the pinned snapshot: repo, revision, files,
+        offline override — the download pins stay auditable in the tree."""
+        import classify
+
+        provenance = (SCRIPTS / "assets" / "PROVENANCE.md").read_text(encoding="utf-8")
+        for needle in (
+            classify.WEIGHTS_REPO,
+            classify.WEIGHTS_REVISION,
+            classify.CLIP_FILE,
+            classify.DETECTOR_FILE,
+            classify.PROVIDER_FILE,
+            classify.PROBE_FILE,
+            classify.RECEIPT_GATE_STABLE_FILE,
+            classify.WEIGHTS_ENV,
+        ):
+            assert needle in provenance, needle
+
     def test_no_gate_npz_is_bundled_in_the_tree(self) -> None:
         """R3: the receipt-gate npz never ships in-tree. The forbidden-fragment
         guard pins asset names; this pins that the assets directory carries no
