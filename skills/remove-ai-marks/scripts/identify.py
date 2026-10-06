@@ -488,6 +488,13 @@ def forensic_metadata_signal(record: Any) -> dict[str, Any]:
     }
 
 
+def _signal_field(classification: Any, name: str) -> Any:
+    """Read a field off a classification object or its ``to_dict`` dict."""
+    if isinstance(classification, dict):
+        return classification.get(name)
+    return getattr(classification, name, None)
+
+
 def source_classify_signal(classification: Any) -> dict[str, Any]:
     """Map an E2 source-pipeline classification onto the evidence vocabulary.
 
@@ -505,8 +512,8 @@ def source_classify_signal(classification: Any) -> dict[str, Any]:
     missing classification stays ``unknown``; absence is never a clean
     verdict.
     """
-    label = getattr(classification, "label", None)
-    reason = getattr(classification, "reason", None)
+    label = _signal_field(classification, "label")
+    reason = _signal_field(classification, "reason")
     if label not in ("openai", "google", "unknown") or reason not in (
         "classified",
         "abstained",
@@ -523,7 +530,7 @@ def source_classify_signal(classification: Any) -> dict[str, Any]:
                 "clean (an export-pipeline resemblance would be a hint, not a verdict)"
             ),
         }
-    scores = getattr(classification, "scores", None)
+    scores = _signal_field(classification, "scores")
     scores = {str(k): float(v) for k, v in scores.items()} if isinstance(scores, dict) else {}
     if label == "unknown" or reason != "classified":
         finding = None
@@ -556,8 +563,8 @@ def image_source_signal(classification: Any) -> dict[str, Any]:
     conflict, an abstention, or a missing classification stays ``unknown``;
     absence is never a clean verdict.
     """
-    label = getattr(classification, "label", None)
-    reason = getattr(classification, "reason", None)
+    label = _signal_field(classification, "label")
+    reason = _signal_field(classification, "reason")
     if label not in ("openai", "google", "unknown") or reason not in (
         "classified",
         "abstained",
@@ -576,7 +583,7 @@ def image_source_signal(classification: Any) -> dict[str, Any]:
                 "clean (a source-pattern hint would not be a verdict anyway)"
             ),
         }
-    scores = getattr(classification, "scores", None)
+    scores = _signal_field(classification, "scores")
     scores = {str(k): float(v) for k, v in scores.items()} if isinstance(scores, dict) else {}
     if label == "unknown" or reason != "classified":
         finding = None

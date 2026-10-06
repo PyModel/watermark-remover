@@ -575,3 +575,22 @@ def test_provenance_records_pin_the_e2_weight_source() -> None:
         source_classify.WEIGHTS_ENV,
     ):
         assert needle in provenance, needle
+
+
+def test_identify_source_classify_signal_accepts_the_to_dict_shape() -> None:
+    """The docstring promises the serialized form maps identically."""
+    import identify
+    import source_classify
+
+    as_dict = source_classify.SourceClassification(
+        "google",
+        "classified",
+        {"openai": 0.0, "google": 1.0, "unknown": 0.0},
+        {"openai": -1.0, "google": 1.0},
+        {"openai": 0.5, "google": 0.5},
+    ).to_dict()
+    signal = identify.source_classify_signal(as_dict)
+    assert signal["label"] == "google"
+    assert signal["reason"] == "classified"
+    assert signal["asserts_ai"] is False
+    assert signal["scores"]["google"] == pytest.approx(1.0)

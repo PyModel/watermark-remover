@@ -263,3 +263,17 @@ def test_provenance_records_pin_the_e3_weight_source() -> None:
         source_classify_v2.WEIGHTS_ENV,
     ):
         assert needle in provenance, needle
+
+
+def test_identify_image_source_signal_accepts_the_to_dict_shape() -> None:
+    """The docstring promises the serialized form maps identically."""
+    import identify
+    import source_classify_v2
+
+    as_dict = source_classify_v2.ImageSourceClassification(
+        "openai", "classified", {"r152_openai": 0.7}
+    ).to_dict()
+    signal = identify.image_source_signal(as_dict)
+    assert signal["label"] == "openai"
+    assert signal["watermark_truth"] == "unknown"
+    assert signal["asserts_ai"] is False
