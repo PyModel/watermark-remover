@@ -68,6 +68,20 @@ detect = [
     "opencv-python-headless",
     "PyWavelets",
 ]
+# The abstaining OpenAI/Google/unknown source-export classifiers
+# (source_classify.py + source_classify_v2.py + source_spectral.py +
+# image_math.py) -- intentionally separate from the heavier photo
+# AI-versus-camera classifier and NOT a SynthID detector. The pixel stack is
+# the `pixel` extra's numpy + headless OpenCV + Pillow; huggingface_hub
+# fetches the pinned weight revisions on first use (see assets/PROVENANCE.md
+# for the recorded repo/revision/SHA-256 pins). Weights are never bundled in
+# this repo; without them the classifiers abstain to `unknown`.
+source-classify = [
+    "numpy",
+    "opencv-python-headless",
+    "Pillow",
+    "huggingface-hub>=0.20.0,<2",
+]
 # The Adobe TrustMark decoder (trustmark_detector.py) -- the open, keyless
 # watermark behind Adobe Durable Content Credentials (the Variant P soft
 # binding; the dotted alg id stays unported, see tests/test_c2pa_carveout.py).

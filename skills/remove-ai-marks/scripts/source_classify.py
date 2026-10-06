@@ -44,6 +44,11 @@ PROVIDERS = CLASSES[:2]
 FEATURE_WIDTH = 892
 SPECTRAL_GRID = 16
 CLAIM = "source/export pipeline classification; not SynthID detection"
+# The identify/detect-side decode bound for the auto-run surface below: the
+# classifiers are O(image pixels) on their forensic half (the caller owns the
+# decode bound), so above this pixel count the signal abstains with an
+# explicit note instead of holding a huge float buffer.
+MAX_SOURCE_CLASSIFY_PIXELS = 4096 * 4096
 # NumPy and the training runtime can differ by a few float32 ULPs at a matrix
 # boundary. Treat values within this tolerance as the stored threshold so the
 # exported runtime preserves the training runtime's >= decision.
@@ -266,3 +271,97 @@ def classify_source(source: str | os.PathLike[str]) -> SourceClassification:
     if features.shape != (FEATURE_WIDTH,) or not np.all(np.isfinite(features)):
         return _unavailable(model)
     return _result(_scores(features, model), model.margins)
+
+
+def _oversize_note(width: int, height: int) -> str:
+    pixels = width * height
+    return (
+        f"image exceeds the identify decode bound ({pixels} > "
+        f"{MAX_SOURCE_CLASSIFY_PIXELS} px); the classifier was skipped — "
+        "absence is never clean"
+    )
+
+
+def _source_pipeline_entry(path: Path) -> dict[str, Any]:
+    """The E2 half of :func:`source_classify_signals` (fail-soft)."""
+    entry: dict[str, Any] = {"detector": "source_classify"}
+    try:
+        if not is_available():
+            entry["available"] = False
+            entry["error"] = (
+                "source-classify extra not installed (numpy/cv2/Pillow/"
+                "huggingface_hub); install watermark-remover[source-classify] "
+                "to run the source-export-pipeline classifier"
+            )
+            return entry
+        from identify import source_classify_signal
+        from PIL import Image
+
+        entry["available"] = True
+        with Image.open(path) as opened:
+            width, height = opened.size
+        if width * height > MAX_SOURCE_CLASSIFY_PIXELS:
+            entry.update(source_classify_signal(None))
+            entry["note"] = _oversize_note(width, height)
+            return entry
+        classification = classify_source(path)
+        entry.update(source_classify_signal(classification))
+        entry["classification"] = classification.to_dict()
+    except Exception as exc:
+        entry["available"] = True
+        entry["error"] = f"source-pipeline classification failed: {exc!r}"
+    return entry
+
+
+def _image_source_entry(path: Path) -> dict[str, Any]:
+    """The E3 half of :func:`source_classify_signals` (fail-soft)."""
+    import source_classify_v2
+
+    entry: dict[str, Any] = {"detector": "image_source"}
+    try:
+        if not source_classify_v2.is_available():
+            entry["available"] = False
+            entry["error"] = (
+                "source-classify extra not installed (numpy/cv2/Pillow/"
+                "huggingface_hub); install watermark-remover[source-classify] "
+                "to run the image-source classifier"
+            )
+            return entry
+        from identify import image_source_signal
+        from PIL import Image
+
+        entry["available"] = True
+        with Image.open(path) as opened:
+            width, height = opened.size
+        if width * height > MAX_SOURCE_CLASSIFY_PIXELS:
+            entry.update(image_source_signal(None))
+            entry["note"] = _oversize_note(width, height)
+            return entry
+        classification = source_classify_v2.classify_image_source(path)
+        entry.update(image_source_signal(classification))
+        entry["classification"] = classification.to_dict()
+    except Exception as exc:
+        entry["available"] = True
+        entry["error"] = f"image-source classification failed: {exc!r}"
+    return entry
+
+
+def source_classify_signals(path: str | os.PathLike[str]) -> dict[str, dict[str, Any]]:
+    """Run both source classifiers when the ``source-classify`` extra is there.
+
+    The bounded evidence-only auto-run surface for /detect-style callers:
+    each classifier executes only when its full module set imports, the decode
+    is bounded by :data:`MAX_SOURCE_CLASSIFY_PIXELS` (larger images abstain
+    with an explicit note), weights download from their pinned revisions on
+    first use, and every failure mode is an explicit entry. Nothing here
+    asserts AI provenance and nothing is ever a clean verdict — an unavailable
+    extra, a crash, an abstention and a skipped oversize are all shades of
+    unknown. The identify-side vocabulary mapping for the results lives in
+    ``identify.source_classify_signal`` / ``identify.image_source_signal``;
+    the identify judge itself never runs this (it stays metadata-only).
+    """
+    target = Path(path)
+    return {
+        "source_pipeline": _source_pipeline_entry(target),
+        "image_source": _image_source_entry(target),
+    }

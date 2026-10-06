@@ -92,6 +92,11 @@ def check_optional(extra: str) -> BackendAvailability:
         # The open DWT-DCT detector (dwt_dct.py + invisible_watermark.py):
         # the exact module set its is_available() probe names.
         "detect": ("numpy", "cv2", "pywt"),
+        # The abstaining source-export classifiers (source_classify.py +
+        # source_classify_v2.py + source_spectral.py): the pixel stack plus the
+        # hub client that fetches the pinned weights on first use. Not a
+        # SynthID detector; absence of the extra is unknown, never clean.
+        "source-classify": ("numpy", "cv2", "PIL", "huggingface_hub"),
         # The Adobe TrustMark soft-binding decoder (trustmark_detector.py): the
         # pip package pulls torch itself and downloads model weights on first
         # use. Standalone by design -- it never joins the `all` aggregate
@@ -157,6 +162,7 @@ KNOWN_EXTRAS = (
     "migan",
     "lama",
     "detect",
+    "source-classify",
     "trustmark",
     "all",
 )

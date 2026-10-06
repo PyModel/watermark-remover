@@ -374,3 +374,204 @@ def test_model_loader_rejects_wrong_shapes_and_nonfinite_fields(tmp_path: Path) 
     with pytest.raises(ValueError, match="mean"):
         source_classify._load_model(bad, hashlib.sha256(bad.read_bytes()).hexdigest())
     source_classify._load_model.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# source-classify extra: registry + manifest declaration
+# ---------------------------------------------------------------------------
+
+
+def test_source_classify_extra_joins_the_registry_and_probes_its_stack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The checker probes exactly the module set classify_source imports."""
+    import importlib
+
+    import optional_deps
+
+    assert "source-classify" in optional_deps.KNOWN_EXTRAS
+    assert "source-classify" in optional_deps.extras_status()
+
+    probed: list[str] = []
+
+    def recording_import(name: str):
+        probed.append(name)
+        return object()
+
+    monkeypatch.setattr(importlib, "import_module", recording_import)
+    availability = optional_deps.check_optional("source-classify")
+    assert availability.available is True
+    assert probed == ["numpy", "cv2", "PIL", "huggingface_hub"]
+
+
+def test_source_classify_extra_missing_deps_report_install_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import importlib
+
+    import optional_deps
+
+    def missing(name: str):
+        raise ImportError(f"missing {name}")
+
+    monkeypatch.setattr(importlib, "import_module", missing)
+    availability = optional_deps.check_optional("source-classify")
+    assert availability.available is False
+    assert "Install watermark-remover[source-classify]" in availability.hint
+
+
+def test_pyproject_declares_the_source_classify_extra() -> None:
+    """The manifest carries the pixel stack + the hub client, never a weight."""
+    import tomllib
+
+    root = Path(__file__).resolve().parents[1]
+    with open(root / "pyproject.toml", "rb") as handle:
+        extras = tomllib.load(handle)["project"]["optional-dependencies"]
+    stack = extras["source-classify"]
+    assert any(pkg.lower() == "numpy" for pkg in stack), stack
+    assert any(pkg.startswith("opencv") for pkg in stack), stack
+    assert any(pkg.lower() == "pillow" for pkg in stack), stack
+    assert any(pkg.lower().startswith("huggingface") for pkg in stack), stack
+    # weights download at first use — nothing bundled under any name
+    assert all("npz" not in pkg.lower() for pkg in stack)
+
+
+# ---------------------------------------------------------------------------
+# identify signals: evidence-only mapping + the extra-gated collector
+# ---------------------------------------------------------------------------
+
+
+def test_identify_source_classify_signal_maps_the_vocabulary() -> None:
+    import identify
+    import source_classify
+
+    classified = source_classify.SourceClassification(
+        "openai",
+        "classified",
+        {"openai": 1.0, "google": 0.0, "unknown": 0.0},
+        {"openai": 1.0, "google": -1.0},
+        {"openai": 0.5, "google": 0.5},
+    )
+    signal = identify.source_classify_signal(classified)
+    assert signal["label"] == "openai"
+    assert signal["reason"] == "classified"
+    assert signal["asserts_ai"] is False  # an export pattern is never an AI verdict
+    assert "openai" in signal["finding"]
+    abstained = identify.source_classify_signal(
+        source_classify.SourceClassification("unknown", "abstained", {"openai": 0.1}, {}, {})
+    )
+    assert abstained["label"] == "unknown"
+    assert abstained["finding"] is None
+    for junk in (None, 42, "nope", {}, object()):
+        signal = identify.source_classify_signal(junk)
+        assert signal["label"] is None
+        assert signal["asserts_ai"] is False
+        assert signal["finding"] is None
+
+
+def test_collector_abstains_without_the_extra(tmp_path: Path) -> None:
+    """huggingface_hub absent → explicit unavailable entries, never findings."""
+    import source_classify
+
+    image = _noise_png(tmp_path / "image.png")
+    report = source_classify.source_classify_signals(image)
+    assert set(report) == {"source_pipeline", "image_source"}
+    for entry in report.values():
+        assert entry["available"] is False
+        assert "source-classify" in entry["error"]
+        assert "finding" not in entry
+
+
+def test_identify_collector_runs_both_classifiers_when_the_extra_is_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the extra present, both signals run and abstain on OOD pixels."""
+    import types
+
+    import source_classify
+    import source_classify_v2
+
+    weights_v1 = tmp_path / "v1" / source_classify.MODEL_FILE
+    weights_v1.parent.mkdir()
+    digest_v1 = _write_synthetic_mlp(weights_v1, thresholds=(1e6, 1e6))
+    from test_source_classify_v2 import _write_synthetic_v2
+
+    weights_v2 = tmp_path / "v2" / source_classify_v2.MODEL_FILE
+    weights_v2.parent.mkdir()
+    digest_v2 = _write_synthetic_v2(weights_v2)
+
+    fake_hub = types.ModuleType("huggingface_hub")
+    fake_hub.hf_hub_download = lambda **kwargs: ""  # never called: env overrides set
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
+    monkeypatch.setenv(source_classify.WEIGHTS_ENV, str(weights_v1.parent))
+    monkeypatch.setenv(source_classify_v2.WEIGHTS_ENV, str(weights_v2.parent))
+    monkeypatch.setattr(source_classify, "MODEL_SHA256", digest_v1)
+    monkeypatch.setattr(source_classify_v2, "MODEL_SHA256", digest_v2)
+    source_classify._load_model.cache_clear()
+    source_classify_v2._load_model.cache_clear()
+    try:
+        image = _noise_png(tmp_path / "image.png")
+        report = source_classify.source_classify_signals(image)
+    finally:
+        source_classify._load_model.cache_clear()
+        source_classify_v2._load_model.cache_clear()
+    pipeline = report["source_pipeline"]
+    assert pipeline["available"] is True
+    assert pipeline["label"] == "unknown" and pipeline["reason"] == "abstained"
+    assert pipeline["asserts_ai"] is False
+    assert pipeline["classification"]["model_revision"] == source_classify.WEIGHTS_REVISION
+    image_source = report["image_source"]
+    assert image_source["available"] is True
+    assert image_source["label"] == "unknown" and image_source["reason"] == "abstained"
+    assert image_source["watermark_truth"] == "unknown"
+
+
+def test_collector_skips_oversized_decodes_with_an_honest_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Above the decode bound the signal abstains explicitly (never a verdict)."""
+    import types
+
+    import source_classify
+
+    class FakeSize:
+        size = (source_classify.MAX_SOURCE_CLASSIFY_PIXELS // 100 + 1, 100)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake_open(*args, **kwargs):
+        # a header-only read: the fake returns the size without decoding pixels
+        return FakeSize()
+
+    fake_pil = types.ModuleType("PIL")
+    fake_pil.Image = types.SimpleNamespace(open=fake_open)
+    monkeypatch.setitem(sys.modules, "PIL", fake_pil)
+    monkeypatch.setattr(source_classify, "is_available", lambda: True)
+    monkeypatch.setattr(
+        source_classify,
+        "classify_source",
+        lambda source: (_ for _ in ()).throw(AssertionError("oversized decode must be skipped")),
+    )
+    report = source_classify.source_classify_signals("fake.png")
+    entry = report["source_pipeline"]
+    assert entry["available"] is True
+    assert entry["label"] is None
+    assert "decode bound" in entry["note"]
+
+
+def test_provenance_records_pin_the_e2_weight_source() -> None:
+    import source_classify
+
+    provenance = (SCRIPTS / "assets" / "PROVENANCE.md").read_text(encoding="utf-8")
+    for needle in (
+        source_classify.WEIGHTS_REPO,
+        source_classify.WEIGHTS_REVISION,
+        source_classify.MODEL_SHA256,
+        source_classify.MODEL_FILE,
+        source_classify.WEIGHTS_ENV,
+    ):
+        assert needle in provenance, needle

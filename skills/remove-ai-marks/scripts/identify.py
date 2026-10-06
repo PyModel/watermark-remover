@@ -488,6 +488,117 @@ def forensic_metadata_signal(record: Any) -> dict[str, Any]:
     }
 
 
+def source_classify_signal(classification: Any) -> dict[str, Any]:
+    """Map an E2 source-pipeline classification onto the evidence vocabulary.
+
+    Pure mapping, fail-soft: ``classification`` is the versioned
+    ``source_classify.SourceClassification`` (its ``to_dict`` shape also
+    works), or ``None``/junk when no classification was collected. The
+    bounded auto-run that produces one lives in
+    ``source_classify.source_classify_signals``; this adapter exists so
+    pixel-evidence surfaces and the verdict vocabulary speak the same words
+    while the judge itself stays metadata-only. Evidence-only by contract:
+    ``asserts_ai`` is always False — a resemblance to an OpenAI/Google export
+    pipeline is a routing hint, not a provenance verdict (uploads traverse
+    the same pipelines, and the classifier's own claim is "source/export
+    pipeline classification; not SynthID detection"). An abstention or a
+    missing classification stays ``unknown``; absence is never a clean
+    verdict.
+    """
+    label = getattr(classification, "label", None)
+    reason = getattr(classification, "reason", None)
+    if label not in ("openai", "google", "unknown") or reason not in (
+        "classified",
+        "abstained",
+        "feature_unavailable",
+    ):
+        return {
+            "label": None,
+            "reason": None,
+            "scores": {},
+            "asserts_ai": False,
+            "finding": None,
+            "note": (
+                "no source-pipeline classification collected — absence is never "
+                "clean (an export-pipeline resemblance would be a hint, not a verdict)"
+            ),
+        }
+    scores = getattr(classification, "scores", None)
+    scores = {str(k): float(v) for k, v in scores.items()} if isinstance(scores, dict) else {}
+    if label == "unknown" or reason != "classified":
+        finding = None
+    else:
+        finding = (
+            f"pixel statistics resemble the {label} source/export pipeline "
+            "(source-pipeline MLP classifier; not a watermark or SynthID result)"
+        )
+    return {
+        "label": label,
+        "reason": reason,
+        "scores": scores,
+        "asserts_ai": False,
+        "finding": finding,
+        "note": (
+            "export-pipeline resemblance is evidence about encoding/rendering "
+            "structure only; abstention and absence are unknown, never clean"
+        ),
+    }
+
+
+def image_source_signal(classification: Any) -> dict[str, Any]:
+    """Map an E3 image-source classification onto the evidence vocabulary.
+
+    Pure mapping, fail-soft: ``classification`` is the versioned
+    ``source_classify_v2.ImageSourceClassification`` (its ``to_dict`` shape
+    also works), or ``None``/junk. Evidence-only by contract: ``asserts_ai``
+    is always False and ``watermark_truth`` stays "unknown" — the classifier
+    claims a likely export-source pattern, never watermark presence. A
+    conflict, an abstention, or a missing classification stays ``unknown``;
+    absence is never a clean verdict.
+    """
+    label = getattr(classification, "label", None)
+    reason = getattr(classification, "reason", None)
+    if label not in ("openai", "google", "unknown") or reason not in (
+        "classified",
+        "abstained",
+        "conflict",
+        "feature_unavailable",
+    ):
+        return {
+            "label": None,
+            "reason": None,
+            "scores": {},
+            "watermark_truth": "unknown",
+            "asserts_ai": False,
+            "finding": None,
+            "note": (
+                "no image-source classification collected — absence is never "
+                "clean (a source-pattern hint would not be a verdict anyway)"
+            ),
+        }
+    scores = getattr(classification, "scores", None)
+    scores = {str(k): float(v) for k, v in scores.items()} if isinstance(scores, dict) else {}
+    if label == "unknown" or reason != "classified":
+        finding = None
+    else:
+        finding = (
+            f"decoded-pixel spectra match the {label} image source pattern "
+            "(spectral+template classifier; not a SynthID or watermark result)"
+        )
+    return {
+        "label": label,
+        "reason": reason,
+        "scores": scores,
+        "watermark_truth": "unknown",
+        "asserts_ai": False,
+        "finding": finding,
+        "note": (
+            "a source/export-pattern resemblance is not watermark evidence; "
+            "conflicts, abstentions and absence are unknown, never clean"
+        ),
+    }
+
+
 def identify_file(path: Path) -> ProvenanceVerdict:
     """Collect once from ``path`` and judge — the file-side entry point.
 
@@ -520,8 +631,10 @@ __all__ = [
     "identify_file",
     "identify_from_json",
     "identify_from_record",
+    "image_source_signal",
     "invisible_watermark_signal",
     "microsoft_invismark_signal",
     "pixel_evidence_signal",
+    "source_classify_signal",
     "unknown_verdict",
 ]

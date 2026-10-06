@@ -238,7 +238,9 @@ def test_identify_image_source_signal_maps_the_vocabulary() -> None:
     assert signal["label"] == "google"
     assert signal["reason"] == "classified"
     assert signal["asserts_ai"] is False
-    assert "r152_google" in signal["finding"]
+    assert "google" in signal["finding"]
+    assert signal["scores"] == {"r152_google": 0.4}
+    assert signal["watermark_truth"] == "unknown"
     abstained = identify.image_source_signal(
         source_classify_v2.ImageSourceClassification("unknown", "abstained", {})
     )
@@ -247,3 +249,17 @@ def test_identify_image_source_signal_maps_the_vocabulary() -> None:
     junk = identify.image_source_signal(None)
     assert junk["label"] is None
     assert junk["asserts_ai"] is False
+
+
+def test_provenance_records_pin_the_e3_weight_source() -> None:
+    import source_classify_v2
+
+    provenance = (SCRIPTS / "assets" / "PROVENANCE.md").read_text(encoding="utf-8")
+    for needle in (
+        source_classify_v2.WEIGHTS_REPO,
+        source_classify_v2.WEIGHTS_REVISION,
+        source_classify_v2.MODEL_SHA256,
+        source_classify_v2.MODEL_FILE,
+        source_classify_v2.WEIGHTS_ENV,
+    ):
+        assert needle in provenance, needle
