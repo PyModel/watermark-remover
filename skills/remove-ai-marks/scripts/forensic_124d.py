@@ -146,6 +146,13 @@ def image_features(pixels: NDArray[np.uint8]) -> NDArray[np.float64] | None:
     None is abstention, not a measurement: an image without a full patch, a
     plane with no spectral energy, or a missing numeric stack all report the
     same honest "no vector".
+
+    Compute bound: the patch lattice measures at most MAX_PATCHES 256px patches
+    (x3 channels), but the opponent conversion itself is O(image pixels), so
+    the CALLER owns the decode size — the freeze contract compares vectors
+    against full-size pixels, and capping here would silently shift the
+    feature distribution. A caller that must not hold a large float buffer
+    should bound its own decode (thumbnail) before calling.
     """
     np = _lazy("numpy")
     if np is None or not is_available():
