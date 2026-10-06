@@ -82,6 +82,27 @@ source-classify = [
     "Pillow",
     "huggingface-hub>=0.20.0,<2",
 ]
+# The metadata-free photo classifier (classify.py + clip_l_ft.py): the frozen
+# CLIP-L-ft Model 1 plus the gated provider head (Model 2). Same pixel stack
+# as source-classify, plus torch + transformers for the freeze and
+# huggingface-hub for the pinned weights snapshot on first use (see
+# assets/PROVENANCE.md). Weights and the receipt-gate npz are never bundled;
+# without them the verb reports unavailable -- labeled, never a silent pass.
+# The classify verb is explicit-only: nothing auto-runs it.
+classify = [
+    "numpy",
+    "opencv-python-headless",
+    "Pillow",
+    "torch",
+    "transformers",
+    "huggingface-hub>=0.20.0,<2",
+]
+# The ONNX photo-classifier backend (classify.py --backend onnx): the classify
+# stack by reference plus ONNX Runtime for the vision-only FP32 export.
+classify-onnx = [
+    "watermark-remover[classify]",
+    "onnxruntime",
+]
 # The Adobe TrustMark decoder (trustmark_detector.py) -- the open, keyless
 # watermark behind Adobe Durable Content Credentials (the Variant P soft
 # binding; the dotted alg id stays unported, see tests/test_c2pa_carveout.py).
@@ -118,6 +139,7 @@ all = [
     "watermark-remover[ai]",
     "watermark-remover[provenance]",
     "watermark-remover[detect]",
+    "watermark-remover[source-classify]",
 ]
 
 [project.scripts]

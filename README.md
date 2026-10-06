@@ -82,7 +82,7 @@ wm draft.md -o draft.cleaned.md --json --audit
 wm-tui ./drafts
 ```
 
-Installed commands: `wm` cleans, `wm-tui` is the terminal UI, `wm-serve` exposes the HTTP API, and `wm-audit-dir` / `wm-audit-site` inspect directories/sites. Optional extras: `[visible]`, `[quality]`, `[ai]`, `[provenance]`, `[all]`; none is required for the core clean.
+Installed commands: `wm` cleans, `wm-tui` is the terminal UI, `wm-serve` exposes the HTTP API, and `wm-audit-dir` / `wm-audit-site` inspect directories/sites. Optional extras: `[visible]`, `[quality]`, `[ai]`, `[provenance]`, `[detect]`, `[source-classify]`, `[classify]`, `[classify-onnx]`, `[trustmark]`, `[all]`; none is required for the core clean. `[detect]` and `[source-classify]` join `[all]`; `[trustmark]`, `[classify]`, and `[classify-onnx]` stay standalone (torch is opt-in). Detection extras only ever report evidence — absence of a signal is unknown, never clean.
 
 ### 3. Clone — CLI or local TUI development
 

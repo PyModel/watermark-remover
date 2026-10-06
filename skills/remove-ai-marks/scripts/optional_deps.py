@@ -97,6 +97,24 @@ def check_optional(extra: str) -> BackendAvailability:
         # hub client that fetches the pinned weights on first use. Not a
         # SynthID detector; absence of the extra is unknown, never clean.
         "source-classify": ("numpy", "cv2", "PIL", "huggingface_hub"),
+        # The metadata-free photo classifier (classify.py and its CLIP-L-ft
+        # embedder module): the pixel stack plus torch + transformers and the
+        # hub client that fetches the pinned weights snapshot on first use.
+        # Absence of the extra (or of the weights) is unavailable — labeled,
+        # never a silent pass and never a clean verdict.
+        "classify": ("numpy", "cv2", "PIL", "torch", "transformers", "huggingface_hub"),
+        # The ONNX classify backend (classify.py --backend onnx): the classify
+        # stack plus ONNX Runtime; the checker probes the union because using
+        # the backend needs every one of them.
+        "classify-onnx": (
+            "numpy",
+            "cv2",
+            "PIL",
+            "torch",
+            "transformers",
+            "huggingface_hub",
+            "onnxruntime",
+        ),
         # The Adobe TrustMark soft-binding decoder (trustmark_detector.py): the
         # pip package pulls torch itself and downloads model weights on first
         # use. Standalone by design -- it never joins the `all` aggregate
@@ -104,9 +122,11 @@ def check_optional(extra: str) -> BackendAvailability:
         "trustmark": ("trustmark",),
         # The aggregate extra joins the registry with a real checker: every
         # member declared in pyproject at this commit (visible + quality + ai
-        # + provenance + detect; source-classify joins when it lands). Probe
-        # order is irrelevant; the union is what the aggregate promises.
-        "all": ("cv2", "skimage", "torch", "c2pa", "numpy", "pywt"),
+        # + provenance + detect + source-classify). Probe order is irrelevant;
+        # the union is what the aggregate promises. The torch extras
+        # (ai/trustmark/classify/classify-onnx) stay standalone members of the
+        # registry, never members of the union (torch stays opt-in).
+        "all": ("cv2", "skimage", "torch", "c2pa", "numpy", "pywt", "PIL", "huggingface_hub"),
     }
     pkgs = _checkers.get(extra)
     if pkgs is None:
@@ -163,6 +183,8 @@ KNOWN_EXTRAS = (
     "lama",
     "detect",
     "source-classify",
+    "classify",
+    "classify-onnx",
     "trustmark",
     "all",
 )
