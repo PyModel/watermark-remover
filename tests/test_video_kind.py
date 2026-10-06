@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -156,3 +157,48 @@ def test_demo_video_without_runtime_returns_the_same_refusal(
     assert "pip install watermark-remover[video]" not in report
     assert "ffmpeg" in report
     assert output is None
+
+
+def _fake_tool(directory: Path, name: str) -> None:
+    tool = directory / name
+    tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    tool.chmod(0o755)
+
+
+@pytest.mark.parametrize(
+    ("tools", "av_present", "missing"),
+    [
+        (("ffprobe",), True, "ffmpeg"),
+        (("ffmpeg",), True, "ffprobe"),
+        (("ffmpeg", "ffprobe"), False, "av"),
+    ],
+)
+def test_clean_video_refuses_when_one_runtime_piece_is_absent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tools: tuple[str, ...],
+    av_present: bool,
+    missing: str,
+) -> None:
+    # "ffmpeg, ffprobe, or the video extra is absent" means any one of them:
+    # each piece alone must refuse, not only the all-absent case.
+    import clean_file
+
+    bindir = tmp_path / "tools"
+    bindir.mkdir()
+    for name in tools:
+        _fake_tool(bindir, name)
+    monkeypatch.setenv("PATH", str(bindir))
+    monkeypatch.setitem(sys.modules, "av", types.ModuleType("av") if av_present else None)
+    src = _video_file(tmp_path / "clip.mkv")
+    dest = tmp_path / "cleaned.mkv"
+    monkeypatch.setattr(sys, "argv", ["clean_file.py", str(src), "-o", str(dest)])
+
+    exit_code = clean_file.main()
+
+    err = capsys.readouterr().err
+    assert exit_code == 1
+    assert f"(missing: {missing})" in err
+    assert QUOTED_VIDEO_INSTALL in err
+    assert not dest.exists()
