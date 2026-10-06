@@ -347,3 +347,61 @@ def test_identify_signal_accepts_the_canonical_string_form() -> None:
     signal = identify.microsoft_invismark_signal(str(_WATERMARK_ID).upper())
     assert signal["watermark_id"] == str(_WATERMARK_ID)
     assert signal["asserts_ai"] is True
+
+
+# ---------------------------------------------------------------------------
+# Repo-contract pins: numpy-only, provenance header
+# ---------------------------------------------------------------------------
+
+
+def test_module_is_numpy_only_no_cv2_or_pywt_imports() -> None:
+    """The invismark transform stack is numpy-only; no cv2/pywt import anywhere."""
+    source = (SCRIPTS / "microsoft_invismark.py").read_text(encoding="utf-8")
+    for forbidden in ("import cv2", "from cv2", "import pywt", "from pywt"):
+        assert forbidden not in source, forbidden
+
+
+def test_module_carries_the_upstream_provenance_header() -> None:
+    source = (SCRIPTS / "microsoft_invismark.py").read_text(encoding="utf-8")
+    assert "Ported from wiltodelta/remove-ai-watermarks" in source
+    assert "Apache-2.0" in source
+    # The clean-room honesty statement is load-bearing contract, not prose.
+    assert "clean-room" in source
+    assert "validates the repeated 144-bit message before the remover touches pixels" in source
+
+
+def test_importing_the_module_pulls_in_no_cv2_or_pywt() -> None:
+    """Top-level import stays numpy-only: cv2/pywt must not enter sys.modules."""
+    import subprocess
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            f"import sys; sys.path.insert(0, r'{SCRIPTS}'); import microsoft_invismark; "
+            "print('cv2' in sys.modules, 'pywt' in sys.modules)",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split()[-2:] == ["False", "False"]
+
+
+def test_disruption_rewrites_large_carriers_across_rewind_batches(tmp_path: Path) -> None:
+    """A 640px carrier has >4096 selected blocks, exercising the rewrite batching."""
+    from microsoft_invismark import disrupt_local_invismark
+
+    source = tmp_path / "large.png"
+    output = tmp_path / "large-clean.png"
+    original = np.random.default_rng(20260913).integers(24, 232, size=(640, 640, 3), dtype=np.uint8)
+    Image.fromarray(_synthetic_writer(original, _WATERMARK_ID), "RGB").save(source)
+
+    result = disrupt_local_invismark(source, output, expected_watermark_id=_WATERMARK_ID)
+
+    assert result is not None
+    assert result.changed_blocks > 4096
+    assert output.exists()
+    assert detect_local_invismark(output) is None
