@@ -309,6 +309,20 @@ def test_wheel_install_exercises_every_entrypoint(
     assert removed > 0
     assert "\u200b" not in cleaned.read_text(encoding="utf-8")
 
+    web = _run(
+        capfd,
+        [
+            str(py),
+            "-c",
+            "from watermark_remover.scripts.server import static_file; "
+            "page = static_file('/'); assert page is not None, 'web UI missing from wheel'; "
+            "print('web ui', page.read_text(encoding='utf-8').count('<script'))",
+        ],
+        env=fresh_env,
+    )
+    assert web.returncode == 0, web.stderr
+    assert "web ui 1" in web.stdout
+
     spec_path = out / "openapi.json"
     dumped = _run(
         capfd,

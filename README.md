@@ -453,12 +453,18 @@ Exit codes: `0` no actionable findings, `1` actionable findings, `2` usage error
 
 The whole pipeline is also exposed over HTTP (stdlib-only, no web framework). The agent skill and any web app can call it instead of running the CLIs locally.
 
+Open `http://127.0.0.1:8765/` for the web UI. Drop one file or many: each is inspected, with every hidden character lit in place in the text (or the metadata found in an image or document). Clean one file or the whole queue, then download `NAME.cleaned.EXT`. Images also get visible-mark removal (drag a box over a logo) and optional SynthID band suppression. Text gets a Layer B rewrite and the watermark detectors, when the server has them configured. After every step the page has the server re-inspect the new bytes, so "nothing remains" is the inspector's finding. The Server view lists every capability with what to set to turn it on. The page is prebuilt React served by `wm-serve` itself (no Bun or Node needed to use it), loads nothing from other origins, and asks for the bearer key when the server has one.
+
+`/rewrite` uses only the model in the server's environment (`WATERMARKS_REWRITE_BACKEND`, `WATERMARKS_REWRITE_MODEL`, `WATERMARKS_REWRITE_BASE_URL`); a request that names its own endpoint, model or key is refused. `/visible` runs the built-in texture and blend fills only; the external inpainting command stays CLI-only.
+
 ```bash
-wm-serve                     # http://127.0.0.1:8765, optional bearer key
+wm-serve                     # http://127.0.0.1:8765 (web UI at /), optional bearer key
 curl -s http://127.0.0.1:8765/health
 curl -s http://127.0.0.1:8765/capabilities
 curl -s http://127.0.0.1:8765/openapi.json
 # POST /inspect, /detect, /clean with {"file": "<base64>", "name": "x.png", "options": {...}}
+# POST /rewrite with {"file": ..., "name": "x.txt", "strength": "paraphrase"}
+# POST /visible with {"file": ..., "name": "x.png", "box": [x, y, w, h], "backend": "texture"}
 ```
 
 Docker (core image with exiftool + qpdf + c2patool baked in) and compose profiles for the heavy harnesses:
@@ -574,7 +580,9 @@ watermark-remover/
 │   ├── clean-user-facing-text/     # lightweight Cursor skill (vendored engine)
 │   └── remove-ai-marks/
 │       ├── references/
-│       └── scripts/
+│       ├── scripts/
+│       ├── tui/                    # wm-tui frontend (Bun + pi-tui)
+│       └── web/                    # wm-serve web UI (React; dist/ is committed)
 ├── tests/
 │   └── fixtures/
 ├── CODE_OF_CONDUCT.md
@@ -639,6 +647,7 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements-test.txt
 make check           # Python lint/format/tests/smoke + independent residual verifier
 make tui-check       # frozen Bun install, TypeScript check + mounted UI tests
+make web-check       # web UI typecheck + tests, rebuild, fail if committed dist/ is stale
 make packaging       # build/install wheel, verify all commands and read-only TUI boot
 # make ci            # all of the above; requires Bun 1.4+
 ```

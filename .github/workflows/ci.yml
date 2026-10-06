@@ -80,6 +80,7 @@ jobs:
         with:
           bun-version: '1.4.2'
       - run: make tui-check
+      - run: make web-check
 
   verify:
     name: Independent cleaning verification

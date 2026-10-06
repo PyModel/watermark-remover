@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 64" width="360" height="64" role="img" aria-labelledby="t d">
+<title id="t">watermark-remover</title>
+<desc id="d">Logo lockup for light backgrounds: mark tile and name.</desc>
+<rect width="64" height="64" rx="14" fill="#0a2026"/>
+<g transform="translate(0 0) scale(0.5)">
+  <g fill="#234049">
+    <rect x="26" y="33" width="40" height="8" rx="4"/>
+    <rect x="26" y="51" width="40" height="8" rx="4"/>
+    <rect x="26" y="69" width="40" height="8" rx="4"/>
+    <rect x="26" y="87" width="40" height="8" rx="4"/>
+  </g>
+  <g fill="#f05aa8">
+    <rect x="76" y="33" width="26" height="8" rx="4"/>
+    <rect x="76" y="51" width="26" height="8" rx="4"/>
+    <rect x="76" y="69" width="26" height="8" rx="4"/>
+    <rect x="76" y="87" width="10" height="8" rx="4"/>
+  </g>
+  <g fill="#ffffff">
+    <rect x="68" y="22" width="4" height="84" rx="1"/>
+    <rect x="62" y="18" width="16" height="4" rx="2"/>
+    <rect x="62" y="106" width="16" height="4" rx="2"/>
+  </g>
+</g>
+<text x="82" y="43" font-size="32" font-weight="700" letter-spacing="-1.4" textLength="268" lengthAdjust="spacingAndGlyphs" fill="#0d151b" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, &apos;SF Pro Display&apos;, &apos;Segoe UI&apos;, Roboto, sans-serif">watermark-remover</text>
+</svg>

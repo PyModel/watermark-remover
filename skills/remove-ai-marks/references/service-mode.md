@@ -55,6 +55,15 @@ field and writes it to the output path itself.
 | POST | `/inspect` | `{"file": "<base64>", "name": "notes.md", "detect": true}` | `{"ok", "kind", "suspicious", "detection_status", "report"}` |
 | POST | `/detect` | `{"file": "<base64>", "name": "notes.txt"}` | `{"ok", "kind", "detections": [...]}` |
 | POST | `/clean` | `{"file": "<base64>", "name": "notes.md", "options": {...}}` | `{"ok", "kind", "cleaned": "<base64>", "report"}` |
+| POST | `/rewrite` | `{"file": "<base64>", "name": "notes.txt", "strength": "paraphrase", "lang"?}` | `{"ok", "kind": "text", "cleaned": "<base64>", "report": {"rewrite": {...}}}` |
+| POST | `/visible` | `{"file": "<base64>", "name": "x.png", "box": [x, y, w, h], "backend"?: "texture" \| "simple"}` | `{"ok", "kind": "image", "cleaned": "<base64 PNG>", "report"}` |
+
+`/rewrite` takes only the strength (and `lang` for `backtranslate`); the backend,
+model, endpoint and key come from the server's `WATERMARKS_REWRITE_*` environment,
+and any other body field is refused with 400. An unset backend answers 400 naming
+the variable; a failing model endpoint answers 502. `/visible` accepts PNG or JPEG
+and always returns PNG; a box too large for `texture` answers 400, so retry with
+`simple`.
 
 `/clean` and `/inspect` route by the uploaded `name` extension plus the bytes;
 unrecognized formats answer `kind: "unknown"` (`/inspect`) or 400 (`/clean`).

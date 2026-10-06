@@ -105,6 +105,8 @@ def test_openapi_spec_covers_all_endpoints(conn):
         "/inspect": {"post"},
         "/clean": {"post"},
         "/detect": {"post"},
+        "/rewrite": {"post"},
+        "/visible": {"post"},
     }
     for path, methods in expected.items():
         assert path in body["paths"]
@@ -366,3 +368,147 @@ def test_capabilities_survives_an_unparseable_remote_opt_in(monkeypatch):
     report = server.capabilities()
     assert report["layer_b"]["endpoint_allowed"] is False
     assert report["layer_b"]["loopback"] is False
+
+
+@pytest.fixture
+def web_root(tmp_path, monkeypatch):
+    (tmp_path / "index.html").write_text("<!doctype html><title>wm</title>", encoding="utf-8")
+    (tmp_path / "index-abc.js").write_text("console.log(1)", encoding="utf-8")
+    (tmp_path / "secret.py").write_text("x = 1", encoding="utf-8")
+    monkeypatch.setattr(server, "WEB_ROOT", tmp_path)
+    return tmp_path
+
+
+def _get_raw(conn, path, headers=None):
+    conn.request("GET", path, headers=headers or {})
+    resp = conn.getresponse()
+    return resp.status, dict(resp.getheaders()), resp.read()
+
+
+def test_web_ui_is_served_with_a_self_only_csp(conn, web_root):
+    status, headers, body = _get_raw(conn, "/")
+    assert status == 200
+    assert headers["Content-Type"] == "text/html; charset=utf-8"
+    assert "connect-src 'self'" in headers["Content-Security-Policy"]
+    assert headers["X-Content-Type-Options"] == "nosniff"
+    assert body.startswith(b"<!doctype html>")
+    status, headers, _ = _get_raw(conn, "/index-abc.js")
+    assert status == 200
+    assert headers["Content-Type"].startswith("text/javascript")
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/../scripts/server.py",
+        "/a/../index.html",
+        "/.env",
+        "/secret.py",
+        "/missing.js",
+        "/..\\x.js",
+        "/C:index.html",
+        "",
+    ],
+)
+def test_static_file_never_leaves_the_build(web_root, path):
+    assert server.static_file(path) is None
+
+
+def test_web_ui_skips_auth_but_the_api_does_not(conn, web_root, monkeypatch):
+    monkeypatch.setattr(server, "API_KEY", "k" * 16)
+    status, _, _ = _get_raw(conn, "/")
+    assert status == 200
+    status, _, _ = _get_raw(conn, "/capabilities")
+    assert status == 401
+
+
+def test_unbuilt_web_ui_says_how_to_build_it(conn, tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "WEB_ROOT", tmp_path / "dist")
+    status, body = _get(conn, "/")
+    assert status == 404
+    assert "bun run build" in body["error"]
+
+
+def _striped_png(width=64, height=64):
+    """A gray image with a white block in the middle: something to inpaint."""
+    rows = b""
+    for y in range(height):
+        row = bytearray(b"\x00")
+        for x in range(width):
+            value = 255 if 8 <= x < 16 and 8 <= y < 16 else 90 + (x * 3 + y) % 20
+            row += bytes((value, value, value))
+        rows += bytes(row)
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", ihdr)
+        + _png_chunk(b"IDAT", zlib.compress(rows))
+        + _png_chunk(b"IEND", b"")
+    )
+
+
+def test_rewrite_unconfigured_names_the_setting(conn, monkeypatch):
+    monkeypatch.delenv("WATERMARKS_REWRITE_BACKEND", raising=False)
+    status, body = _post(
+        conn, "/rewrite", {"file": _b64(b"Hello there."), "name": "a.txt", "strength": "paraphrase"}
+    )
+    assert status == 400
+    assert "WATERMARKS_REWRITE_BACKEND" in body["error"]
+
+
+@pytest.mark.parametrize("field", ["base_url", "model", "api_key", "allow_remote", "backend"])
+def test_rewrite_refuses_caller_chosen_endpoint(conn, field):
+    status, body = _post(
+        conn,
+        "/rewrite",
+        {"file": _b64(b"Hi."), "name": "a.txt", "strength": "paraphrase", field: "x"},
+    )
+    assert status == 400
+    assert field in body["error"]
+
+
+def test_rewrite_rejects_unknown_strength(conn):
+    status, _ = _post(conn, "/rewrite", {"file": _b64(b"Hi."), "name": "a.txt", "strength": "nope"})
+    assert status == 400
+
+
+def test_visible_inpaints_inside_the_box(conn):
+    data = _striped_png()
+    status, body = _post(
+        conn, "/visible", {"file": _b64(data), "name": "a.png", "box": [8, 8, 8, 8]}
+    )
+    assert status == 200, body
+    out = base64.b64decode(body["cleaned"])
+    assert out.startswith(b"\x89PNG")
+    assert out != data
+    assert body["report"]["status"] == "completed"
+    assert "mask" not in body["report"] and "output" not in body["report"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"box": [0, 0, 0, 4]},
+        {"box": [0, 0, 4]},
+        {"box": [0, 0, 4, True]},
+        {"box": [0, 0, 4, 4], "backend": "external"},
+        {"box": [0, 0, 4, 4], "command": "rm -rf /"},
+    ],
+)
+def test_visible_rejects_bad_requests(conn, payload):
+    status, _ = _post(conn, "/visible", {"file": _b64(_striped_png()), "name": "a.png", **payload})
+    assert status == 400
+
+
+def test_visible_rejects_non_images(conn):
+    status, _ = _post(
+        conn, "/visible", {"file": _b64(b"text"), "name": "a.txt", "box": [0, 0, 1, 1]}
+    )
+    assert status == 400
+
+
+def test_visible_output_never_aliases_the_upload_name(conn):
+    status, body = _post(
+        conn, "/visible", {"file": _b64(_striped_png()), "name": "cleaned.png", "box": [8, 8, 8, 8]}
+    )
+    assert status == 200, body

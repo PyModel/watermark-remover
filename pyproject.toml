@@ -93,6 +93,8 @@ packages = ["watermark_remover", "watermark_remover.scripts"]
     "tui/tsconfig.json",
     "tui/src/**/*",
     "tui/PROTOCOL.md",
+    # The web UI ships prebuilt (wm-serve serves web/dist at /); users never need Bun for it.
+    "web/dist/*",
 ]
 "watermark_remover.scripts" = ["*.txt", "setup_*.sh", "setup_*.ps1"]
 

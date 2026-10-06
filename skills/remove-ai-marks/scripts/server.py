@@ -5,6 +5,7 @@ Stdlib-only. The agent skill and any web app can call it over HTTP instead of
 running the CLI scripts locally.
 
 Endpoints:
+    GET  /               -> the web UI (built from ../web; static files skip auth)
     GET  /health         -> {"ok": true, "version": ...}
     GET  /capabilities   -> which optional tools / pixel backends are present
     GET  /openapi.json   -> dynamically generated OpenAPI 3.0.3 spec
@@ -12,6 +13,11 @@ Endpoints:
     POST /detect         -> {"file": <base64>, "name": "x.txt"} -> watermark detector reports
     POST /clean          -> {"file": <base64>, "name": "x.png", "options": {...}}
                          -> {"cleaned": <base64>, "report": {...}}
+    POST /rewrite        -> {"file": <base64>, "name": "x.txt", "strength": "paraphrase"}
+                         -> Layer B rewrite with the model configured in the
+                            server's environment (never chosen by the caller)
+    POST /visible        -> {"file": <base64>, "name": "x.png", "box": [x, y, w, h]}
+                         -> visible-mark inpainting inside the box, PNG out
 
 Hardening mirrors the CLIs: input size caps, binary-as-text guard, atomic
 writes, loopback-only bind by default, optional bearer API key. Run it as an
@@ -47,7 +53,10 @@ from common import (
 from container_meta import clean_container, inspect_container
 from image_meta import clean_image, inspect_image, run_synthid_score
 from layer_b_discovery import layer_b_status
+from layer_b_http import LayerBHTTPError
+from morphomod import VisiblePlan, remove_visible
 from optional_deps import extras_status
+from rewrite_text import REWRITE_STRENGTHS, RewriteConfigurationError, RewritePlan, rewrite
 from score_stylometry import score_text_stylometry
 from text_detectors import detector_status, run_all_text_detectors, run_text_detectors
 from text_unicode import clean_text, inspect_text
@@ -65,6 +74,38 @@ MAX_BODY_BYTES = MAX_INPUT_BYTES + (MAX_INPUT_BYTES >> 1)
 TEXT_DETECTION_STATUSES = ("DETECTED", "INCONCLUSIVE", "NOT_DETECTED", "NOT_RUN")
 _UNRESOLVED_TEXT_VERDICTS = frozenset({"INCONCLUSIVE", "UNSUPPORTED", "ERROR"})
 
+# The web UI, built by `bun run build` in ../web. Only the flat files the build
+# wrote are served, and they are public: the API calls they make still need the
+# bearer key.
+WEB_ROOT = Path(__file__).resolve().parent.parent / "web" / "dist"
+_STATIC_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".svg": "image/svg+xml",
+}
+# The page talks to this origin only: no fonts, CDNs or analytics. blob: is the
+# image preview and the cleaned-file download, both built in the browser.
+_UI_CSP = (
+    "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob:; "
+    "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+)
+
+
+def static_file(path: str) -> Path | None:
+    """Map a GET path to a built UI file, or None. Never leaves WEB_ROOT."""
+    name = "index.html" if path == "/" else path[1:]
+    # ":" also blocks Windows drive-relative names: WEB_ROOT / "C:x.js" is C:x.js.
+    if not name or any(c in name for c in "/\\:") or name.startswith("."):
+        return None
+    if Path(name).suffix not in _STATIC_TYPES:
+        return None
+    candidate = WEB_ROOT / name
+    if candidate.parent != WEB_ROOT:
+        return None
+    return candidate if candidate.is_file() else None
+
+
 ALLOWED_CLEAN_OPTIONS = {
     "nfkc": bool,
     "aggressive_homoglyphs": bool,
@@ -78,6 +119,22 @@ ALLOWED_CLEAN_OPTIONS = {
     "remove_synthid": bool,
     "wmct_marker": bool,
 }
+
+
+# Inpainting backends the page may pick. "external" and a detector command run
+# shell templates, so they stay CLI-only.
+WEB_VISIBLE_BACKENDS = ("texture", "simple")
+
+
+class UpstreamError(Exception):
+    """The configured Layer B model endpoint failed; answered as 502."""
+
+
+def _only_keys(body: dict[str, Any], allowed: set[str]) -> None:
+    """Refuse unknown body keys, so no caller can smuggle in an endpoint or model."""
+    for key in body:
+        if key not in allowed:
+            raise ValueError(f"unknown field: {key}")
 
 
 def _json_ok(payload: dict[str, Any]) -> bytes:
@@ -335,6 +392,83 @@ _OPENAPI_PATHS: dict[str, dict[str, Any]] = {
             },
         }
     },
+    "/rewrite": {
+        "post": {
+            "summary": "Layer B rewrite of a text file with the server-configured model (best-effort)",
+            "requestBody": _schema(
+                required=True,
+                content={
+                    "application/json": _schema(
+                        schema=_file_request(
+                            {
+                                "properties": {
+                                    "strength": _schema(
+                                        type="string", enum=list(REWRITE_STRENGTHS)
+                                    ),
+                                    "lang": _schema(
+                                        type="string",
+                                        description="Pivot language for backtranslate",
+                                    ),
+                                },
+                                "required": ["strength"],
+                            }
+                        )
+                    )
+                },
+            ),
+            "responses": {
+                "200": _schema(
+                    type="object",
+                    properties={
+                        "ok": _schema(type="boolean"),
+                        "kind": _schema(type="string", enum=["text"]),
+                        "cleaned": _schema(type="string", description="Base64 rewritten text"),
+                        "report": _schema(type="object"),
+                    },
+                )
+            },
+        }
+    },
+    "/visible": {
+        "post": {
+            "summary": "Inpaint a visible mark inside a box (PNG/JPEG in, PNG out; best-effort)",
+            "requestBody": _schema(
+                required=True,
+                content={
+                    "application/json": _schema(
+                        schema=_file_request(
+                            {
+                                "properties": {
+                                    "box": _schema(
+                                        type="array",
+                                        items=_schema(type="integer", minimum=0),
+                                        minItems=4,
+                                        maxItems=4,
+                                        description="x, y, width, height in image pixels",
+                                    ),
+                                    "backend": _schema(
+                                        type="string", enum=list(WEB_VISIBLE_BACKENDS)
+                                    ),
+                                },
+                                "required": ["box"],
+                            }
+                        )
+                    )
+                },
+            ),
+            "responses": {
+                "200": _schema(
+                    type="object",
+                    properties={
+                        "ok": _schema(type="boolean"),
+                        "kind": _schema(type="string", enum=["image"]),
+                        "cleaned": _schema(type="string", description="Base64 PNG"),
+                        "report": _schema(type="object"),
+                    },
+                )
+            },
+        }
+    },
     "/detect": {
         "post": {
             "summary": "Run watermark detectors on a file (text: vendor/statistical; image: SynthID score)",
@@ -373,6 +507,10 @@ _COMMON_ERRORS = {
         "content": {"application/json": {"schema": _ERROR_SCHEMA}},
     },
     "404": {"description": "Not found", "content": {"application/json": {"schema": _ERROR_SCHEMA}}},
+    "502": {
+        "description": "The configured rewrite model failed",
+        "content": {"application/json": {"schema": _ERROR_SCHEMA}},
+    },
     "413": {
         "description": "Request body too large",
         "content": {"application/json": {"schema": _ERROR_SCHEMA}},
@@ -497,8 +635,34 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _send_static(self, file: Path) -> None:
+        data = file.read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", _STATIC_TYPES[file.suffix])
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Content-Security-Policy", _UI_CSP)
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_GET(self) -> None:
         path = urlparse(self.path).path
+        file = static_file(path)
+        if file is not None:
+            self._send_static(file)
+            return
+        if path == "/":
+            self._respond(
+                HTTPStatus.NOT_FOUND,
+                {
+                    "ok": False,
+                    # No absolute path: this answer needs no auth.
+                    "error": "web UI not built: run `bun run build` in skills/remove-ai-marks/web",
+                },
+            )
+            return
         if not self._authorized():
             self._respond(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "unauthorized"})
             return
@@ -516,7 +680,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             self._respond(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "unauthorized"})
             return
-        if path not in ("/inspect", "/clean", "/detect"):
+        if path not in ("/inspect", "/clean", "/detect", "/rewrite", "/visible"):
             self._respond(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not found"})
             return
         body = self._read_json()
@@ -538,10 +702,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._handle_inspect(data, name, body)
             elif path == "/detect":
                 self._handle_detect(data, name)
+            elif path == "/rewrite":
+                self._handle_rewrite(data, name, body)
+            elif path == "/visible":
+                self._handle_visible(data, name, body)
             else:
                 self._handle_clean(data, name, body)
         except ValueError as e:
             self._respond(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(e)})
+        except UpstreamError as e:
+            self._respond(HTTPStatus.BAD_GATEWAY, {"ok": False, "error": str(e)})
         except Exception as e:
             eprint(f"error handling {path}: {e!r}")
             self._respond(
@@ -656,6 +826,83 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
         self._respond(HTTPStatus.OK, {"ok": True, "kind": kind, "detections": detections})
+
+    def _handle_rewrite(self, data: bytes, name: str, body: dict[str, Any]) -> None:
+        _only_keys(body, {"file", "name", "strength", "lang"})
+        strength = body.get("strength")
+        if strength not in REWRITE_STRENGTHS:
+            raise ValueError(f"strength must be one of: {', '.join(REWRITE_STRENGTHS)}")
+        lang = body.get("lang")
+        if lang is not None and (
+            not isinstance(lang, str)
+            or not 0 < len(lang) <= 40
+            or not lang.replace(" ", "").isalpha()
+        ):
+            raise ValueError("lang must be a language name such as French")
+        if classify_bytes(data, Path(name).suffix) != "text" or looks_binary(data):
+            raise ValueError("rewrite takes a text file")
+        text = data.decode("utf-8", errors="surrogateescape")
+        # Backend, model, endpoint and key come from the server's environment
+        # only; the remote opt-in is enforced inside rewrite().
+        try:
+            plan = RewritePlan.live_from_environment(strength, lang=lang)
+            out, info = rewrite(text, plan)
+        except RewriteConfigurationError as e:
+            raise ValueError(str(e)) from None
+        except LayerBHTTPError as e:
+            raise UpstreamError(f"rewrite model failed: {e}") from None
+        info.pop("base_url", None)
+        self._respond(
+            HTTPStatus.OK,
+            {
+                "ok": True,
+                "kind": "text",
+                "cleaned": base64.b64encode(out.encode("utf-8", errors="surrogateescape")).decode(
+                    "ascii"
+                ),
+                "report": {"kind": "text", "rewrite": info, "length": len(out)},
+            },
+        )
+
+    def _handle_visible(self, data: bytes, name: str, body: dict[str, Any]) -> None:
+        _only_keys(body, {"file", "name", "box", "backend"})
+        box = body.get("box")
+        if (
+            not isinstance(box, list)
+            or len(box) != 4
+            or not all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in box)
+            or box[2] == 0
+            or box[3] == 0
+        ):
+            raise ValueError("box must be four non-negative integers [x, y, width, height]")
+        backend = body.get("backend", "texture")
+        if backend not in WEB_VISIBLE_BACKENDS:
+            raise ValueError(f"backend must be one of: {', '.join(WEB_VISIBLE_BACKENDS)}")
+        if classify_bytes(data, Path(name).suffix) != "image":
+            raise ValueError("visible-mark removal takes a PNG or JPEG image")
+        with tempfile.TemporaryDirectory(prefix="wm-visible-") as tmp:
+            tmpdir = Path(tmp)
+            src = _tmp_path(tmpdir, name or "input")
+            src.write_bytes(data)
+            # Own directory, so no upload name can alias the output.
+            (tmpdir / "out").mkdir()
+            dest = tmpdir / "out" / "cleaned.png"
+            plan = VisiblePlan(
+                box=(box[0], box[1], box[2], box[3]), backend=backend, publish_mask=False
+            )
+            result = remove_visible(src, dest, plan)
+            cleaned_bytes = dest.read_bytes()
+        for key in ("input", "output", "mask"):
+            result.pop(key, None)
+        self._respond(
+            HTTPStatus.OK,
+            {
+                "ok": True,
+                "kind": "image",
+                "cleaned": base64.b64encode(cleaned_bytes).decode("ascii"),
+                "report": {"kind": "image", **result},
+            },
+        )
 
     def _handle_clean(self, data: bytes, name: str, body: dict[str, Any]) -> None:
         kind = classify_bytes(data, Path(name).suffix)

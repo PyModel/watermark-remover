@@ -22,6 +22,8 @@ CLAUDE.md
 # Python build artifacts
 build/
 dist/
+# The web UI build is committed: wheels and Docker serve it without Bun (make web-check).
+!skills/remove-ai-marks/web/dist/
 *.egg-info/
 
 # Secrets / local env

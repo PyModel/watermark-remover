@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630" role="img" aria-labelledby="t d">
+<title id="t">watermark-remover</title>
+<desc id="d">Social card: the mark and name, the tagline, and a sentence whose hidden characters are lit as code points.</desc>
+<defs>
+  <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f6f8fa"/><stop offset=".58" stop-color="#eef2f4"/><stop offset="1" stop-color="#f4f7f9"/></linearGradient>
+  <radialGradient id="glow" cx=".77" cy=".1" r=".45"><stop offset="0" stop-color="#e4f0f7"/><stop offset="1" stop-color="#e4f0f7" stop-opacity="0"/></radialGradient>
+</defs>
+<rect width="1200" height="630" fill="url(#bg)"/>
+<rect width="1200" height="630" fill="url(#glow)"/>
+<g transform="translate(80 80) scale(0.75)"><rect width="128" height="128" rx="28" fill="#0a2026"/>
+<g>
+  <g fill="#234049">
+    <rect x="26" y="33" width="40" height="8" rx="4"/>
+    <rect x="26" y="51" width="40" height="8" rx="4"/>
+    <rect x="26" y="69" width="40" height="8" rx="4"/>
+    <rect x="26" y="87" width="40" height="8" rx="4"/>
+  </g>
+  <g fill="#f05aa8">
+    <rect x="76" y="33" width="26" height="8" rx="4"/>
+    <rect x="76" y="51" width="26" height="8" rx="4"/>
+    <rect x="76" y="69" width="26" height="8" rx="4"/>
+    <rect x="76" y="87" width="10" height="8" rx="4"/>
+  </g>
+  <g fill="#ffffff">
+    <rect x="68" y="22" width="4" height="84" rx="1"/>
+    <rect x="62" y="18" width="16" height="4" rx="2"/>
+    <rect x="62" y="106" width="16" height="4" rx="2"/>
+  </g>
+</g>
+</g>
+<text x="200" y="152" font-size="44" font-weight="700" letter-spacing="-2" textLength="420" lengthAdjust="spacingAndGlyphs" fill="#0d151b" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif">watermark-remover</text>
+<text x="80" y="300" font-size="72" font-weight="520" letter-spacing="-2.4" fill="#0d151b" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif">Find the marks.</text>
+<text x="80" y="384" font-size="72" font-weight="520" letter-spacing="-2.4" fill="#0d151b" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif">Remove them. Check again.</text>
+<rect x="80" y="440" width="1040" height="96" rx="22" fill="#ffffff" fill-opacity=".86"/>
+<text x="112" y="497" font-size="22" fill="#0d151b" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">Looks like plain text.</text>
+<rect x="410" y="478" width="58" height="26" rx="6" fill="#fbe8f3" stroke="#a3176f" stroke-opacity=".25"/><text x="439" y="497" text-anchor="middle" font-size="16" font-weight="600" fill="#a3176f" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">200B</text>
+<text x="480" y="497" font-size="22" fill="#0d151b" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">Copied from a chat</text>
+<rect x="735" y="478" width="58" height="26" rx="6" fill="#fbe8f3" stroke="#a3176f" stroke-opacity=".25"/><text x="764" y="497" text-anchor="middle" font-size="16" font-weight="600" fill="#a3176f" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">00AD</text>
+<text x="805" y="497" font-size="22" fill="#0d151b" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">window.</text>
+<text x="80" y="590" font-size="20" fill="#5f6a74" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif">Hidden Unicode, C2PA and AI metadata, visible marks, and wording. Open source.</text>
+</svg>
