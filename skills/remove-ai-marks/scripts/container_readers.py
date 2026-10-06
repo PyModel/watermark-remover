@@ -18,7 +18,7 @@ nothing.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import TypedDict
 
 from tc260_label import MAX_TC260_VALUE_BYTES, parse_tc260_aigc_json
@@ -91,19 +91,22 @@ def _element_header(data: bytes, pos: int, limit: int) -> tuple[int, int, int] |
     return element_id, payload_start, element_end
 
 
-def _iter_elements(data: bytes, start: int, end: int) -> tuple[tuple[int, int, int], ...]:
-    """Every valid direct child of one bounded EBML region, in file order."""
-    elements: list[tuple[int, int, int]] = []
+def _iter_elements(data: bytes, start: int, end: int) -> Iterator[tuple[int, int, int]]:
+    """Yield every valid direct child of one bounded EBML region, in file order.
+
+    Lazy on purpose: a container may hold many small elements, and building a
+    list of all of them would allocate memory proportional to the element
+    count before the walk even looks at one.
+    """
     pos = start
     while pos < end:
         header = _element_header(data, pos, end)
         if header is None:
-            break
-        elements.append(header)
+            return
+        yield header
         if header[2] <= pos:
-            break
+            return
         pos = header[2]
-    return tuple(elements)
 
 
 def _bounded_value(data: bytes, start: int, end: int, maximum: int) -> bytes | None:
