@@ -250,17 +250,22 @@ def classify_from_scores(
     mlp_threshold: float = MLP_THRESHOLD,
     provider_margin: float = PROVIDER_MARGIN,
     receipt_score: float | None = None,
-    receipt_threshold: float = 0.0,
+    receipt_threshold: float | None = None,
 ) -> PixelClassification:
     """Pure gate: detector AND provider, no file I/O.
 
     A DEFINITELY verdict whose ``receipt_score`` meets ``receipt_threshold``
     downgrades the public label to ``unknown`` (document-domain abstain):
     the raw detector level stays ``definitely`` and no provider is read.
-    ``receipt_threshold`` comes from the SAME gate artifact that produced
-    ``receipt_score`` (the caller resolves it; there is no bundled fallback
-    artifact in this port).
+    ``receipt_score`` and ``receipt_threshold`` must be passed together —
+    both come from the SAME gate artifact the caller loaded (there is no
+    bundled fallback artifact in this port), so one without the other is a
+    caller error, not a resolvable default.
     """
+    if (receipt_score is None) != (receipt_threshold is None):
+        raise ValueError(
+            "receipt_score and receipt_threshold come from the same gate artifact; pass both or neither"
+        )
     level = detector_level(
         ridge_score,
         mlp_score,
@@ -268,7 +273,12 @@ def classify_from_scores(
         mlp_threshold=mlp_threshold,
     )
     label = label_for(level)
-    if level == "definitely" and receipt_score is not None and receipt_score >= receipt_threshold:
+    if (
+        level == "definitely"
+        and receipt_score is not None
+        and receipt_threshold is not None
+        and receipt_score >= receipt_threshold
+    ):
         return PixelClassification(label="unknown", domain="photo", detector=level, provider=None)
     provider: PixelProvider | None = None
     if label == "ai" and provider_scores is not None:

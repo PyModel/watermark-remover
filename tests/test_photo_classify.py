@@ -293,10 +293,21 @@ class TestPureGates:
         assert result.label == "ai"
         assert result.provider == "openai"
 
+    def test_receipt_score_and_threshold_are_passed_together(self) -> None:
+        """One without the other is a caller error: head and threshold come
+        from one artifact, so a bare score must never resolve a silent
+        default threshold."""
+        import classify
+
+        with pytest.raises(ValueError, match="pass both or neither"):
+            classify.classify_from_scores(
+                1.0, 1.0, None, ridge_threshold=0.5, mlp_threshold=0.5, receipt_score=5.0
+            )
+
     def test_to_dict_shape_is_the_four_field_contract(self) -> None:
         import classify
 
-        result = classify.classify_from_scores(0.0, 0.0, None, receipt_threshold=2.0)
+        result = classify.classify_from_scores(0.0, 0.0, None)
         assert set(result.to_dict()) == {"label", "domain", "detector", "provider"}
 
 
