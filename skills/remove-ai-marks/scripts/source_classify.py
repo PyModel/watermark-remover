@@ -4,10 +4,13 @@
 # (image_io / forensic_124d / source_spectral / optional_deps), the extra hint
 # names this repo's distribution (watermark-remover[source-classify]),
 # is_available() also probes Pillow (part of the exact set the classify path
-# imports), and a failed hub download raises a RuntimeError carrying the
-# pinned repo/revision context instead of the bare transport error. The
-# feature pipeline, model schema validation, threshold tolerance, and
+# imports), a failed hub download raises a RuntimeError carrying the
+# pinned repo/revision context instead of the bare transport error, and the
+# env-override / hub-import prologue is shared with source_classify_v2 via
+# weights_resolution (the Hub download and its failure handling stay here).
+# The feature pipeline, model schema validation, threshold tolerance, and
 # abstention logic are verbatim.
+
 """Abstaining source/export-pipeline classification from image pixels.
 
 This module does not detect or decode SynthID. It labels original-export-looking
@@ -24,9 +27,10 @@ import os
 from dataclasses import dataclass
 from functools import lru_cache
 from hashlib import sha256
-from importlib import import_module
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
+
+from weights_resolution import import_hub_or_raise, resolve_env_override
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -103,19 +107,10 @@ def is_available() -> bool:
 
 
 def _model_path() -> Path:
-    override = os.environ.get(WEIGHTS_ENV, "").strip()
-    if override:
-        path = Path(override).expanduser()
-        candidate = path / MODEL_FILE if path.is_dir() else path
-        if not candidate.is_file():
-            raise RuntimeError(f"{WEIGHTS_ENV} does not contain {MODEL_FILE}: {path}")
-        return candidate
-    try:
-        hub: Any = import_module("huggingface_hub")
-    except ModuleNotFoundError as error:
-        raise RuntimeError(
-            f"Install {SOURCE_CLASSIFY_EXTRA} to download the source classifier"
-        ) from error
+    override = resolve_env_override(WEIGHTS_ENV, MODEL_FILE)
+    if override is not None:
+        return override
+    hub = import_hub_or_raise(f"Install {SOURCE_CLASSIFY_EXTRA} to download the source classifier")
     try:
         return Path(
             hub.hf_hub_download(

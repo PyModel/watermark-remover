@@ -1,9 +1,12 @@
 # Ported from wiltodelta/remove-ai-watermarks
 # src/remove_ai_watermarks/source_classify_v2.py, Apache-2.0; modified: the
 # hub-install hint names this repo's distribution
-# (watermark-remover[source-classify]) and an ``is_available()`` probe was
+# (watermark-remover[source-classify]), an ``is_available()`` probe was
 # added so callers (the identify signal collector) can gate on the exact
-# module set the classify path imports before running. The spectral template
+# module set the classify path imports before running, and the
+# env-override / hub-import prologue is shared with source_classify via
+# weights_resolution (the Hub download stays here and propagates a bare
+# transport error, as upstream does). The spectral template
 # scoring, threshold routing, conflict handling, and abstention logic are
 # verbatim.
 """Opt-in OpenAI/Google export-source patterns in decoded image pixels.
@@ -18,9 +21,10 @@ import os
 from dataclasses import dataclass
 from functools import lru_cache
 from hashlib import file_digest
-from importlib import import_module
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, get_args
+
+from weights_resolution import import_hub_or_raise, resolve_env_override
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -99,19 +103,12 @@ def is_available() -> bool:
 
 
 def _model_path() -> Path:
-    override = os.environ.get(WEIGHTS_ENV, "").strip()
-    if override:
-        path = Path(override).expanduser()
-        candidate = path / MODEL_FILE if path.is_dir() else path
-        if not candidate.is_file():
-            raise RuntimeError(f"{WEIGHTS_ENV} does not contain {MODEL_FILE}: {path}")
-        return candidate
-    try:
-        hub: Any = import_module("huggingface_hub")
-    except ModuleNotFoundError as error:
-        raise RuntimeError(
-            "Install 'watermark-remover[source-classify]' for image-source weights"
-        ) from error
+    override = resolve_env_override(WEIGHTS_ENV, MODEL_FILE)
+    if override is not None:
+        return override
+    hub = import_hub_or_raise(
+        "Install 'watermark-remover[source-classify]' for image-source weights"
+    )
     return Path(
         hub.hf_hub_download(repo_id=WEIGHTS_REPO, filename=MODEL_FILE, revision=WEIGHTS_REVISION)
     )
