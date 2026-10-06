@@ -140,6 +140,30 @@ def _c2pa_hints(path: Path, lib: dict[str, Any] | None) -> dict[str, Any]:
     return {"scanned": True, "source": "stdlib-fallback", "reason": None, **scan_c2pa_hints(path)}
 
 
+def _trustmark_finding(path: Path) -> dict[str, Any]:
+    """Adobe TrustMark soft-binding evidence, only when the decoder is importable.
+
+    TrustMark Variant P is the in-content watermark behind Adobe Durable
+    Content Credentials: after a manifest strip it can still re-link the
+    asset, so a durable decode IS soft-binding evidence. Fail-soft: an absent
+    extra, an unreadable image, or a crashed decoder never produces a negative
+    finding -- the entry says what it could not run. Requires the optional
+    ``trustmark`` extra (weights download on first use); decoding never raises
+    out of this function.
+    """
+    import trustmark_detector
+
+    entry: dict[str, Any] = {"available": False, "scheme": None}
+    try:
+        if not trustmark_detector.is_available():
+            return entry
+        entry["available"] = True
+        entry["scheme"] = trustmark_detector.detect_trustmark(path)
+    except Exception as exc:
+        entry["error"] = repr(exc)[:300]
+    return entry
+
+
 def inspect_soft_binding(path: Path) -> dict[str, Any]:
     data = read_bytes_bounded(path, MAX_SCAN_BYTES, label="soft-binding scan file")
     scan = _scan_bytes(data)
@@ -154,7 +178,22 @@ def inspect_soft_binding(path: Path) -> dict[str, Any]:
         if lib.get("soft_binding_labels") or remote_url:
             scan["has_c2pa"] = True
 
-    found = bool(scan["has_c2pa"] and (scan["labels"] or scan["urls"]))
+    trustmark = _trustmark_finding(path)
+    tm_scheme = trustmark.get("scheme")
+    found = bool(scan["has_c2pa"] and (scan["labels"] or scan["urls"])) or bool(tm_scheme)
+    warning = (
+        "Soft binding / remote manifest detected: stripping embedded metadata "
+        "may NOT remove provenance — a verifier can re-link the remote manifest "
+        "or recover via the in-content watermark."
+        if found
+        else None
+    )
+    if tm_scheme:
+        warning = (warning + " " if warning else "") + (
+            f"{tm_scheme} decoded in-content: Adobe TrustMark can re-link Durable "
+            "Content Credentials after a strip (a provenance signal, not proof of "
+            "AI origin)."
+        )
     return {
         "path": str(path),
         "has_c2pa": scan["has_c2pa"],
@@ -163,15 +202,10 @@ def inspect_soft_binding(path: Path) -> dict[str, Any]:
             "labels": scan["labels"],
             "manifest_urls": scan["urls"],
         },
+        "trustmark": trustmark,
         "c2pa_lib": lib or {"available": False},
         "c2pa_hints": _c2pa_hints(path, lib),
-        "warning": (
-            "Soft binding / remote manifest detected: stripping embedded metadata "
-            "may NOT remove provenance — a verifier can re-link the remote manifest "
-            "or recover via the in-content watermark."
-            if found
-            else None
-        ),
+        "warning": warning,
         "note": (
             "Detection only. This project does not remove in-content (soft-bound) "
             "watermarks; see DESIGN.md out-of-scope."
