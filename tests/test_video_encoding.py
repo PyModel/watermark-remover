@@ -258,3 +258,81 @@ def test_remux_can_keep_metadata_when_asked(monkeypatch, tmp_path: Path) -> None
 
     assert "-map_metadata" not in seen[0]
     assert "-movflags" not in seen[0]
+
+
+def test_a_remux_killed_mid_write_leaves_no_destination(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"source-bytes")
+    dest = tmp_path / "never-published.mp4"
+
+    def killed(argv, **_kwargs):
+        Path(argv[-1]).write_bytes(b"half a container")  # ffmpeg died mid-write
+        raise video_encoding.ExternalCommandTimeout("killed after partial output")
+
+    monkeypatch.setattr(video_encoding, "run_command", killed)
+
+    with pytest.raises(video_encoding.VideoEncodingError):
+        video_encoding.remux_video(source, dest)
+
+    assert not dest.exists()
+    assert not list(tmp_path.glob(".*"))
+
+
+def test_a_failed_remux_never_replaces_an_existing_destination(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"source-bytes")
+    dest = tmp_path / "out.mp4"
+    dest.write_bytes(b"the previous good output")
+
+    def failed(argv, **_kwargs):
+        Path(argv[-1]).write_bytes(b"half a container")
+        return fake_command_result(1, stderr="Invalid argument")
+
+    monkeypatch.setattr(video_encoding, "run_command", failed)
+
+    with pytest.raises(video_encoding.VideoEncodingError, match="Invalid argument"):
+        video_encoding.remux_video(source, dest)
+
+    assert dest.read_bytes() == b"the previous good output"
+    assert not list(tmp_path.glob(".*"))
+
+
+def test_an_absent_ffmpeg_fails_labeled_without_writing(monkeypatch, tmp_path: Path) -> None:
+    def missing(*_args, **_kwargs):
+        raise FileNotFoundError("ffmpeg")
+
+    monkeypatch.setattr(video_encoding, "run_command", missing)
+    dest = tmp_path / "out.mp4"
+
+    with pytest.raises(video_encoding.VideoEncodingError, match="ffmpeg is unavailable"):
+        video_encoding.remux_video(tmp_path / "clip.mp4", dest)
+
+    assert not dest.exists()
+
+
+def test_a_filename_with_quotes_and_spaces_is_passed_as_one_argument(
+    monkeypatch, tmp_path: Path
+) -> None:
+    source = tmp_path / 'clip "quoted" and spaced.mp4'
+    source.write_bytes(b"source-bytes")
+    dest = tmp_path / 'out "copy" 2026.mp4'
+    seen: list = []
+
+    def fake_run(argv, **_kwargs):
+        seen.append(argv)
+        if argv[0] == "ffprobe":
+            return fake_command_result(0, stdout=_PROFILE_JSON)
+        Path(argv[-1]).write_bytes(b"remuxed-bytes")
+        return fake_command_result(0)
+
+    monkeypatch.setattr(video_encoding, "run_command", fake_run)
+
+    profile = video_encoding.probe_video_encode_profile(source)
+    video_encoding.remux_video(source, dest)
+
+    assert profile.pixel_format == "yuv422p"
+    assert dest.read_bytes() == b"remuxed-bytes"
+    for argv in seen:
+        assert not isinstance(argv, (str, bytes))
+        assert all(isinstance(argument, str) for argument in argv)
+        assert sum(1 for argument in argv if argument == str(source)) == 1
