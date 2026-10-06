@@ -407,3 +407,29 @@ def test_a_real_video_loses_its_marker_and_keeps_its_frames_and_audio(
     # No frame changed, and the audio is the original bitstream.
     assert _stream_md5(dest, "0:v:0") == video_before
     assert _stream_md5(dest, "0:a:0") == audio_before
+
+
+def test_a_remux_that_fails_leaves_the_destination_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defensive tier 2: the destination appears only after a completed write."""
+    import clean_pipeline
+    import video_encoding
+    from clean_request import CleanRequest
+
+    _fake_runtime(tmp_path, monkeypatch)
+    src = tmp_path / "clip.mkv"
+    src.write_bytes(matroska(LABEL))
+    dest = tmp_path / "out.mkv"
+    dest.write_bytes(b"the previous good output")
+
+    def failed(argv, **_kwargs):
+        Path(argv[-1]).write_bytes(b"half a container")  # ffmpeg died mid-write
+        return fake_command_result(1, stderr="Invalid argument")
+
+    monkeypatch.setattr(video_encoding, "run_command", failed)
+    run = clean_pipeline.execute(CleanRequest(paths=(src,), output=dest))
+
+    assert run.payload["exit_code"] == 1
+    assert dest.read_bytes() == b"the previous good output"
+    assert not list(tmp_path.glob(".*"))  # the staged sibling was removed
