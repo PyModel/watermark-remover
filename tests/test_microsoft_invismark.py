@@ -310,3 +310,40 @@ def test_c2pa_wheel_path_parses_a_manifest_store(
 
     monkeypatch.setitem(sys.modules, "c2pa", make_module(b"{not json"))
     assert invismark_id_from_c2pa(source) is None
+
+
+# ---------------------------------------------------------------------------
+# identify signal (pure evidence-vocabulary mapping)
+# ---------------------------------------------------------------------------
+
+
+def test_identify_signal_maps_a_validated_payload_into_the_evidence_vocabulary() -> None:
+    import identify
+
+    signal = identify.microsoft_invismark_signal(_WATERMARK_ID)
+
+    assert signal["watermark_id"] == str(_WATERMARK_ID)
+    assert signal["asserts_ai"] is True
+    assert "InvisMark" in signal["finding"]
+    assert str(_WATERMARK_ID) in signal["finding"]
+    # Honesty contract: the fragility caveat rides along — absence is never clean.
+    assert "absence is never" in signal["note"]
+
+
+def test_identify_signal_absence_and_junk_are_unknown_never_clean() -> None:
+    import identify
+
+    for missing in (None, "not-a-uuid", 42):
+        signal = identify.microsoft_invismark_signal(missing)
+        assert signal["watermark_id"] is None
+        assert signal["asserts_ai"] is False
+        assert signal["finding"] is None
+        assert "absence is never" in signal["note"]
+
+
+def test_identify_signal_accepts_the_canonical_string_form() -> None:
+    import identify
+
+    signal = identify.microsoft_invismark_signal(str(_WATERMARK_ID).upper())
+    assert signal["watermark_id"] == str(_WATERMARK_ID)
+    assert signal["asserts_ai"] is True

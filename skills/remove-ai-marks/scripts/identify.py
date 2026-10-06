@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -333,6 +334,45 @@ def invisible_watermark_signal(scheme: str | None) -> dict[str, Any]:
     }
 
 
+def microsoft_invismark_signal(watermark_id: Any) -> dict[str, Any]:
+    """Map a validated Paint invismark payload (or its absence) onto the vocabulary.
+
+    Pure mapping, fail-soft: ``watermark_id`` is the signed/decoded UUID the
+    clean-room pixel reader (``microsoft_invismark.detect_local_invismark``)
+    or the C2PA soft binding (``microsoft_invismark.invismark_id_from_c2pa``)
+    reported — a ``uuid.UUID``, its canonical string, or ``None``. Anything
+    unparsable maps to the same absence shape; the adapter never raises and
+    never produces a clean bill.
+    """
+    try:
+        parsed = uuid.UUID(str(watermark_id)) if watermark_id is not None else None
+    except (ValueError, AttributeError, TypeError):
+        parsed = None
+    if parsed is None:
+        return {
+            "watermark_id": None,
+            "asserts_ai": False,
+            "finding": None,
+            "note": (
+                "no validated Paint invismark payload decoded — absence is never "
+                "clean (the pixel payload does not survive re-encoding, and the "
+                "external Microsoft detector is not available here)"
+            ),
+        }
+    return {
+        "watermark_id": str(parsed),
+        "asserts_ai": True,
+        "finding": (
+            f"Microsoft InvisMark pixel watermark {parsed} (validated repeated "
+            "144-bit DCT payload, clean-room reader)"
+        ),
+        "note": (
+            "pristine-output signal: re-encoding or resizing destroys the "
+            "payload, so absence is never proof of cleanliness"
+        ),
+    }
+
+
 def identify_file(path: Path) -> ProvenanceVerdict:
     """Collect once from ``path`` and judge — the file-side entry point.
 
@@ -365,5 +405,6 @@ __all__ = [
     "identify_from_json",
     "identify_from_record",
     "invisible_watermark_signal",
+    "microsoft_invismark_signal",
     "unknown_verdict",
 ]
