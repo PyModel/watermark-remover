@@ -21,6 +21,7 @@ import types
 from pathlib import Path
 
 import pytest
+from packaging.requirements import Requirement
 
 from conftest import fake_command_result
 
@@ -336,3 +337,109 @@ def test_a_filename_with_quotes_and_spaces_is_passed_as_one_argument(
         assert not isinstance(argv, (str, bytes))
         assert all(isinstance(argument, str) for argument in argv)
         assert sum(1 for argument in argv if argument == str(source)) == 1
+
+
+_FFMPEG = shutil.which("ffmpeg")
+_FFPROBE = shutil.which("ffprobe")
+requires_video_tools = pytest.mark.skipif(
+    _FFMPEG is None or _FFPROBE is None,
+    reason="ffmpeg/ffprobe are not on PATH; their absence is the labeled-default path",
+)
+
+
+def _tool(argv: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(argv, capture_output=True, check=False, timeout=120.0)
+
+
+def _audio_bitstream_md5(path: Path) -> str:
+    """The audio elementary bitstream's hash, read with a stream copy."""
+    result = _tool([_FFMPEG, "-v", "error", "-i", str(path), "-map", "0:a:0", "-c", "copy", "-f", "md5", "-"])
+    assert result.returncode == 0, result.stderr.decode()
+    return result.stdout.decode().strip()
+
+
+@requires_video_tools
+def test_a_real_clip_probes_and_remuxes_with_the_audio_bitstream_intact(tmp_path: Path) -> None:
+    """The one measurement a fake cannot make: real tools, real bytes."""
+    source = tmp_path / "source.mp4"
+    created = _tool(
+        [
+            _FFMPEG,
+            "-y",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=64x48:rate=10:duration=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=44100:duration=1",
+            "-c:v",
+            "mpeg4",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-shortest",
+            str(source),
+        ]
+    )
+    assert created.returncode == 0, created.stderr.decode()
+    assert source.stat().st_size > 0
+
+    profile = video_encoding.probe_video_encode_profile(source)
+    assert profile.is_default is False
+    assert profile.pixel_format == "yuv420p"
+    assert profile.frame_rate == "10/1"
+    assert profile.time_base is not None
+    assert profile.start_pts == 0
+
+    timestamps = video_encoding.probe_video_timestamps(source)
+    assert len(timestamps) == 10
+    assert timestamps[0] == 0.0
+
+    dest = tmp_path / "remuxed.mp4"
+    video_encoding.remux_video(source, dest)
+
+    # Playable: ffprobe reads the destination and both streams are present.
+    assert dest.exists()
+    streams = _tool(
+        [
+            _FFPROBE,
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "csv=p=0",
+            str(dest),
+        ]
+    )
+    assert streams.returncode == 0, streams.stderr.decode()
+    kinds = streams.stdout.decode().split()
+    assert "video" in kinds
+    assert "audio" in kinds
+
+    # The audio bitstream is byte-identical: the packets were copied, not
+    # re-encoded.
+    assert _audio_bitstream_md5(dest) == _audio_bitstream_md5(source)
+
+
+@pytest.mark.skipif(sys.version_info < (3, 11), reason="tomllib requires Python 3.11+")
+def test_the_video_extra_declares_the_pyav_pin_and_the_python_floor() -> None:
+    import tomllib
+
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+
+    # The core keeps the 3.10 floor; the video extra carries av's own 3.11
+    # floor, expressed as the environment marker that scopes the dependency.
+    assert project["requires-python"] == ">=3.10"
+    requirements = [Requirement(entry) for entry in project["optional-dependencies"]["video"]]
+    pyav = next(requirement for requirement in requirements if requirement.name == "av")
+    assert str(pyav.specifier) == "<19,>=18"
+    assert pyav.marker is not None
+    assert pyav.marker.evaluate({"python_version": "3.10"}) is False
+    assert pyav.marker.evaluate({"python_version": "3.11"}) is True
+    assert pyav.marker.evaluate({"python_version": "3.14"}) is True
