@@ -362,7 +362,7 @@ _OPENAPI_PATHS: dict[str, dict[str, Any]] = {
     },
     "/detect": {
         "post": {
-            "summary": "Run watermark detectors on a file (text: vendor/statistical; image: SynthID score + open DWT-DCT payload)",
+            "summary": "Run watermark detectors on a file (text: vendor/statistical; image: SynthID score, open DWT-DCT payload, pixel-evidence families, forensic-metadata dump)",
             "requestBody": _schema(
                 required=True,
                 content={"application/json": _schema(schema=_file_request())},
@@ -592,6 +592,63 @@ def _invisible_watermark_detection(path: Path) -> dict[str, Any]:
     return entry
 
 
+def _pixel_evidence_detection(path: Path) -> dict[str, Any]:
+    """The pixel-forensics evidence entry for ``/detect`` images: fail-soft.
+
+    Collects the six statistic families through the ``pixel_evidence``
+    collector — bounded by construction (the 2048px analysis cap bounds every
+    array) — and reports the identify signal vocabulary plus the versioned
+    payload. The image-identifying artifacts layer is never requested here: a
+    ``/detect`` response carries aggregates, not image content. Every failure
+    mode is an explicit entry — an absent numeric stack or a crashed collector
+    never produces a negative finding, and nothing measured is never claimed.
+    """
+    import pixel_evidence
+    from identify import pixel_evidence_signal
+
+    entry: dict[str, Any] = {"detector": "pixel_evidence"}
+    try:
+        if not pixel_evidence.is_available():
+            entry["available"] = False
+            entry["error"] = (
+                "pixel numeric stack not installed (numpy); install "
+                "watermark-remover[pixel] to collect pixel evidence"
+            )
+            return entry
+        entry["available"] = True
+        evidence = pixel_evidence.extract_pixel_evidence(path)
+    except Exception as exc:
+        entry["error"] = f"pixel evidence collection failed: {exc!r}"
+        return entry
+    payload = evidence.to_dict()
+    entry.update(pixel_evidence_signal(payload))
+    entry["evidence"] = payload
+    return entry
+
+
+def _forensic_metadata_detection(path: Path) -> dict[str, Any]:
+    """The raw forensic-metadata dump for ``/detect`` images: fail-soft.
+
+    ``forensic_metadata.collect_forensic_metadata`` (04's collector) is
+    consumed read-only: the entry carries the identify signal summary plus the
+    versioned record verbatim — the dump is forwarded, not re-interpreted. A
+    collection failure is an explicit error entry; it is never a negative
+    finding and never a clean verdict.
+    """
+    import forensic_metadata
+    from identify import forensic_metadata_signal
+
+    entry: dict[str, Any] = {"detector": "forensic_metadata"}
+    try:
+        record = forensic_metadata.collect_forensic_metadata(path)
+    except Exception as exc:
+        entry["error"] = f"forensic metadata collection failed: {exc!r}"
+        return entry
+    entry.update(forensic_metadata_signal(record))
+    entry["record"] = record
+    return entry
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = f"watermark-remover/{VERSION}"
 
@@ -784,7 +841,12 @@ class Handler(BaseHTTPRequestHandler):
                     }
                 else:
                     score.setdefault("detector", "synthid")
-                detections = [score, _invisible_watermark_detection(path)]
+                detections = [
+                    score,
+                    _invisible_watermark_detection(path),
+                    _pixel_evidence_detection(path),
+                    _forensic_metadata_detection(path),
+                ]
             else:
                 detections = []
                 report = inspect_container(path).to_dict()

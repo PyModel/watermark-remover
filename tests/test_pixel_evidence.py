@@ -372,6 +372,20 @@ def _dump(path: Path, pixels: np.ndarray) -> Path:
     return path
 
 
+def _post_detect(conn, b64: str, name: str) -> tuple[int, dict[str, Any]]:
+    import json
+
+    conn.request(
+        "POST",
+        "/detect",
+        body=json.dumps({"file": b64, "name": name}).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    resp = conn.getresponse()
+    data = resp.read()
+    return resp.status, json.loads(data) if data else {}
+
+
 class TestIdentifySignal:
     """The identify-side seam: pure adapters that map collected evidence onto
     the finding vocabulary. They never run a collector, never raise, and never
@@ -446,3 +460,121 @@ class TestIdentifySignal:
             assert signal["finding"] is None
             assert signal["sections"] == []
             assert "never" in signal["note"]
+
+
+class TestDetectImageWiring:
+    """The ``/detect`` image surface: pixel evidence and the raw forensic
+    metadata dump ride along as explicit detector entries — fail-soft, bounded,
+    and honest (an entry that could not run says so; it never says "clean").
+    These exercise the in-process HTTP server like tests/test_detect_wiring.py."""
+
+    @pytest.fixture(scope="class")
+    def conn(self):
+        import http.client
+        import threading
+
+        import server
+
+        srv = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        thread.start()
+        c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1])
+        yield c
+        c.close()
+        srv.shutdown()
+        srv.server_close()
+        thread.join(timeout=5)
+
+    def _detect(self, conn, path: Path) -> dict[str, Any]:
+        import base64
+
+        status, body = _post_detect(
+            conn, base64.b64encode(path.read_bytes()).decode("ascii"), "pic.png"
+        )
+        assert status == 200, body
+        assert body["kind"] == "image"
+        return body
+
+    def _entry(self, body: dict[str, Any], name: str) -> dict[str, Any]:
+        matches = [d for d in body["detections"] if d.get("detector") == name]
+        assert matches, body["detections"]
+        return matches[0]
+
+    def test_detect_image_carries_the_pixel_evidence_entry(self, conn, tmp_path: Path) -> None:
+        from pixel_evidence import PIXEL_EVIDENCE_SCHEMA_VERSION
+
+        body = self._detect(conn, _textured(tmp_path / "wired.png"))
+        entry = self._entry(body, "pixel_evidence")
+
+        assert entry["available"] is True
+        assert entry["asserts_ai"] is False
+        assert set(entry["families"]) == set(FAMILIES)
+        payload = entry["evidence"]
+        assert payload["schema_version"] == PIXEL_EVIDENCE_SCHEMA_VERSION
+        assert payload["status"] == "complete"
+        assert payload["artifacts"] == {}  # aggregates ride; image content does not
+        assert "path" not in entry
+
+    def test_detect_image_carries_the_forensic_metadata_dump(self, conn, tmp_path: Path) -> None:
+        body = self._detect(conn, _textured(tmp_path / "dump.png"))
+        entry = self._entry(body, "forensic_metadata")
+
+        assert entry["present"] is True
+        assert entry["record_type"] == "forensic_metadata"
+        assert entry["record"]["record_type"] == "forensic_metadata"  # the raw dump, read-only
+        assert entry["record"]["schema_version"] == 1
+        assert "png_chunks" in entry["record"]  # the collector's real evidence, verbatim
+        assert entry["sections"] == sorted(entry["sections"])
+
+    def test_detect_pixel_evidence_crash_is_fail_soft(
+        self, conn, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import pixel_evidence
+
+        def boom(*args: object, **kwargs: object) -> object:
+            raise RuntimeError("collector exploded")
+
+        monkeypatch.setattr(pixel_evidence, "extract_pixel_evidence", boom)
+        body = self._detect(conn, _textured(tmp_path / "crash.png"))
+        entry = self._entry(body, "pixel_evidence")
+
+        assert entry["available"] is True
+        assert "collector exploded" in entry["error"]
+        assert "families" not in entry  # no measurement happened: nothing claimed
+
+    def test_detect_forensic_metadata_crash_is_fail_soft(
+        self, conn, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import forensic_metadata
+
+        def boom(*args: object, **kwargs: object) -> object:
+            raise RuntimeError("reader exploded")
+
+        monkeypatch.setattr(forensic_metadata, "collect_forensic_metadata", boom)
+        body = self._detect(conn, _textured(tmp_path / "crash2.png"))
+        entry = self._entry(body, "forensic_metadata")
+
+        assert "reader exploded" in entry["error"]
+        assert "present" not in entry  # no record: nothing claimed
+
+    def test_detect_without_the_pixel_numeric_stack_is_unavailable_not_clean(
+        self, conn, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import optional_deps
+        import pixel_evidence
+
+        real_module_available = optional_deps.module_available
+
+        def without_numpy(*names: str) -> bool:
+            if "numpy" in names:
+                return False
+            return real_module_available(*names)
+
+        monkeypatch.setattr(optional_deps, "module_available", without_numpy)
+        monkeypatch.setattr(pixel_evidence, "is_available", lambda: False)
+        body = self._detect(conn, _textured(tmp_path / "nostack.png"))
+        entry = self._entry(body, "pixel_evidence")
+
+        assert entry["available"] is False
+        assert "error" in entry
+        assert "pixel" in entry["error"]
