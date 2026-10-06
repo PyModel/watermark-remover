@@ -52,6 +52,9 @@ _TEXT_EXTENSIONS = frozenset(
 )
 SUPPORTED_EXTENSIONS = _IMAGE_EXTENSIONS | _CONTAINER_EXTENSIONS | _TEXT_EXTENSIONS
 
+#: Kinds a caller may force (``forced_kind`` / ``--as``). Video is excluded
+#: until its plan exists: ``CleanPlan`` refuses a forced video too, so allowing it
+#: here would only route video bytes into the container cleaner by override.
 _ASSET_KINDS: tuple[AssetKind, ...] = ("text", "image", "container", "unknown")
 _SNIFF_BYTES = 4096  # HEIF brand detection scans at most the first 4 KiB.
 
