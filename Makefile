@@ -1,4 +1,4 @@
-.PHONY: check lint format-check format lint-fix compile test smoke verify tui-check web-check packaging ci smoke-synthid bootstrap-synthid docker-synthid-build docker-synthid-help \
+.PHONY: check lint format-check format lint-fix compile test smoke verify tui-check web-check pages-check pages-deploy packaging ci smoke-synthid bootstrap-synthid docker-synthid-build docker-synthid-help \
 	smoke-ctrlregen bootstrap-ctrlregen docker-ctrlregen-build docker-ctrlregen-help \
 	smoke-markllm bootstrap-markllm docker-markllm-build docker-markllm-help \
 	smoke-markdiffusion bootstrap-markdiffusion docker-markdiffusion-build docker-markdiffusion-help \
@@ -11,7 +11,7 @@ PYTHON ?= $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; else e
 check: lint format-check compile test smoke verify
 
 # Same local gates as CI; Bun is required for frontend/packaging checks.
-ci: check tui-check web-check packaging
+ci: check tui-check web-check pages-check packaging
 
 tui-check:
 	cd skills/remove-ai-marks/tui && bun install --frozen-lockfile && bun run typecheck && bun test
@@ -21,6 +21,15 @@ web-check:
 	cd skills/remove-ai-marks/web && bun install --frozen-lockfile && bun run typecheck && bun test && bun run build
 	git diff --exit-code --stat -- skills/remove-ai-marks/web/dist
 	test -z "$$(git status --porcelain -- skills/remove-ai-marks/web/dist)"
+
+# The static site (Cloudflare Pages): same page, cleaners run in the browser via Pyodide.
+# The engine test compares every answer with native Python ($(PYTHON) needs Pillow and pypdf).
+PYTHON_PATH = $(if $(findstring /,$(PYTHON)),$(abspath $(PYTHON)),$(shell command -v $(PYTHON)))
+pages-check:
+	cd skills/remove-ai-marks/web && bun install --frozen-lockfile && bun run build:pages && WM_PYTHON="$(PYTHON_PATH)" bun run test:pages
+
+pages-deploy: pages-check
+	cd skills/remove-ai-marks/web && bunx wrangler@4 pages deploy dist-pages --project-name watermark-remover --branch main
 
 packaging:
 	WM_PACKAGING_E2E=1 $(PYTHON) -m pytest tests/test_packaging.py -q

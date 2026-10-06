@@ -134,6 +134,9 @@ export const REWRITE_STRENGTHS = ["paraphrase", "backtranslate", "structural", "
 export type Strength = (typeof REWRITE_STRENGTHS)[number]
 export type Box = [number, number, number, number]
 
+import { send } from "./engine"
+import { BROWSER } from "./target"
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -161,24 +164,37 @@ export function setApiKey(value: string) {
   }
 }
 
-async function call<T>(path: string, body?: unknown): Promise<T> {
+type Payload = { ok?: boolean; error?: unknown } | null
+
+/** One request -> (status, parsed JSON). wm-serve over fetch, or the in-page engine. */
+async function transport(path: string, body?: unknown): Promise<{ status: number; ok: boolean; payload: Payload }> {
+  const json = body === undefined ? undefined : JSON.stringify(body)
+  if (BROWSER) {
+    const answer = await send({ type: "call", method: json === undefined ? "GET" : "POST", path, body: json })
+    if (answer.status === 0) throw new ApiError(UNREACHABLE, 0)
+    return { status: answer.status, ok: answer.status < 400, payload: JSON.parse(answer.payload) }
+  }
   const headers: Record<string, string> = {}
   const key = apiKey()
   if (key) headers.Authorization = `Bearer ${key}`
-  if (body !== undefined) headers["Content-Type"] = "application/json"
+  if (json !== undefined) headers["Content-Type"] = "application/json"
   let response: Response
   try {
-    response = await fetch(path, {
-      method: body === undefined ? "GET" : "POST",
-      headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
-    })
+    response = await fetch(path, { method: json === undefined ? "GET" : "POST", headers, body: json })
   } catch {
-    throw new ApiError("Can't reach wm-serve. Check that it is still running, then try again.", 0)
+    throw new ApiError(UNREACHABLE, 0)
   }
-  const payload = await response.json().catch(() => null)
-  if (response.ok && payload?.ok !== false) return payload as T
-  throw new ApiError(errorMessage(response.status, payload?.error), response.status)
+  return { status: response.status, ok: response.ok, payload: await response.json().catch(() => null) }
+}
+
+const UNREACHABLE = BROWSER
+  ? "The cleaning engine didn't load. Check your connection, then try again."
+  : "Can't reach wm-serve. Check that it is still running, then try again."
+
+async function call<T>(path: string, body?: unknown): Promise<T> {
+  const { status, ok, payload } = await transport(path, body)
+  if (ok && payload?.ok !== false) return payload as unknown as T
+  throw new ApiError(errorMessage(status, payload?.error), status)
 }
 
 function errorMessage(status: number, serverMessage: unknown): string {
@@ -190,8 +206,17 @@ function errorMessage(status: number, serverMessage: unknown): string {
   if (status === 403 && typeof serverMessage === "string" && serverMessage.includes("cross-origin")) {
     return "The server refused a request from another site."
   }
+  if (BROWSER && status === 502 && typeof serverMessage === "string" && /connection failed|timed out/.test(serverMessage)) {
+    return /timed out/.test(serverMessage)
+      ? "Your model server didn't answer in time. Try a shorter text or a lighter strength."
+      : "Couldn't reach your model server. Check it's running and allows this site; the Engine view lists the steps."
+  }
   if (status === 502 && typeof serverMessage === "string") return sentenceCase(serverMessage)
-  if (status >= 500) return "wm-serve hit an internal error. Its terminal log has the details."
+  if (status >= 500) {
+    return BROWSER
+      ? "The cleaning engine hit an internal error. Reload the page and try again."
+      : "wm-serve hit an internal error. Its terminal log has the details."
+  }
   if (typeof serverMessage === "string" && serverMessage.includes("binary container as text")) {
     return "This looks like a binary file with a text extension. Rename it with its real extension, such as .docx or .pdf, and drop it again."
   }
@@ -207,7 +232,10 @@ function sentenceCase(message: string): string {
   return text.charAt(0).toUpperCase() + text.slice(1) + (/[.!?]$/.test(text) ? "" : ".")
 }
 
-export const capabilities = () => call<Capabilities>("/capabilities")
+export const capabilities = async () => {
+  if (BROWSER) await send({ type: "configure", settings: JSON.stringify(modelServer() ?? {}) })
+  return call<Capabilities>("/capabilities")
+}
 export const inspect = (file: string, name: string) => call<Inspection>("/inspect", { file, name })
 export const clean = (file: string, name: string, options: CleanOptions) =>
   call<Cleaned>("/clean", { file, name, options })
@@ -216,6 +244,39 @@ export const rewrite = (file: string, name: string, strength: Strength, lang?: s
   call<Cleaned>("/rewrite", { file, name, strength, ...(lang ? { lang } : {}) })
 export const removeVisible = (file: string, name: string, box: Box, backend: "texture" | "simple") =>
   call<Cleaned>("/visible", { file, name, box, backend })
+
+/** The visitor's own model server for Rewrite (static build only); kept in this browser. */
+export interface ModelServer {
+  backend: "ollama" | "openai-compatible"
+  base_url: string
+  model: string
+  api_key: string
+}
+const MODEL_SERVER = "wm-model-server"
+export const DEFAULT_MODEL_SERVER: ModelServer = { backend: "ollama", base_url: "http://localhost:11434", model: "", api_key: "" }
+
+function savedModelServer(): ModelServer | null {
+  try {
+    const saved = JSON.parse(localStorage.getItem(MODEL_SERVER) ?? "null")
+    return saved && typeof saved === "object" ? { ...DEFAULT_MODEL_SERVER, ...saved } : null
+  } catch {
+    return null
+  }
+}
+// The copy in memory is what the engine gets, so blocked storage only costs persistence.
+let current = savedModelServer()
+
+export const modelServer = (): ModelServer | null => current
+
+export function setModelServer(value: ModelServer | null) {
+  current = value
+  try {
+    if (value) localStorage.setItem(MODEL_SERVER, JSON.stringify(value))
+    else localStorage.removeItem(MODEL_SERVER)
+  } catch {
+    // Private mode: the setting lasts until the tab closes.
+  }
+}
 
 /** File -> base64 without building a giant binary string by hand. */
 export function toBase64(blob: Blob): Promise<string> {

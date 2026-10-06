@@ -90,9 +90,20 @@ p {
     linear-gradient(145deg, #f6f8fa 0%, #eef2f4 58%, #f4f7f9 100%);
   background-attachment: fixed;
 }
+/* The top bar and the view rail stay put while the page scrolls under them. */
+.shell {
+  --topbar-h: 80px;
+}
 .topbar {
-  min-height: 88px;
-  padding: 20px 32px 16px 22px;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  min-height: var(--topbar-h);
+  padding: 14px 32px 14px 22px;
+  background: rgba(244, 247, 249, 0.8);
+  backdrop-filter: saturate(1.4) blur(14px);
+  -webkit-backdrop-filter: saturate(1.4) blur(14px);
+  box-shadow: 0 1px 0 var(--line-soft);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -156,6 +167,10 @@ p {
   padding: 0 32px 32px 18px;
 }
 .sidebar {
+  position: sticky;
+  top: var(--topbar-h);
+  align-self: start;
+  z-index: 10;
   padding-top: 34px;
   display: flex;
   flex-direction: column;
@@ -854,7 +869,7 @@ label.button:focus-within {
 }
 .document {
   position: sticky;
-  top: 14px;
+  top: calc(var(--topbar-h) + 14px);
 }
 .side {
   display: flex;
@@ -1305,7 +1320,9 @@ mark,
 }
 
 @media (max-width: 850px) {
+  /* The wrapped top bar is too tall to pin on a phone; the view row pins instead. */
   .topbar {
+    position: static;
     padding: 16px;
     flex-wrap: wrap;
   }
@@ -1352,9 +1369,13 @@ mark,
     padding: 0 14px 22px;
   }
   .sidebar {
+    top: 0;
     flex-direction: row;
-    padding-top: 0;
+    padding: 8px 0;
     justify-content: flex-start;
+    background: rgba(244, 247, 249, 0.8);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
   }
   .hero {
     min-height: auto;
@@ -1410,4 +1431,57 @@ mark,
     transition: none !important;
     animation: none !important;
   }
+}
+
+/* Engine view (static build): the visitor's model server and the steps to allow this page. */
+.model-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.field select {
+  height: 40px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  font-size: 14px;
+  min-width: 0;
+  width: 100%;
+}
+.field select:focus {
+  outline: none;
+  box-shadow: var(--focus);
+}
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.setup .sub:not(:first-child) {
+  margin-top: 14px;
+}
+.steps {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+.steps code,
+.setup code {
+  font-family: var(--mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.command {
+  display: block;
+  margin: 6px 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--well);
+  user-select: all;
 }

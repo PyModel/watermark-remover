@@ -2,6 +2,7 @@ import { useState } from "react"
 import { apiKey, type Capabilities } from "./api"
 import type { Connection } from "./App"
 import { Icon } from "./icons"
+import { BROWSER } from "./target"
 import { Card, Check, Chip, StatRow, formatBytes, type Tone } from "./ui"
 
 interface Row {
@@ -18,6 +19,8 @@ export function capabilityRows(caps: Capabilities): Row[] {
   const layerB = caps.layer_b
   const off = (feature: string) => caps.disabled.includes(feature)
   const offHere: [Tone, string] = ["off", "Off on this server"]
+  const browserOnly: [Tone, string] = ["off", "Not in the browser"]
+  const keysHint = "Needs API keys, so it only runs in wm-serve on your own machine."
   const offHint = "This public server turns it off so visitors can't spend its model or API keys. Run wm-serve yourself to use it."
   const rows: Row[] = [
     { name: "Hidden characters", enables: "Find and remove zero-width and other invisible Unicode in text", status: ready },
@@ -34,32 +37,36 @@ export function capabilityRows(caps: Capabilities): Row[] {
         : layerB.configured
         ? layerB.endpoint_allowed
           ? `${layerB.backend} at ${layerB.base_url_host}${layerB.loopback ? " (this machine)" : ""}`
-          : `${layerB.base_url_host} is not this machine. Set WATERMARKS_REWRITE_ALLOW_REMOTE=1 to send text there.`
-        : "Set WATERMARKS_REWRITE_BACKEND, WATERMARKS_REWRITE_MODEL and WATERMARKS_REWRITE_BASE_URL, then restart wm-serve.",
+          : BROWSER
+            ? `${layerB.base_url_host} is not this computer. Only a model server on localhost can be used here.`
+            : `${layerB.base_url_host} is not this machine. Set WATERMARKS_REWRITE_ALLOW_REMOTE=1 to send text there.`
+        : BROWSER
+          ? "Add your own model server in the Engine view."
+          : "Set WATERMARKS_REWRITE_BACKEND, WATERMARKS_REWRITE_MODEL and WATERMARKS_REWRITE_BASE_URL, then restart wm-serve.",
     },
     {
       name: "SynthID scorer",
       enables: "Score images for a SynthID watermark before and after cleaning",
-      status: off("detect") ? offHere : caps.scorers.synthid || caps.scorers.synthid_http ? ready : setup,
-      hint: off("detect") ? offHint : "Set WATERMARKS_SYNTHID_SCORER_URL or REVERSE_SYNTHID_DIR.",
+      status: BROWSER ? browserOnly : off("detect") ? offHere : caps.scorers.synthid || caps.scorers.synthid_http ? ready : setup,
+      hint: BROWSER ? "Needs a scorer model, so it only runs in wm-serve on your own machine." : off("detect") ? offHint : "Set WATERMARKS_SYNTHID_SCORER_URL or REVERSE_SYNTHID_DIR.",
     },
     ...Object.entries(caps.text_detectors).map(([name, on]): Row => ({
       name: `Detector: ${name}`,
       enables: "Check text for a vendor watermark. Sends the text to that detector.",
-      status: off("detect") ? offHere : on ? ready : setup,
-      hint: off("detect") ? offHint : on ? undefined : "Configure this detector's environment variables, then restart wm-serve.",
+      status: BROWSER ? browserOnly : off("detect") ? offHere : on ? ready : setup,
+      hint: BROWSER ? keysHint : off("detect") ? offHint : on ? undefined : "Configure this detector's environment variables, then restart wm-serve.",
     })),
     ...(["c2patool", "exiftool", "qpdf"] as const).map((tool): Row => ({
       name: tool,
       enables: { c2patool: "Read and verify C2PA manifests in depth", exiftool: "Extra metadata coverage for camera formats", qpdf: "Rebuild PDFs so removed objects are really gone" }[tool],
-      status: caps.tools[tool] ? ready : ["off", "Not installed"],
+      status: caps.tools[tool] ? ready : BROWSER ? browserOnly : ["off", "Not installed"],
       hint: caps.tools[tool] ? undefined : `Optional. Built-in cleaning still runs without ${tool}.`,
     })),
     ...Object.entries(caps.extras).map(([name, extra]): Row => ({
       name: `Extra: ${name}`,
       enables: `Optional Python extra watermark-remover[${name}]`,
-      status: extra.available ? ready : ["off", "Not installed"],
-      hint: extra.available ? undefined : extra.hint,
+      status: extra.available ? ready : BROWSER ? browserOnly : ["off", "Not installed"],
+      hint: extra.available ? undefined : BROWSER ? "Run wm-serve or the wm command line to use it." : extra.hint,
     })),
     {
       name: "Pixel regeneration",
@@ -153,29 +160,7 @@ export function ServerView({ connection, onRetry, onKey }: { connection: Connect
             </Card>
           </div>
 
-          <Card title="Capabilities" icon="database" className="table-card">
-            <div className="table" role="table" aria-label="Capabilities">
-              <div className="table-row table-head" role="row">
-                <span role="columnheader">Capability</span>
-                <span role="columnheader">What it does</span>
-                <span role="columnheader">Status</span>
-              </div>
-              {capabilityRows(caps).map((row) => (
-                <div className="table-row" role="row" key={row.name}>
-                  <span role="cell" className="table-name">
-                    {row.name}
-                  </span>
-                  <span role="cell" className="table-desc">
-                    {row.enables}
-                    {row.hint && <small>{row.hint}</small>}
-                  </span>
-                  <span role="cell">
-                    <Chip tone={row.status[0]}>{row.status[1]}</Chip>
-                  </span>
-                </div>
-              ))}
-            </div>
-          </Card>
+          <CapabilityTable caps={caps} />
         </>
       )}
 
@@ -232,5 +217,33 @@ export function KeyForm({ onSave, rejected, compact }: { onSave: (key: string) =
         </button>
       </div>
     </form>
+  )
+}
+
+export function CapabilityTable({ caps }: { caps: Capabilities }) {
+  return (
+    <Card title="Capabilities" icon="database" className="table-card">
+      <div className="table" role="table" aria-label="Capabilities">
+        <div className="table-row table-head" role="row">
+          <span role="columnheader">Capability</span>
+          <span role="columnheader">What it does</span>
+          <span role="columnheader">Status</span>
+        </div>
+        {capabilityRows(caps).map((row) => (
+          <div className="table-row" role="row" key={row.name}>
+            <span role="cell" className="table-name">
+              {row.name}
+            </span>
+            <span role="cell" className="table-desc">
+              {row.enables}
+              {row.hint && <small>{row.hint}</small>}
+            </span>
+            <span role="cell">
+              <Chip tone={row.status[0]}>{row.status[1]}</Chip>
+            </span>
+          </div>
+        ))}
+      </div>
+    </Card>
   )
 }

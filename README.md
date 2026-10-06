@@ -41,6 +41,7 @@ Optional edges, none required by the core:
 
 | Route | Best for | Needs |
 | --- | --- | --- |
+| Browser | Clean files without installing anything: [watermark.pymodel.com](https://watermark.pymodel.com) | A current browser; files never leave the device |
 | Agent skill | Ask your coding agent to inspect/clean a file | Python + a harness that can read skills and run commands |
 | PyPI package | Installed `wm` and `wm-tui` commands | Python; Bun for the TUI |
 | Clone / CLI | Development or running without installing the package | Python; Bun for the TUI |
@@ -455,6 +456,17 @@ The whole pipeline is also exposed over HTTP (stdlib-only, no web framework). Th
 
 Open `http://127.0.0.1:8765/` for the web UI. Drop one file or many: each is inspected, with every hidden character lit in place in the text (or the metadata found in an image or document). Clean one file or the whole queue, then download `NAME.cleaned.EXT`. Images also get visible-mark removal (drag a box over a logo) and optional SynthID band suppression. Text gets a Layer B rewrite and the watermark detectors, when the server has them configured. After every step the page has the server re-inspect the new bytes, so "nothing remains" is the inspector's finding. The Server view lists every capability with what to set to turn it on. The page is prebuilt React served by `wm-serve` itself (no Bun or Node needed to use it), loads nothing from other origins, and asks for the bearer key when the server has one.
 
+### In the browser
+
+[watermark.pymodel.com](https://watermark.pymodel.com) is the same page with the server replaced by the same Python modules running in the tab (Pyodide, Python compiled to WebAssembly). `pages/bridge.py` drives `server.Handler` without a socket, so every answer matches `wm-serve`; `make pages-check` compares them on text, HTML, AVIF, PNG, JPEG and PDF fixtures. Files are never uploaded: the page's Content-Security-Policy allows only its own origin and `localhost`, which you can confirm in the browser's network panel. The first visit downloads about 15 MB (Python, Pillow, pypdf, the cleaners), cached afterwards.
+
+What runs there: hidden characters, metadata for every format, visible-mark removal, SynthID band suppression, the style score, and Rewrite through your own model server on `localhost` (Ollama, LM Studio or any OpenAI-compatible server; the Engine view lists the steps, including `OLLAMA_ORIGINS`). Vendor detectors, the SynthID scorer and `exiftool`/`qpdf`/`c2patool` need keys or binaries, so they stay in `wm-serve` and the CLI. The browser limit is 40 MB per file.
+
+```bash
+make pages-check     # build web/dist-pages and compare the browser engine with native Python
+make pages-deploy    # pages-check, then wrangler pages deploy (needs Cloudflare login)
+```
+
 `/rewrite` uses only the model in the server's environment (`WATERMARKS_REWRITE_BACKEND`, `WATERMARKS_REWRITE_MODEL`, `WATERMARKS_REWRITE_BASE_URL`); a request that names its own endpoint, model or key is refused. `/visible` runs the built-in texture and blend fills only; the external inpainting command stays CLI-only.
 
 ```bash
@@ -595,7 +607,7 @@ watermark-remover/
 │       ├── references/
 │       ├── scripts/
 │       ├── tui/                    # wm-tui frontend (Bun + pi-tui)
-│       └── web/                    # wm-serve web UI (React; dist/ is committed)
+│       └── web/                    # web UI (React; dist/ committed for wm-serve, pages/ builds the browser site)
 ├── tests/
 │   └── fixtures/
 ├── CODE_OF_CONDUCT.md
@@ -661,6 +673,7 @@ python3 -m venv .venv
 make check           # Python lint/format/tests/smoke + independent residual verifier
 make tui-check       # frozen Bun install, TypeScript check + mounted UI tests
 make web-check       # web UI typecheck + tests, rebuild, fail if committed dist/ is stale
+make pages-check     # browser build (Pyodide) + engine parity with native Python
 make packaging       # build/install wheel, verify all commands and read-only TUI boot
 # make ci            # all of the above; requires Bun 1.4+
 ```

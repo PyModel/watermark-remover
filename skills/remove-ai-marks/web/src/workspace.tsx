@@ -4,6 +4,7 @@ import { Icon, type IconName } from "./icons"
 import type { Item, Queue, Tool } from "./queue"
 import { reveal } from "./reveal"
 import { capabilityRows } from "./server"
+import { BROWSER } from "./target"
 import { ResultCard, ToolsCard, toolsFor } from "./tools"
 import { Card, Chip, MiniStat, Progress, Segmented, formatBytes, plural, smooth, unicodeName, type Tone } from "./ui"
 
@@ -51,7 +52,11 @@ export function Workspace({ queue, caps, offline, onReconnect, selected, setSele
     <>
       <section className="hero">
         <div>
-          <p className="eyebrow">Find and remove AI provenance marks, then check the result again</p>
+          <p className="eyebrow">
+            {BROWSER
+              ? "Find and remove AI provenance marks right in your browser. Files never leave this device."
+              : "Find and remove AI provenance marks, then check the result again"}
+          </p>
           <h1>Workspace</h1>
         </div>
         {items.length > 0 && (
@@ -84,7 +89,7 @@ export function Workspace({ queue, caps, offline, onReconnect, selected, setSele
       {offline && (
         <div className="banner" role="alert">
           <Icon name="alert" />
-          <span>Can't reach wm-serve. Check that it is still running.</span>
+          <span>{BROWSER ? "The cleaning engine didn't load. Check your connection." : "Can't reach wm-serve. Check that it is still running."}</span>
           <button type="button" className="button" onClick={onReconnect}>
             Try again
           </button>
@@ -246,7 +251,9 @@ function Metrics({ items, caps }: { items: Item[]; caps: Capabilities | null }) 
             ? "This public server doesn't run rewrites. Run wm-serve yourself to use one."
             : rewriteOn
               ? "Token-level watermarks need a rewrite; hidden characters and metadata don't."
-              : "Token-level watermarks need a rewrite model set up on the server."}
+              : BROWSER
+                ? "Token-level watermarks need a rewrite. Add your own model server in the Engine view."
+                : "Token-level watermarks need a rewrite model set up on the server."}
         </p>
         <div className="metric-foot">
           <MiniStat label="Rewritten" value={rewritten} />
@@ -315,7 +322,7 @@ const CARD_INFO: Record<string, { icon: IconName; title: string; works: string }
 function CapabilityCards({ caps }: { caps: Capabilities }) {
   const rows = capabilityRows(caps).filter((row) => row.name in CARD_INFO)
   return (
-    <section className="capabilities" aria-label="What this server can remove">
+    <section className="capabilities" aria-label={BROWSER ? "What this page can remove" : "What this server can remove"}>
       {rows.map((row) => (
         <article className="capability" key={row.name}>
           <div className="capability-head">
@@ -326,8 +333,8 @@ function CapabilityCards({ caps }: { caps: Capabilities }) {
           </div>
           <h3>{CARD_INFO[row.name]!.title}</h3>
           <p>{row.enables}.</p>
-          {row.status[1] === "Needs setup" && <p className="capability-hint">Set up on the server. The Server view lists what to set.</p>}
-          {row.status[1] === "Off on this server" && <p className="capability-hint">{row.hint}</p>}
+          {row.status[1] === "Needs setup" && <p className="capability-hint">{BROWSER ? "Set it up in the Engine view." : "Set up on the server. The Server view lists what to set."}</p>}
+          {(row.status[1] === "Off on this server" || row.status[1] === "Not in the browser") && <p className="capability-hint">{row.hint}</p>}
           <p className="capability-works">{CARD_INFO[row.name]!.works}</p>
         </article>
       ))}
@@ -529,7 +536,7 @@ function DocumentCard({
           setBox={setBox}
         />
       ) : inspection.kind === "unknown" ? (
-        <p className="placeholder">wm-serve doesn't recognize this format. Rename the file with its real extension, such as .txt, .png or .pdf, and add it again.</p>
+        <p className="placeholder">{BROWSER ? "This format isn't recognized." : "wm-serve doesn't recognize this format."} {" "}Rename the file with its real extension, such as .txt, .png or .pdf, and add it again.</p>
       ) : (
         <Evidence inspection={inspection} recheck={showCleaned ? result!.recheck : null} />
       )}

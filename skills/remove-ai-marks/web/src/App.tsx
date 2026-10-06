@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useState } from "react"
 import { ApiError, apiKey, capabilities, setApiKey, type Capabilities } from "./api"
+import { onEngineStage } from "./engine"
+import { EngineView } from "./engine-view"
 import { BrandMark, Icon, type IconName } from "./icons"
 import { useQueue } from "./queue"
 import { KeyForm, ServerView } from "./server"
+import { BROWSER } from "./target"
 import { Workspace } from "./workspace"
 
 type View = "workspace" | "server"
@@ -10,13 +13,15 @@ export type Connection = { state: "connecting" | "online" | "offline" | "locked"
 
 const VIEWS: { id: View; icon: IconName; label: string }[] = [
   { id: "workspace", icon: "grid", label: "Workspace" },
-  { id: "server", icon: "cpu", label: "Server and capabilities" },
+  { id: "server", icon: "cpu", label: BROWSER ? "Engine and capabilities" : "Server and capabilities" },
 ]
 
 export function App() {
   const [view, setView] = useState<View>("workspace")
   const [connection, setConnection] = useState<Connection>({ state: "connecting", caps: null, rejected: false })
   const [dragging, setDragging] = useState(false)
+  const [stage, setStage] = useState("Loading")
+  useEffect(() => (BROWSER ? onEngineStage(setStage) : undefined), [])
 
   const connect = useCallback(() => {
     capabilities()
@@ -92,9 +97,15 @@ export function App() {
           <div className="brand-cluster">
             <BrandMark size={48} />
             <span className="brand">watermark-remover</span>
-            <StatusPill connection={connection} />
+            <StatusPill connection={connection} stage={stage} />
           </div>
           <div className="runtime-meta">
+            {BROWSER && (
+              <span className="pill">
+                <Icon name="shield" />
+                Files stay on this device
+              </span>
+            )}
             {connection.caps && (
               <span className="pill">
                 <Icon name="layers" />
@@ -106,13 +117,15 @@ export function App() {
             {connection.caps && (
               <span className="pill">
                 <Icon name="cube" />
-                wm-serve {connection.caps.version}
+                {BROWSER ? "watermark-remover" : "wm-serve"} {connection.caps.version}
               </span>
             )}
-            <span className="pill pill-address">
-              <Icon name="link" />
-              {location.host}
-            </span>
+            {!BROWSER && (
+              <span className="pill pill-address">
+                <Icon name="link" />
+                {location.host}
+              </span>
+            )}
           </div>
         </header>
 
@@ -146,7 +159,11 @@ export function App() {
                 </div>
               </section>
             ) : view === "server" ? (
-              <ServerView connection={connection} onRetry={connect} onKey={unlock} />
+              BROWSER ? (
+                <EngineView connection={connection} stage={stage} onRetry={connect} />
+              ) : (
+                <ServerView connection={connection} onRetry={connect} onKey={unlock} />
+              )
             ) : (
               <Workspace
                 queue={queue}
@@ -168,13 +185,10 @@ export function App() {
   )
 }
 
-function StatusPill({ connection }: { connection: Connection }) {
-  const label = {
-    connecting: "Connecting",
-    online: "Connected",
-    offline: "Not connected",
-    locked: "Locked",
-  }[connection.state]
+function StatusPill({ connection, stage }: { connection: Connection; stage: string }) {
+  const label = BROWSER
+    ? { connecting: stage, online: "Engine ready", offline: "Engine didn't load", locked: "Locked" }[connection.state]
+    : { connecting: "Connecting", online: "Connected", offline: "Not connected", locked: "Locked" }[connection.state]
   return (
     <span className="pill" role="status">
       <span className={`dot dot-${connection.state}`} aria-hidden="true" />

@@ -3,11 +3,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "rm -rf dist && bun build ./index.html --outdir dist --production",
-    "test": "bun test",
-    "typecheck": "tsc --noEmit"
+    "build": "rm -rf dist && bun build ./index.html --outdir dist --production --define 'process.env.WM_TARGET=\"server\"'",
+    "test": "bun test src",
+    "typecheck": "tsc --noEmit",
+    "build:pages": "bun pages/build.ts",
+    "test:pages": "bun test pages"
   },
   "dependencies": {
+    "pyodide": "314.0.7",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },

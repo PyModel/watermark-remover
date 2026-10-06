@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react"
 import { fromBase64, REWRITE_STRENGTHS, type Box, type Capabilities, type CleanOption, type CleanOptions, type Detection, type Kind, type Strength } from "./api"
+import { BROWSER } from "./target"
 import { Icon } from "./icons"
 import type { Item, Queue, Tool } from "./queue"
 import { Card, Chip, Segmented, plural, sentence, type Tone } from "./ui"
@@ -63,7 +64,7 @@ function Pending({ item }: { item: Item }) {
   }, [working])
   if (!working) return null
   const seconds = Math.max(0, Math.round((now - item.startedAt) / 1000))
-  const what = { clean: "Cleaning, then checking the result", rewrite: "Rewriting with the server's model", visible: "Painting out the mark", detect: "Running detectors" }[item.work ?? "clean"]
+  const what = { clean: "Cleaning, then checking the result", rewrite: BROWSER ? "Rewriting with your model server" : "Rewriting with the server's model", visible: "Painting out the mark", detect: "Running detectors" }[item.work ?? "clean"]
   return (
     <p className="pending" role="status">
       <span className="spinner" aria-hidden="true" />
@@ -134,7 +135,7 @@ function CleanPanel({ item, caps, options, setOptions, queue }: ToolsProps) {
               {...shared}
             />
             {scorer && (
-              <Option id="detect_after" label="Score SynthID after cleaning" hint="Uses the server's SynthID scorer." {...shared} />
+              <Option id="detect_after" label="Score SynthID after cleaning" hint="Uses the configured SynthID scorer." {...shared} />
             )}
           </>
         )}
@@ -170,7 +171,11 @@ function RewritePanel({ item, caps, queue }: ToolsProps) {
         <div className="notice">
           <Icon name="alert" size={16} />
           <p>
-            {layerB?.configured
+            {BROWSER
+              ? layerB?.configured
+                ? `${layerB.base_url_host} isn't on this computer. Only a model server on localhost can be used here.`
+                : "No model server is added. Add your own in the Engine view; it lists the setup steps."
+              : layerB?.configured
               ? `The rewrite model at ${layerB.base_url_host} isn't on this machine, so wm-serve won't send text to it. Set WATERMARKS_REWRITE_ALLOW_REMOTE=1 to allow it.`
               : "No rewrite model is set up. Set WATERMARKS_REWRITE_BACKEND, WATERMARKS_REWRITE_MODEL and WATERMARKS_REWRITE_BASE_URL, then restart wm-serve."}
           </p>
@@ -285,15 +290,17 @@ function DetectPanel({ item, caps, queue }: ToolsProps) {
         <p className="card-text">
           {configured.length
             ? `Runs ${configured.join(", ")} and the style score.`
-            : "No vendor detectors are set up on this server, so only the style score runs."}
+            : BROWSER
+              ? "Only the style score runs here, inside this tab. Nothing is sent anywhere."
+              : "No vendor detectors are set up on this server, so only the style score runs."}
         </p>
       ) : (
-        <p className="card-text">Scores the image with the server's SynthID scorer.</p>
+        <p className="card-text">{BROWSER ? "SynthID scoring needs a scorer model, so it only runs in wm-serve on your own machine." : "Scores the image with the server's SynthID scorer."}</p>
       )}
       {blocked && (
         <div className="notice">
           <Icon name="alert" size={16} />
-          <p>No SynthID scorer is set up. Set WATERMARKS_SYNTHID_SCORER_URL or REVERSE_SYNTHID_DIR, then restart wm-serve.</p>
+          <p>{BROWSER ? "Not available in the browser." : "No SynthID scorer is set up. Set WATERMARKS_SYNTHID_SCORER_URL or REVERSE_SYNTHID_DIR, then restart wm-serve."}</p>
         </div>
       )}
       {needsConsent && (
@@ -372,8 +379,8 @@ export function ResultCard({ item }: { item: Item }) {
         <h3 className="sub">Checked again</h3>
         <p>
           {left === 0
-            ? `wm-serve re-inspected the new file: no hidden characters${recheck.kind === "text" ? "" : " or provenance metadata"} remain.`
-            : `wm-serve re-inspected the new file: ${left} ${plural(left, "finding")} remain.`}
+            ? `Inspected the new file again: no hidden characters${recheck.kind === "text" ? "" : " or provenance metadata"} remain.`
+            : `Inspected the new file again: ${left} ${plural(left, "finding")} remain.`}
         </p>
         {metaLeft > 0 && (
           <ul className="evidence">
