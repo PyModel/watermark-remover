@@ -25,7 +25,11 @@ from __future__ import annotations
 import json
 import logging
 import math
-from collections.abc import Sequence
+import os
+import stat
+import tempfile
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
@@ -243,6 +247,89 @@ def probe_video_encode_profile(
 def _labeled_default(reason: str) -> VideoEncodeProfile:
     """The defaults a probe falls back to, with the reason attached."""
     return VideoEncodeProfile(default_reason=reason)
+
+
+@contextmanager
+def atomic_video_output(dest: Path) -> Iterator[Path]:
+    """Yield a sibling temporary path and publish it over ``dest`` only on success.
+
+    ffmpeg writes the temporary file; the destination appears in one
+    ``os.replace`` after the subprocess exits cleanly. Any failure -- a
+    non-zero exit, a timeout, a killed process -- removes the temporary and
+    leaves the destination exactly as it was.
+    """
+    if dest.is_symlink():
+        raise ValueError(f"output path is a symlink: {dest}")
+    existing_mode = stat.S_IMODE(dest.stat().st_mode) if dest.exists() else None
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    handle, temp_name = tempfile.mkstemp(
+        prefix=f".{dest.name}.", suffix=dest.suffix, dir=dest.parent
+    )
+    os.close(handle)
+    temporary = Path(temp_name)
+    try:
+        yield temporary
+        if dest.is_symlink():
+            raise ValueError(f"output path became a symlink: {dest}")
+        if existing_mode is not None:
+            os.chmod(temporary, existing_mode)
+        os.replace(temporary, dest)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _run_ffmpeg(command: Sequence[str], *, purpose: str, timeout: float) -> None:
+    """Run one ffmpeg command; raise a labeled error, never a bare traceback."""
+    try:
+        result = run_command(command, timeout=timeout, output_limit=DEFAULT_OUTPUT_LIMIT)
+    except FileNotFoundError as error:
+        raise VideoEncodingError(f"ffmpeg is unavailable; cannot {purpose}") from error
+    except ExternalCommandTimeout as error:
+        raise VideoEncodingError(f"ffmpeg timed out trying to {purpose}") from error
+    log.info(
+        "ffmpeg %s: status=%s stderr=%s",
+        purpose,
+        result.returncode,
+        result.stderr_text,
+    )
+    if result.returncode != 0:
+        detail = result.stderr_text.strip()[:400]
+        raise VideoEncodingError(f"ffmpeg failed to {purpose}: {detail}")
+
+
+def remux_video(
+    source: Path,
+    dest: Path,
+    *,
+    strip_metadata: bool = True,
+    timeout: float = DEFAULT_VIDEO_TIMEOUT,
+) -> None:
+    """Copy every stream of ``source`` into ``dest``, audio bitstream included.
+
+    ``-c copy`` is what keeps the audio byte-identical: no decode, no re-encode,
+    the original packets are remuxed. The source is one argument element; the
+    filename is never interpolated into a shell string. The destination is
+    staged and renamed, so a failed or killed remux writes nothing.
+    """
+    command = [
+        "ffmpeg",
+        "-y",
+        "-loglevel",
+        "error",
+        "-i",
+        str(source),
+        "-map",
+        "0",
+        "-c",
+        "copy",
+    ]
+    if strip_metadata:
+        command.extend(["-map_metadata", "-1", "-map_chapters", "-1"])
+    if dest.suffix.lower() in _FASTSTART_SUFFIXES:
+        command.extend(["-movflags", "+faststart"])
+    with atomic_video_output(dest) as temporary:
+        _run_ffmpeg([*command, str(temporary)], purpose=f"remux {source.name}", timeout=timeout)
 
 
 def probe_video_timestamps(

@@ -17,6 +17,7 @@ import json
 import shutil
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -114,3 +115,146 @@ def test_unusable_frame_timing_returns_no_timestamps(monkeypatch, tmp_path: Path
             lambda *_args, _stdout=stdout, **_kwargs: fake_command_result(0, stdout=_stdout),
         )
         assert video_encoding.probe_video_timestamps(source) == ()
+
+
+def test_absent_ffprobe_labels_the_probe_as_a_default(monkeypatch, tmp_path: Path) -> None:
+    def missing(*_args, **_kwargs):
+        raise FileNotFoundError("ffprobe")
+
+    monkeypatch.setattr(video_encoding, "run_command", missing)
+
+    profile = video_encoding.probe_video_encode_profile(tmp_path / "clip.mp4")
+
+    assert profile.is_default is True
+    assert profile.pixel_format == "yuv420p"
+    assert profile.default_reason is not None
+    assert "ffprobe" in profile.default_reason
+
+
+def test_a_probe_that_cannot_answer_labels_the_fallback(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"not really a video; ffprobe is faked")
+
+    def timed_out(*_args, **_kwargs):
+        raise video_encoding.ExternalCommandTimeout("ffprobe timed out")
+
+    def failed(*_args, **_kwargs):
+        return fake_command_result(1, stderr="Invalid data found when processing input")
+
+    cases = [
+        timed_out,
+        failed,
+        lambda *_a, **_k: fake_command_result(0, stdout="not json at all"),
+        lambda *_a, **_k: fake_command_result(0, stdout=""),
+        lambda *_a, **_k: fake_command_result(0, stdout='{"streams": []}'),
+        lambda *_a, **_k: fake_command_result(0, stdout="[]"),
+    ]
+    for runner in cases:
+        monkeypatch.setattr(video_encoding, "run_command", runner)
+        profile = video_encoding.probe_video_encode_profile(source)
+        assert profile.is_default is True
+        assert profile.pixel_format == "yuv420p"
+        assert profile.frame_rate is None
+
+
+def test_component_depth_falls_back_to_the_probes_own_bit_depth(monkeypatch, tmp_path: Path) -> None:
+    # ``None`` in sys.modules is the documented way to make a later import
+    # raise ImportError, so this pins the PyAV-absent path even on a machine
+    # that has av installed.
+    monkeypatch.setitem(sys.modules, "av", None)
+    source = tmp_path / "clip10.mp4"
+    source.write_bytes(b"not really a video; ffprobe is faked")
+    monkeypatch.setattr(
+        video_encoding,
+        "run_command",
+        lambda *_a, **_k: fake_command_result(
+            0,
+            stdout=json.dumps(
+                {"streams": [{"pix_fmt": "yuv420p10le", "bits_per_raw_sample": "10"}]}
+            ),
+        ),
+    )
+
+    profile = video_encoding.probe_video_encode_profile(source)
+
+    assert profile.pixel_format == "yuv420p"
+    assert profile.source_pixel_format == "yuv420p10le"
+    assert profile.component_depth == 10
+
+
+def test_component_depth_consults_pyav_for_that_one_lookup(monkeypatch, tmp_path: Path) -> None:
+    looked_up: list[str] = []
+
+    class _Component:
+        bits = 12
+
+    class _VideoFormat:
+        def __init__(self, name: str) -> None:
+            looked_up.append(name)
+            self.components = (_Component(), _Component(), _Component())
+
+    monkeypatch.setitem(sys.modules, "av", types.SimpleNamespace(VideoFormat=_VideoFormat))
+    source = tmp_path / "clip10.mp4"
+    source.write_bytes(b"not really a video; ffprobe is faked")
+    monkeypatch.setattr(
+        video_encoding,
+        "run_command",
+        lambda *_a, **_k: fake_command_result(
+            0,
+            stdout=json.dumps(
+                {"streams": [{"pix_fmt": "yuvj422p", "bits_per_raw_sample": "8"}]}
+            ),
+        ),
+    )
+
+    profile = video_encoding.probe_video_encode_profile(source)
+
+    assert looked_up == ["yuvj422p"]
+    assert profile.component_depth == 12
+
+
+def test_remux_copies_every_stream_and_publishes_atomically(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"source-bytes")
+    dest = tmp_path / "remuxed.mp4"
+    seen: list[tuple] = []
+
+    def fake_run(argv, **kwargs):
+        seen.append((argv, kwargs))
+        Path(argv[-1]).write_bytes(b"remuxed-bytes")
+        return fake_command_result(0)
+
+    monkeypatch.setattr(video_encoding, "run_command", fake_run)
+
+    video_encoding.remux_video(source, dest)
+
+    # The bytes the subprocess wrote reached the destination, and the staged
+    # sibling is gone (it was renamed, not left behind).
+    assert dest.read_bytes() == b"remuxed-bytes"
+    assert not list(tmp_path.glob(".*"))
+    argv, kwargs = seen[0]
+    assert not isinstance(argv, (str, bytes))
+    assert argv[0] == "ffmpeg"
+    assert str(source) in argv
+    assert argv[argv.index("-map") + 1] == "0"
+    assert argv[argv.index("-c") + 1] == "copy"
+    assert argv[argv.index("-map_metadata") + 1] == "-1"
+    assert argv[argv.index("-map_chapters") + 1] == "-1"
+    assert argv[argv.index("-movflags") + 1] == "+faststart"
+    assert argv[-1] != str(dest)
+    assert Path(argv[-1]).parent == dest.parent
+    assert kwargs["timeout"] > 0
+
+
+def test_remux_can_keep_metadata_when_asked(monkeypatch, tmp_path: Path) -> None:
+    seen: list = []
+    monkeypatch.setattr(
+        video_encoding,
+        "run_command",
+        lambda argv, **_kwargs: (seen.append(argv), fake_command_result(0))[1],
+    )
+
+    video_encoding.remux_video(tmp_path / "clip.mp4", tmp_path / "out.mkv", strip_metadata=False)
+
+    assert "-map_metadata" not in seen[0]
+    assert "-movflags" not in seen[0]
