@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import shlex
 import shutil
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -62,7 +63,7 @@ def video_runtime() -> tuple[str, ...]:
     return tuple(missing)
 
 
-def video_runtime_hint(missing: tuple[str, ...] | list[str]) -> str:
+def video_runtime_hint(missing: Sequence[str]) -> str:
     """The labeled refusal for a video asset whose runtime is incomplete.
 
     The install command is shell-quoted: the extra's brackets are a shell glob,
@@ -199,7 +200,7 @@ def inspect_video(path: Path) -> dict:
     if listed:
         notes = [
             f"{len(listed)} provenance marker(s) read from the {container} container; "
-            "a clean removes these"
+            "a metadata strip removes these"
         ]
     else:
         notes = [

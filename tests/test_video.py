@@ -121,6 +121,13 @@ BUILDERS = {
 }
 
 
+def read_findings(path: Path) -> tuple:
+    """The shipped reader's findings for one file's bytes."""
+    import container_readers
+
+    return container_readers.read_container_findings(path.read_bytes())
+
+
 # --- inspection (the data seam) --------------------------------------------
 
 
@@ -356,7 +363,6 @@ def test_a_real_video_loses_its_marker_and_keeps_its_frames_and_audio(
 ) -> None:
     """The one measurement a fake cannot make: real ffmpeg, real bytes."""
     import clean_pipeline
-    import container_readers
     from clean_request import CleanRequest
 
     monkeypatch.setitem(sys.modules, "av", types.ModuleType("av"))
@@ -388,7 +394,7 @@ def test_a_real_video_loses_its_marker_and_keeps_its_frames_and_audio(
         ]
     )
     assert created.returncode == 0, created.stderr.decode()
-    assert container_readers.read_container_findings(src.read_bytes())
+    assert read_findings(src)
     video_before = _stream_md5(src, "0:v:0")
     audio_before = _stream_md5(src, "0:a:0")
 
@@ -403,7 +409,7 @@ def test_a_real_video_loses_its_marker_and_keeps_its_frames_and_audio(
     assert payload["audio"] == "unverified"
     assert dest.exists()
     # The marker is actually gone, read back from the output bytes.
-    assert container_readers.read_container_findings(dest.read_bytes()) == ()
+    assert read_findings(dest) == ()
     # No frame changed, and the audio is the original bitstream.
     assert _stream_md5(dest, "0:v:0") == video_before
     assert _stream_md5(dest, "0:a:0") == audio_before
@@ -433,3 +439,24 @@ def test_a_remux_that_fails_leaves_the_destination_untouched(
     assert run.payload["exit_code"] == 1
     assert dest.read_bytes() == b"the previous good output"
     assert not list(tmp_path.glob(".*"))  # the staged sibling was removed
+
+
+def test_an_in_place_clean_stages_the_write_and_keeps_a_backup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import clean_pipeline
+    import video_encoding
+    from clean_request import CleanRequest
+
+    _fake_runtime(tmp_path, monkeypatch)
+    src = tmp_path / "clip.mkv"
+    src.write_bytes(matroska(LABEL))
+
+    monkeypatch.setattr(video_encoding, "run_command", _ffmpeg_writing(matroska()))
+    run = clean_pipeline.execute(CleanRequest(paths=(src,), in_place=True))
+
+    assert run.payload["exit_code"] == 0
+    assert run.payload["markers_removed"]
+    # The source now holds the stripped bytes; the unstripped original is kept.
+    assert read_findings(src) == ()
+    assert read_findings(Path(f"{src}.bak")) != ()
