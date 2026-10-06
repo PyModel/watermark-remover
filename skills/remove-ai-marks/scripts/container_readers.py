@@ -288,3 +288,44 @@ def flv_findings(data: bytes) -> tuple[ContainerFinding, ...]:
                     return tuple(found)
         position = payload_end + 4
     return tuple(found)
+
+
+# --- AVI (RIFF) ------------------------------------------------------------
+
+
+def _info_findings(data: bytes, start: int, end: int) -> tuple[ContainerFinding, ...]:
+    found: list[ContainerFinding] = []
+    position = start
+    while position + 8 <= end:
+        chunk_id = data[position : position + 4]
+        size = int.from_bytes(data[position + 4 : position + 8], "little")
+        payload_start = position + 8
+        payload_end = payload_start + size
+        if payload_end > end:
+            break
+        if chunk_id == b"AIGC" and size <= MAX_TC260_VALUE_BYTES:
+            finding = _label_finding(data[payload_start:payload_end], "avi")
+            if finding is not None:
+                found.append(finding)
+        position = payload_end + (size & 1)
+    return tuple(found)
+
+
+def avi_findings(data: bytes) -> tuple[ContainerFinding, ...]:
+    """Read validated TC260 AIGC labels from an AVI ``LIST/INFO/AIGC`` chunk."""
+    if len(data) < 12 or data[:4] != b"RIFF" or data[8:12] != b"AVI ":
+        return ()
+    declared_end = min(8 + int.from_bytes(data[4:8], "little"), len(data))
+    position = 12
+    found: list[ContainerFinding] = []
+    while position + 8 <= declared_end:
+        chunk_id = data[position : position + 4]
+        size = int.from_bytes(data[position + 4 : position + 8], "little")
+        payload_start = position + 8
+        payload_end = payload_start + size
+        if payload_end > declared_end:
+            break
+        if chunk_id == b"LIST" and size >= 4 and data[payload_start : payload_start + 4] == b"INFO":
+            found.extend(_info_findings(data, payload_start + 4, payload_end))
+        position = payload_end + (size & 1)
+    return tuple(found)

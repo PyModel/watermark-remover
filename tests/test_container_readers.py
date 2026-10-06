@@ -102,3 +102,29 @@ class TestFlvProvenance:
             "ContentProducer": DOUBAO_USCC,
             "ProduceID": PRODUCE_ID,
         }
+
+
+# --- AVI -------------------------------------------------------------------
+
+
+def _riff_chunk(chunk_id: bytes, payload: bytes) -> bytes:
+    pad = b"\x00" if len(payload) & 1 else b""
+    return chunk_id + len(payload).to_bytes(4, "little") + payload + pad
+
+
+def _avi(value: bytes = LABEL) -> bytes:
+    info = _riff_chunk(b"AIGC", value) + _riff_chunk(b"INAM", b"standard title\x00")
+    body = b"AVI " + _riff_chunk(b"LIST", b"INFO" + info) + _riff_chunk(b"JUNK", b"\x00" * 64)
+    return b"RIFF" + len(body).to_bytes(4, "little") + body
+
+
+class TestAviProvenance:
+    def test_a_synthetic_avi_marker_is_a_finding(self) -> None:
+        findings = container_readers.avi_findings(_avi())
+        assert len(findings) == 1
+        assert findings[0]["container"] == "avi"
+        assert findings[0]["label"] == {
+            "Label": "1",
+            "ContentProducer": DOUBAO_USCC,
+            "ProduceID": PRODUCE_ID,
+        }
