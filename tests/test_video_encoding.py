@@ -90,3 +90,27 @@ def test_probing_a_clip_reports_its_pixel_format_and_frame_timing(monkeypatch, t
     argv = seen[0]
     assert argv[0] == "ffprobe"
     assert str(source) in argv
+
+
+def test_probing_frame_timing_reads_best_effort_timestamps(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"not really a video; ffprobe is faked")
+    monkeypatch.setattr(
+        video_encoding,
+        "run_command",
+        lambda *_args, **_kwargs: fake_command_result(0, stdout="0.000000\n0.041667\n"),
+    )
+
+    assert video_encoding.probe_video_timestamps(source) == (0.0, 0.041667)
+
+
+def test_unusable_frame_timing_returns_no_timestamps(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"not really a video; ffprobe is faked")
+    for stdout in ("", "N/A\n", "0.0\nnan\n", "0.0\ninf\n"):
+        monkeypatch.setattr(
+            video_encoding,
+            "run_command",
+            lambda *_args, _stdout=stdout, **_kwargs: fake_command_result(0, stdout=_stdout),
+        )
+        assert video_encoding.probe_video_timestamps(source) == ()

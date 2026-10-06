@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from fractions import Fraction
@@ -242,3 +243,39 @@ def probe_video_encode_profile(
 def _labeled_default(reason: str) -> VideoEncodeProfile:
     """The defaults a probe falls back to, with the reason attached."""
     return VideoEncodeProfile(default_reason=reason)
+
+
+def probe_video_timestamps(
+    source: Path,
+    *,
+    timeout: float = DEFAULT_PROBE_TIMEOUT,
+) -> tuple[float, ...]:
+    """Read the first video stream's authoritative display timestamps.
+
+    An absent or failed ffprobe, an unparseable row, and a non-finite value all
+    return an empty tuple: frame timing that was not measured is never invented.
+    """
+    raw_timestamps = _run_ffprobe(
+        source,
+        (
+            "-select_streams",
+            "v:0",
+            "-show_frames",
+            "-show_entries",
+            "frame=best_effort_timestamp_time",
+        ),
+        purpose="video timestamps",
+        output_format="csv=p=0",
+        timeout=timeout,
+    )
+    if raw_timestamps is None:
+        return ()
+    try:
+        timestamps = tuple(float(line) for line in raw_timestamps.splitlines() if line)
+    except ValueError:
+        log.warning("ffprobe returned unusable frame timestamps for %s", source)
+        return ()
+    if not timestamps or not all(math.isfinite(timestamp) for timestamp in timestamps):
+        log.warning("ffprobe returned no finite frame timestamps for %s", source)
+        return ()
+    return timestamps
