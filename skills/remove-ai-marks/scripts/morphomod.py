@@ -48,6 +48,14 @@ from pipeline_actions import Action, report_actions
 from png_chunks import iter_png_chunks
 
 DEFAULT_DILATION_RADIUS = 3
+
+#: Every classify output repeats this. The honesty contract: absence of the
+#: classifier, of weights, or of any signal is unknown — never a clean bill.
+CLASSIFY_CAVEAT = (
+    "Classification is not provenance: a label is pixel-level evidence, and any"
+    " result -- including an unavailable classifier -- "
+    "never proves a file is clean."
+)
 MAX_PIXELS = 40_000_000  # bounds decompression/allocation; covers 8K UHD
 MAX_ENCODED_BYTES = 256 * 1024 * 1024
 MAX_TEXTURE_PATCH_PIXELS = 1_048_576
@@ -1373,7 +1381,110 @@ def _parse_box(value: str) -> tuple[int, int, int, int]:
     return parts
 
 
-def main() -> int:
+def _classify_main(argv: list[str]) -> int:
+    """The explicit ``classify`` verb: metadata-free photo classification.
+
+    Opt-in by construction — nothing on the inspect/clean/detect/server paths
+    reaches this handler (pinned by tests/test_photo_classify.py's source
+    scan). Unavailability is labeled and carries the caveat; it is never a
+    silent pass and never a clean verdict.
+    """
+    parser = _classify_parser()
+    args = parser.parse_args(argv)
+
+    payload: dict[str, Any] = {
+        "verb": "classify",
+        "status": "error",
+        "result": None,
+        "reason": None,
+        "caveat": CLASSIFY_CAVEAT,
+    }
+
+    def emit(
+        status: str, code: int, *, result: dict[str, Any] | None = None, reason: str | None = None
+    ) -> int:
+        payload["status"] = status
+        payload["result"] = result
+        payload["reason"] = reason
+        if args.json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        elif status == "ok":
+            assert result is not None
+            print("pixel classification (not provenance)")
+            for key in ("label", "domain", "detector", "provider"):
+                print(f"  {key}: {result[key]}")
+            print(f"caveat: {CLASSIFY_CAVEAT}")
+        else:
+            print(f"unavailable: {reason}")
+            print(f"caveat: {CLASSIFY_CAVEAT}")
+        return code
+
+    if not args.path.is_file():
+        message = f"input file not found: {args.path}"
+        if args.json:
+            payload["status"] = "usage-error"
+            payload["reason"] = message
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            eprint(f"error: {message}")
+        return 2
+
+    try:
+        import classify as classify_mod
+    except ImportError as error:  # pragma: no cover - ships in the same tree
+        return emit(
+            "unavailable",
+            1,
+            reason=(
+                f"classifier module unavailable: {error}."
+                " Install: pip install 'watermark-remover[classify]'"
+            ),
+        )
+
+    try:
+        if not classify_mod.is_available():
+            return emit(
+                "unavailable",
+                1,
+                reason=(
+                    "the pixel-classification dependencies are not installed."
+                    " Install: pip install 'watermark-remover[classify]'"
+                ),
+            )
+        result = classify_mod.classify_pixels(
+            args.path, device=args.device, backend=args.backend
+        ).to_dict()
+    except RuntimeError as error:
+        # Missing weights / gate artifact / failed pinned download: the gated
+        # head did not run, and that fact is the headline, not a label.
+        return emit("unavailable", 1, reason=str(error))
+    except (OSError, ValueError) as error:
+        return emit("error", 1, reason=str(error))
+    except ImportError as error:
+        return emit("unavailable", 1, reason=f"classifier module unavailable: {error}")
+    return emit("ok", 0, result=result)
+
+
+def _classify_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="morphomod.py classify",
+        description=(
+            "Classify a photograph as AI or camera-like from pixels alone."
+            " This is not provenance and it never runs cleanup."
+        ),
+    )
+    parser.add_argument("path", type=Path, help="Image file to classify")
+    parser.add_argument("--device", default=None, help="torch device: auto (default), cpu, or cuda")
+    parser.add_argument("--backend", choices=("torch", "onnx"), default="torch")
+    parser.add_argument("--json", action="store_true", help="Emit JSON on stdout")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args_list = sys.argv[1:] if argv is None else argv
+    if args_list and args_list[0] == "classify":
+        # The explicit E1 verb: the only sanctioned classify call site.
+        return _classify_main(args_list[1:])
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("path", type=Path)
     parser.add_argument("-o", "--output", type=Path)
@@ -1397,7 +1508,7 @@ def main() -> int:
     parser.add_argument("--mask-output", type=Path)
     parser.add_argument("--prompt", default="Remove watermark, fill with background")
     parser.add_argument("--json", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(args_list)
 
     try:
         plan = VisiblePlan(
