@@ -326,6 +326,9 @@ def test_identify_signal_maps_a_validated_payload_into_the_evidence_vocabulary()
     assert signal["asserts_ai"] is True
     assert "InvisMark" in signal["finding"]
     assert str(_WATERMARK_ID) in signal["finding"]
+    # Origin-neutral: the mapper cannot know whether the id came from pixels
+    # or metadata, so the finding must never claim one over the other.
+    assert "C2PA soft binding" in signal["finding"]
     # Honesty contract: the fragility caveat rides along — absence is never clean.
     assert "absence is never" in signal["note"]
 

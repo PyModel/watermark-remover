@@ -363,8 +363,8 @@ def microsoft_invismark_signal(watermark_id: Any) -> dict[str, Any]:
         "watermark_id": str(parsed),
         "asserts_ai": True,
         "finding": (
-            f"Microsoft InvisMark pixel watermark {parsed} (validated repeated "
-            "144-bit DCT payload, clean-room reader)"
+            f"Microsoft InvisMark watermark {parsed} (C2PA soft binding or "
+            "validated pixel payload, clean-room reader)"
         ),
         "note": (
             "pristine-output signal: re-encoding or resizing destroys the "
