@@ -1,5 +1,5 @@
 # Ported from wiltodelta/remove-ai-watermarks tests/test_video_visible.py,
-# Apache-2.0; adapted: this tree's synthetic container builders and its
+# Apache-2.0; modified: this tree's synthetic container builders and its
 # ``clean_asset`` execution seam replace the upstream helper imports, the clip
 # is generated at the pipeline input rather than loaded from a fixture corpus,
 # and the assertions are written against this tree's report fields.
@@ -15,7 +15,8 @@ existing seams (``tests/test_video.py``); the clip tests use real ffmpeg,
 ffprobe and OpenCV because a fill is a pixel measurement a fake cannot make,
 and skip cleanly when those are absent.
 
-Scope: the sora mark only. The other seven marks are ticket 06.
+Scope: the sora mark, and the opt-in gate every mark shares. The other seven
+marks run the same pass and are covered by ``tests/test_video_marks.py``.
 """
 
 from __future__ import annotations
@@ -356,7 +357,7 @@ def test_a_real_sora_clip_without_the_opt_in_keeps_every_frame(
 
 
 def test_the_opt_in_vocabulary_is_closed_to_marks_this_build_cannot_serve() -> None:
-    """The other seven marks are ticket 06: configuring one is refused, not ignored."""
+    """Every mark this build can serve is accepted; anything else is refused."""
     import pytest as _pytest
 
     _pytest.importorskip("cv2")
@@ -364,7 +365,9 @@ def test_the_opt_in_vocabulary_is_closed_to_marks_this_build_cannot_serve() -> N
     from video import VideoPlan
     from video_visible import VisibleVideoPlan
 
-    for unsupported in ("veo", "seedance", "kling"):
+    for supported in ("sora", "veo", "seedance", "doubao", "dola", "hailuo", "vidu", "kling"):
+        assert VisibleVideoPlan(mark=supported).mark == supported
+    for unsupported in ("gemini", "midjourney", "runway"):
         with _pytest.raises(ValueError, match="mark"):
             VisibleVideoPlan(mark=unsupported)
     with _pytest.raises(ValueError, match="exactly one"):
