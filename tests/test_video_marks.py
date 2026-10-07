@@ -31,7 +31,7 @@ from test_video_visible import (
 
 #: The marks this file covers. Ticket 05's sora pass is pinned in
 #: ``test_video_visible.py``; these seven run through the same engine.
-_MARKS = ("veo", "seedance")
+_MARKS = ("veo", "seedance", "doubao")
 
 #: Where each mark is drawn and how tall, chosen so the mark sits inside the
 #: detector's own search region and at a size the detector's height sweep hits.
@@ -41,6 +41,9 @@ _PLACEMENT: dict[str, tuple[str, int, int, int]] = {
     # seedance: template height 10 = round(120 * 0.085), a swept height, drawn
     # inside the detector's bottom-right search region.
     "seedance": ("seedance", 10, 120, 95),
+    # doubao: template height 6 = max(6, round(120 * 0.048)) is in the swept
+    # range; the mark is the tree's renderer-synthetic outline alpha.
+    "doubao": ("doubao", 6, 110, 100),
 }
 
 

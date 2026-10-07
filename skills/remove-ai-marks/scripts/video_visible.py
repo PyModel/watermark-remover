@@ -94,6 +94,12 @@ _SEEDANCE_WEAK_CONFIDENCE = 0.38
 _SEEDANCE_STRONG_CONFIDENCE = 0.43
 _MIN_FIXED_MARK_STABLE_FRAMES = 12
 
+#: Doubao's bottom-right "豆包AI生成" run is the same synthetic outline the image
+#: engine matches; measured floors from the reference (0.30 already accepted a
+#: negative, so the weak bar stays at 0.35).
+_DOUBAO_WEAK_CONFIDENCE = 0.35
+_DOUBAO_STRONG_CONFIDENCE = 0.55
+
 #: Every detector runs on a frame whose short side is at most this many pixels,
 #: so one measurement holds at every input resolution.
 _NORMALIZED_SHORT_SIDE = 480
@@ -261,6 +267,16 @@ SEEDANCE_POLICY = VideoVisiblePolicy(
     anchor_iou=0.80,
 )
 
+DOUBAO_POLICY = VideoVisiblePolicy(
+    weak_floor=_DOUBAO_WEAK_CONFIDENCE,
+    strong_floor=_DOUBAO_STRONG_CONFIDENCE,
+    transition_floor=0.30,
+    min_stable_frames=_MIN_FIXED_MARK_STABLE_FRAMES,
+    cover_after_confirmation=True,
+    padding_fraction=0.0,
+    anchor_iou=0.80,
+)
+
 #: One row per served mark. The arbiter, gate and fill are shared; a row is the
 #: only per-mark tuning. Provenance relaxation is dropped from every row: this
 #: tree's AIGC readers carry no generator claim that could relax a floor, so
@@ -269,6 +285,7 @@ VISIBLE_MARK_POLICIES: dict[str, VideoVisiblePolicy] = {
     "sora": SORA_POLICY,
     "veo": VEO_POLICY,
     "seedance": SEEDANCE_POLICY,
+    "doubao": DOUBAO_POLICY,
 }
 
 
@@ -371,6 +388,7 @@ def _template_sources() -> dict[str, NDArray[Any]]:
         "veo-diamond": veo_diamond,
         "veo-text": veo_text,
         "seedance": _seedance_template(),
+        "doubao": _asset_template("doubao_outline_alpha.png"),
     }
 
 
@@ -738,6 +756,32 @@ def detect_seedance_frame(
     )
 
 
+def detect_doubao_frame(
+    image_bgr: NDArray[Any],
+    *,
+    frame_index: int = 0,
+    prepared: _PreparedFrame | None = None,
+) -> FrameLocalization:
+    """Locate the strongest fixed Doubao "豆包AI生成" text candidate.
+
+    The ByteDance Doubao mark registered for images also appears burned into the
+    bottom-right of Doubao video exports; this detector reuses the image
+    engine's renderer-synthetic outline alpha as the template.
+    """
+    return _detect_fixed_mark(
+        image_bgr,
+        "doubao",
+        relative_heights=tuple(value / 1000 for value in range(32, 61, 4)),
+        search_origin=(0.60, 0.76),
+        kernel_fraction=0.14,
+        prefer_larger_within=0.04,
+        normalized=None
+        if prepared is None
+        else (prepared.normalized_gray, prepared.normalized_scale),
+        frame_index=frame_index,
+    )
+
+
 def detect_veo_frame(
     image_bgr: NDArray[Any],
     *,
@@ -991,6 +1035,7 @@ _MARK_DETECTORS: dict[str, Callable[..., FrameLocalization]] = {
     "sora": detect_sora_frame,
     "veo": detect_veo_frame,
     "seedance": detect_seedance_frame,
+    "doubao": detect_doubao_frame,
 }
 
 
