@@ -501,3 +501,35 @@ def test_an_explicit_mask_removes_the_named_region_and_is_verifiable(
     assert visible["removed_frames"] == visible["total_frames"] == 12
     assert _accepted_frames(dest) == 0
     _assert_change_confined_to(src, dest, box)
+
+
+# --- the encoder boundary: a crash is labeled, never a bare pipe error -----
+
+
+@requires_visible_runtime
+def test_a_dead_encoder_is_reported_as_a_labeled_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An encoder that dies mid-encode fails the clean with ffmpeg's own reason.
+
+    The frame pipe crosses a raw subprocess boundary: writing to a dead encoder
+    raises ``BrokenPipeError``, and the error the operator sees must be the
+    encode's diagnostic, not ``[Errno 32] Broken pipe``. No partial output may
+    survive the failure either.
+    """
+    import video_visible
+    from video import VideoPlan
+    from video_visible import VisibleVideoPlan
+
+    _stub_video_extra(monkeypatch)
+    src = _sora_clip(tmp_path)
+    dest = tmp_path / "clean.mkv"
+
+    dead = tmp_path / "ffmpeg"
+    dead.write_text("#!/bin/sh\necho 'boom: encoder died' >&2\nexit 1\n", encoding="utf-8")
+    dead.chmod(0o755)
+    monkeypatch.setattr(video_visible, "_ffmpeg_path", lambda: str(dead))
+
+    with pytest.raises(ValueError, match=r"stopped reading frames.*encoder died"):
+        _clean_video_asset(src, dest, VideoPlan(visible=VisibleVideoPlan(box=(4, 4, 60, 30))))
+    assert not dest.exists()

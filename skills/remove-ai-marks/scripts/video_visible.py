@@ -40,7 +40,7 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from fractions import Fraction
 from functools import lru_cache
@@ -758,9 +758,37 @@ def _start_raw_encoder(command: list[str]) -> _RawEncoder:
     return _RawEncoder(process, process.stdin, stderr_buffer)
 
 
+def _stopped_encoder_error(
+    encoder: _RawEncoder, output: Path, error: OSError, *, stderr: str | None = None
+) -> ValueError:
+    """Label an encoder that stopped reading frames, keeping ffmpeg's own words.
+
+    Writing to a dead ffmpeg raises ``BrokenPipeError``, and the frame pipe is
+    the one place in this module that crosses a raw subprocess boundary, so it
+    must answer with the encode's diagnostics rather than ``[Errno 32] Broken
+    pipe``. ffmpeg has usually already exited and left its reason on stderr;
+    *stderr* is passed in when a caller has already collected it.
+    """
+    if stderr is None and not encoder.stderr_buffer.closed:
+        if encoder.poll() is None:
+            # ffmpeg closed the pipe but has not exited yet; stop it so its
+            # diagnostics can be read rather than discarded as an abort.
+            encoder.process.kill()
+            encoder.process.wait()
+        stderr = encoder.collect_stderr()
+    detail = (stderr or "").strip() or str(error)
+    return ValueError(f"ffmpeg stopped reading frames for {output.name}: {detail[:500]}")
+
+
 def _finish_raw_encoder(encoder: _RawEncoder, output: Path, *, timeout: float) -> None:
     """Close the frame stream and raise when ffmpeg rejects the encode."""
-    encoder.stdin.close()
+    close_error: OSError | None = None
+    try:
+        encoder.stdin.close()
+    except OSError as error:
+        # A dead encoder breaks the close; the wait and the stderr read below
+        # still have to happen before the reason can be reported.
+        close_error = error
     try:
         return_code = encoder.process.wait(timeout=timeout)
     except subprocess.TimeoutExpired as error:
@@ -772,6 +800,8 @@ def _finish_raw_encoder(encoder: _RawEncoder, output: Path, *, timeout: float) -
         ) from error
     stderr = encoder.collect_stderr()
     log.info("ffmpeg visible encode finished: status=%s stderr=%s", return_code, stderr)
+    if close_error is not None:
+        raise _stopped_encoder_error(encoder, output, close_error, stderr=stderr) from close_error
     if return_code != 0:
         raise ValueError(f"ffmpeg failed to encode {output.name}: {stderr.strip()[:500]}")
 
@@ -781,6 +811,11 @@ def _abort_raw_encoder(encoder: _RawEncoder) -> None:
     if encoder.poll() is None:
         encoder.process.kill()
     encoder.process.wait()
+    with suppress(OSError):
+        # The pipe is already broken. Closing is best-effort cleanup: without
+        # it the buffered writer raises this same error again from its
+        # finalizer, where nothing can catch it.
+        encoder.stdin.close()
     encoder.discard_stderr()
 
 
@@ -1046,7 +1081,10 @@ def encode_clean_video(
                         previous_source = source_frame
                         previous_cleaned = frame
                         previous_mask = mask
-                    encoder.stdin.write(frame.tobytes())
+                    try:
+                        encoder.stdin.write(frame.tobytes())
+                    except OSError as error:
+                        raise _stopped_encoder_error(encoder, encoded, error) from error
                     frame_index += 1
             except BaseException:
                 _abort_raw_encoder(encoder)
