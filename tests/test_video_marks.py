@@ -31,7 +31,7 @@ from test_video_visible import (
 
 #: The marks this file covers. Ticket 05's sora pass is pinned in
 #: ``test_video_visible.py``; these seven run through the same engine.
-_MARKS = ("veo", "seedance", "doubao", "dola", "hailuo")
+_MARKS = ("veo", "seedance", "doubao", "dola", "hailuo", "vidu")
 
 #: Where each mark is drawn and how tall, chosen so the mark sits inside the
 #: detector's own search region and at a size the detector's height sweep hits.
@@ -50,6 +50,8 @@ _PLACEMENT: dict[str, tuple[str, int, int, int]] = {
     # hailuo: the composite MINIMAX/hailuo label is wide, so it starts well left
     # of the corner but inside the detector's bottom-left search region.
     "hailuo": ("hailuo", 6, 60, 100),
+    # vidu: logo plus wordmark, bottom-right, inside the (0.70, 0.84) search.
+    "vidu": ("vidu", 6, 120, 106),
 }
 
 

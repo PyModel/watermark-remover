@@ -114,6 +114,12 @@ _HAILUO_STRONG_CONFIDENCE = 0.34
 _HAILUO_RELATIVE_HEIGHTS = tuple(value / 1000 for value in range(28, 56, 3))
 _HAILUO_MIN_WHITE_FRACTION = 0.02
 
+#: Vidu (ShengShu) "Vidu AI" logo plus wordmark, bottom-right. Measured floors
+#: from the reference separate the one real export (0.72+) from a 0.41 corpus max.
+_VIDU_WEAK_CONFIDENCE = 0.52
+_VIDU_STRONG_CONFIDENCE = 0.58
+_VIDU_RELATIVE_HEIGHTS = tuple(value / 1000 for value in range(34, 61, 3))
+
 #: Every detector runs on a frame whose short side is at most this many pixels,
 #: so one measurement holds at every input resolution.
 _NORMALIZED_SHORT_SIDE = 480
@@ -311,6 +317,16 @@ HAILUO_POLICY = VideoVisiblePolicy(
     anchor_iou=0.80,
 )
 
+VIDU_POLICY = VideoVisiblePolicy(
+    weak_floor=_VIDU_WEAK_CONFIDENCE,
+    strong_floor=_VIDU_STRONG_CONFIDENCE,
+    transition_floor=0.45,
+    min_stable_frames=_MIN_FIXED_MARK_STABLE_FRAMES,
+    cover_after_confirmation=True,
+    padding_fraction=0.12,
+    anchor_iou=0.80,
+)
+
 #: One row per served mark. The arbiter, gate and fill are shared; a row is the
 #: only per-mark tuning. Provenance relaxation is dropped from every row: this
 #: tree's AIGC readers carry no generator claim that could relax a floor, so
@@ -322,6 +338,7 @@ VISIBLE_MARK_POLICIES: dict[str, VideoVisiblePolicy] = {
     "doubao": DOUBAO_POLICY,
     "dola": DOLA_POLICY,
     "hailuo": HAILUO_POLICY,
+    "vidu": VIDU_POLICY,
 }
 
 
@@ -427,6 +444,7 @@ def _template_sources() -> dict[str, NDArray[Any]]:
         "doubao": _asset_template("doubao_outline_alpha.png"),
         "dola": _asset_template("video/video_dola_hershey_duplex.png"),
         "hailuo": _hailuo_template(),
+        "vidu": _vidu_template(),
     }
 
 
@@ -658,6 +676,55 @@ def _hailuo_template() -> NDArray[Any]:
     draw.ellipse((397, 29, 420, 52), fill=0)
     draw.text((456, 18), "hailuo AI", font=font, fill=255, stroke_width=1, stroke_fill=255)
     return np.asarray(canvas, dtype=np.uint8)
+
+
+def _vidu_capsule(height: int, width: int, angle: float, stroke: int) -> NDArray[Any]:
+    canvas = Image.new("L", (200, 200), 0)
+    ImageDraw.Draw(canvas).rounded_rectangle(
+        (100 - width // 2, 100 - height // 2, 100 + width // 2, 100 + height // 2),
+        radius=width // 2,
+        outline=255,
+        width=stroke,
+    )
+    rotation = cv2.getRotationMatrix2D((100, 100), angle, 1.0)
+    return _crop_nonzero(cv2.warpAffine(np.asarray(canvas, dtype=np.uint8), rotation, (200, 200)))
+
+
+@lru_cache(maxsize=1)
+def _vidu_template() -> NDArray[Any]:
+    """Return a synthetic Vidu logo plus "Vidu AI" wordmark silhouette.
+
+    The logo is two outlined capsules leaning into a V; the text is
+    font-rendered. Proportions follow the measured 1080p mark (232 x 50 px:
+    logo 65 x 50, text 155 x 35 centered 12 px after it). No pixels come from
+    an export.
+    """
+    canvas = np.zeros((100, 464), dtype=np.uint8)
+    logo = np.zeros((100, 130), dtype=np.uint8)
+    left = _vidu_capsule(96, 40, 24, 11)
+    left = cv2.resize(left, (left.shape[1] * 100 // left.shape[0], 100))
+    logo[:, : left.shape[1]] = np.maximum(logo[:, : left.shape[1]], left)
+    right = _vidu_capsule(96, 40, -24, 11)
+    right = cv2.resize(right, (right.shape[1] * 100 // right.shape[0], 100))
+    offset = 130 - right.shape[1]
+    logo[:, offset:] = np.maximum(logo[:, offset:], right)
+    canvas[:, :130] = logo
+    text = Image.new("L", (600, 140), 0)
+    ImageDraw.Draw(text).text(
+        (4, 10),
+        "Vidu AI",
+        font=_scalable_default_font(96),
+        fill=255,
+        stroke_width=1,
+        stroke_fill=255,
+    )
+    word = cv2.resize(
+        _crop_nonzero(np.asarray(text, dtype=np.uint8)),
+        (310, 70),
+        interpolation=cv2.INTER_AREA,
+    )
+    canvas[15:85, 154:464] = np.maximum(canvas[15:85, 154:464], word)
+    return canvas
 
 
 # --- fixed-mark detection primitives ---------------------------------------
@@ -916,6 +983,26 @@ def detect_hailuo_frame(
     return FrameLocalization(frame_index, detection.confidence, region)
 
 
+def detect_vidu_frame(
+    image_bgr: NDArray[Any],
+    *,
+    frame_index: int = 0,
+    prepared: _PreparedFrame | None = None,
+) -> FrameLocalization:
+    """Locate the strongest fixed Vidu logo-plus-wordmark candidate."""
+    return _detect_fixed_mark(
+        image_bgr,
+        "vidu",
+        relative_heights=_VIDU_RELATIVE_HEIGHTS,
+        search_origin=(0.70, 0.84),
+        kernel_fraction=0.18,
+        normalized=None
+        if prepared is None
+        else (prepared.normalized_gray, prepared.normalized_scale),
+        frame_index=frame_index,
+    )
+
+
 def detect_veo_frame(
     image_bgr: NDArray[Any],
     *,
@@ -1172,6 +1259,7 @@ _MARK_DETECTORS: dict[str, Callable[..., FrameLocalization]] = {
     "doubao": detect_doubao_frame,
     "dola": detect_dola_frame,
     "hailuo": detect_hailuo_frame,
+    "vidu": detect_vidu_frame,
 }
 
 
