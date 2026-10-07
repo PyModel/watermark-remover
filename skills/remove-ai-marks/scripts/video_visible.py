@@ -1,0 +1,1193 @@
+# Ported from wiltodelta/remove-ai-watermarks src/remove_ai_watermarks/video_visible.py,
+# Apache-2.0; modified: only the sora detector is ported (the other seven marks
+# are a later ticket), the provider table collapsed to the one frozen sora
+# policy this tree can justify, provenance relaxation dropped because this
+# tree's AIGC readers carry no generator claim to relax it with, the mask and
+# fill primitives are this tree's ``region_eraser`` (the numpy-level surface the
+# image backends already expose), the raw-frame encoder lives here rather than
+# in the encode adapter (ticket 03 shipped the probe and remux only), every
+# subprocess is an argument vector, the frame stream is a pipe rather than a
+# whole-file read, and a constant-frame-rate source is required rather than
+# approximated.
+"""Visible sora-watermark removal for video.
+
+The pass has three states, and no fourth: off (no plan section), a detection
+run, or an operator-named region. A detection run decodes once to collect one
+untrusted candidate per frame, accepts a candidate only when it recurs at the
+same place across adjacent frames, and fills the accepted region through the
+same fill backend the image path uses. A candidate seen in a single frame is
+never a fill: the temporal arbiter is what turns a score into a mask, and an
+isolated lookalike fails it.
+
+Detection-driven removal is **best-effort** and says so in the report. An
+operator-named mask or box is **verifiable**: the region that changed is
+exactly the region that was named, and no detection stands between the request
+and the pixels.
+
+The frame stream never holds the whole video: OpenCV decodes one frame at a
+time and the cleaned frames cross a pipe into one ffmpeg encode. Audio is
+stream-copied from the source by a second ffmpeg pass, and the destination is
+staged so a failure leaves it untouched.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import math
+import os
+import shutil
+import subprocess
+import tempfile
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
+from fractions import Fraction
+from functools import lru_cache
+from itertools import pairwise
+from pathlib import Path
+from typing import Any, BinaryIO
+
+import cv2
+import numpy as np
+import region_eraser
+from external_command import ExternalCommandTimeout, run_command
+from morphomod import read_pgm
+from numpy.typing import NDArray
+from PIL import Image, ImageDraw, ImageFont
+from video_encoding import (
+    DEFAULT_OUTPUT_LIMIT,
+    DEFAULT_PROBE_TIMEOUT,
+    DEFAULT_VIDEO_TIMEOUT,
+    VideoEncodeProfile,
+    atomic_video_output,
+    probe_video_encode_profile,
+    remux_video,
+)
+from video_temporal import stabilize_filled_frame
+
+log = logging.getLogger(__name__)
+
+#: A localization region in source-frame pixels: ``(x, y, width, height)``.
+Region = tuple[int, int, int, int]
+
+#: The synthetic sora silhouette is 180x64 at its native size. It is built from
+#: geometric primitives and Pillow's bundled font; no source frame, and no
+#: provider asset, contributes a pixel.
+_SORA_TEMPLATE_SIZE = (180, 64)
+_SORA_RELATIVE_HEIGHTS = (0.065, 0.075, 0.085, 0.095, 0.105)
+
+#: Every detector runs on a frame whose short side is at most this many pixels,
+#: so one measurement holds at every input resolution.
+_NORMALIZED_SHORT_SIDE = 480
+
+#: The temporal arbiter's sora numbers, measured upstream and kept as data.
+#: ``strong_floor`` is the only entry bar this tree can honour: the AIGC
+#: readers carry no generator claim, so no metadata run relaxes it.
+_SORA_WEAK_CONFIDENCE = 0.60
+_SORA_STRONG_CONFIDENCE = 0.65
+_SORA_TRANSITION_CONFIDENCE = 0.45
+_SORA_MIN_STABLE_FRAMES = 5
+_SORA_PADDING_FRACTION = 0.28
+_STABLE_IOU = 0.55
+_MAX_STABLE_GAP = 2
+
+_HDR_TRANSFERS = frozenset({"smpte2084", "arib-std-b67"})
+
+#: One libx264 encode is the visible pass's quality floor: high enough that a
+#: filled region is not itself an artifact, low enough to stay an ordinary
+#: re-encode. It is not exposed on the plan because nothing measured a reason
+#: to move it yet.
+_VISIBLE_CRF = 14
+
+#: The visible pass re-encodes at one constant frame rate. ``constant-rate`` is
+#: a measurement of a uniform timeline; a timeline that could not be read says
+#: so, and a non-uniform one is refused rather than resampled.
+VISIBLE_TIMING_CONSTANT = "constant-rate"
+VISIBLE_TIMING_UNMEASURED = "unmeasured-timeline"
+VISIBLE_TIMING_NOT_RUN = "not-run"
+
+_FFMPEG_STDERR_LIMIT = 8_000
+_FFMPEG_STDERR_TRUNCATION = b"\n... [truncated]\n"
+
+#: The video marks this build can localize. Sora ships first because it is the
+#: one mark the engine was proved end to end on; the other seven are a later
+#: ticket, and naming them here would let a caller configure a pass that
+#: silently does nothing.
+VISIBLE_VIDEO_MARKS = ("sora",)
+
+#: Fill backends, in the vocabulary the image path uses. ``cv2`` is the
+#: classical floor (always available); ``migan`` and ``lama`` are the same
+#: learned backends ``region_eraser.erase`` resolves for images.
+VISIBLE_FILL_BACKENDS = ("cv2", "migan", "lama")
+
+
+@dataclass(frozen=True, slots=True)
+class VisibleVideoPlan:
+    """The explicit opt-in for a visible pass on one video.
+
+    Constructing this at all is the opt-in: a ``VideoPlan`` without it does no
+    pixel work and never even decodes a frame. Exactly one localization source
+    is configured -- a detection-driven ``mark``, or a region the operator
+    named as a ``mask_path`` or a ``box``. The named-region sources are
+    reported as verifiable; the detection-driven source is reported as
+    best-effort, and its fill additionally requires temporal evidence.
+    """
+
+    mark: str | None = None
+    mask_path: Path | None = None
+    box: tuple[int, int, int, int] | None = None
+    backend: str = "cv2"
+    #: Motion-align a safely covered prior fill after the per-frame fill. It
+    #: only ever writes inside the current removal mask, so it cannot widen the
+    #: named region of an explicit mask or box.
+    temporal_consistency: bool = True
+
+    def __post_init__(self) -> None:
+        sources = sum(source is not None for source in (self.mark, self.mask_path, self.box))
+        if sources != 1:
+            raise ValueError("exactly one visible video localization source is required")
+        if self.mark is not None and self.mark not in VISIBLE_VIDEO_MARKS:
+            raise ValueError(
+                f"unknown visible video mark {self.mark!r}; this build ships "
+                f"{', '.join(VISIBLE_VIDEO_MARKS)}"
+            )
+        if self.box is not None:
+            if len(self.box) != 4 or any(
+                isinstance(value, bool) or not isinstance(value, int) for value in self.box
+            ):
+                raise TypeError("visible video box must be four integers: x,y,w,h")
+            x, y, width, height = self.box
+            if x < 0 or y < 0 or width <= 0 or height <= 0:
+                raise ValueError(
+                    "visible video box must have a non-negative origin and positive size"
+                )
+        if self.backend not in VISIBLE_FILL_BACKENDS:
+            raise ValueError(
+                f"unknown visible video backend {self.backend!r}; expected one of "
+                f"{', '.join(VISIBLE_FILL_BACKENDS)}"
+            )
+        if not isinstance(self.temporal_consistency, bool):
+            raise TypeError("temporal_consistency must be a bool")
+
+
+@dataclass(frozen=True, slots=True)
+class FrameLocalization:
+    """The best untrusted sora candidate found in one decoded frame."""
+
+    frame_index: int
+    confidence: float
+    region: Region | None
+
+
+@dataclass(frozen=True, slots=True)
+class VideoScan:
+    """Decoded video geometry plus one localization candidate per frame."""
+
+    width: int
+    height: int
+    fps: float
+    detections: tuple[FrameLocalization, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class VideoVisiblePolicy:
+    """One provider's temporal-arbiter tuning plus the fill geometry it needs.
+
+    ``cover_after_confirmation`` stays False for sora: the mark moves, so a
+    confirmed position is never carried onto a frame that showed nothing.
+    """
+
+    weak_floor: float
+    strong_floor: float
+    transition_floor: float
+    min_stable_frames: int
+    cover_after_confirmation: bool
+    padding_fraction: float
+
+
+SORA_POLICY = VideoVisiblePolicy(
+    weak_floor=_SORA_WEAK_CONFIDENCE,
+    strong_floor=_SORA_STRONG_CONFIDENCE,
+    transition_floor=_SORA_TRANSITION_CONFIDENCE,
+    min_stable_frames=_SORA_MIN_STABLE_FRAMES,
+    cover_after_confirmation=False,
+    padding_fraction=_SORA_PADDING_FRACTION,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class VisibleRemoval:
+    """What one visible pass did, and how much its word is worth.
+
+    ``verification`` is the load-bearing field: ``"best-effort"`` means a
+    probabilistic detector authorized the fill, ``"verifiable"`` means the
+    operator named the region and the pixels that changed are the ones named.
+    """
+
+    source: str
+    mark: str | None
+    status: str
+    verification: str
+    backend: str
+    total_frames: int
+    detected_frames: int
+    removed_frames: int
+    timing: str
+    note: str
+
+    def to_dict(self) -> dict:
+        return {
+            "source": self.source,
+            "mark": self.mark,
+            "status": self.status,
+            "verification": self.verification,
+            "backend": self.backend,
+            "total_frames": self.total_frames,
+            "detected_frames": self.detected_frames,
+            "removed_frames": self.removed_frames,
+            "timing": self.timing,
+            "note": self.note,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedFrame:
+    """The grayscale representations every detected frame shares."""
+
+    normalized_gray: NDArray[Any]
+    normalized_scale: float
+
+
+# --- the synthetic sora silhouette -----------------------------------------
+
+
+def _scalable_default_font(size: int) -> ImageFont.ImageFont | ImageFont.FreeTypeFont:
+    """Load Pillow's bundled scalable font, with a Pillow 10.0 fallback."""
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        # ``size=`` was added after Pillow 10.0, which is still inside this
+        # package's supported dependency range.
+        return ImageFont.load_default()
+
+
+@lru_cache(maxsize=1)
+def _sora_templates() -> tuple[NDArray[Any], NDArray[Any]]:
+    """Return the synthetic full-wordmark and mascot-only silhouettes.
+
+    The cloud-like mascot is assembled from primitive shapes and the word is
+    rendered with Pillow's bundled font, so the template is reproducible from
+    this source alone and carries no provider pixels.
+    """
+    width, height = _SORA_TEMPLATE_SIZE
+    canvas = Image.new("L", (width, height), 0)
+    draw = ImageDraw.Draw(canvas)
+    draw.rounded_rectangle((4, 8, 58, 57), radius=22, fill=255)
+    draw.ellipse((0, 18, 26, 50), fill=255)
+    draw.ellipse((38, 16, 64, 51), fill=255)
+    draw.ellipse((16, 18, 29, 43), fill=0)
+    draw.ellipse((35, 18, 48, 43), fill=0)
+
+    font = _scalable_default_font(50)
+    if isinstance(font, ImageFont.FreeTypeFont):
+        draw.text((67, 0), "Sora", font=font, fill=255, stroke_width=1, stroke_fill=255)
+    else:
+        text_box = font.getbbox("Sora")
+        text = Image.new("L", (max(1, text_box[2]), max(1, text_box[3])), 0)
+        ImageDraw.Draw(text).text((0, 0), "Sora", font=font, fill=255)
+        text = text.resize((102, 50), Image.Resampling.NEAREST)
+        canvas.paste(text, (67, 0), text)
+
+    full = np.asarray(canvas, dtype=np.uint8)
+    return full, full[:, :64]
+
+
+@lru_cache(maxsize=1)
+def _template_feature(
+    template_key: str, width: int, height: int
+) -> tuple[NDArray[Any], NDArray[Any]]:
+    """Resize one template and cache its invariant top-hat representation."""
+    word, icon = _sora_templates()
+    template = cv2.resize(
+        icon if template_key == "sora-icon" else word,
+        (width, height),
+        interpolation=cv2.INTER_AREA,
+    )
+    return template, _top_hat(template)
+
+
+def _top_hat(gray: NDArray[Any]) -> NDArray[Any]:
+    """Suppress the low-frequency background a translucent overlay sits on."""
+    kernel = np.ones((7, 7), dtype=np.uint8)
+    return cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kernel)
+
+
+def _normalized_gray(image_bgr: NDArray[Any]) -> tuple[NDArray[Any], float]:
+    """Return the detection-resolution gray frame and the scale back to source."""
+    gray = image_bgr if image_bgr.ndim == 2 else cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    height, width = gray.shape[:2]
+    short_side = min(height, width)
+    if short_side <= 0:
+        return gray, 1.0
+    scale = min(1.0, _NORMALIZED_SHORT_SIDE / short_side)
+    if scale < 1.0:
+        gray = cv2.resize(
+            gray,
+            (max(1, round(width * scale)), max(1, round(height * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+    return gray, scale
+
+
+def _prepare_frame(image_bgr: NDArray[Any]) -> _PreparedFrame:
+    """Compute the shared grayscale representation for one decoded frame."""
+    normalized_gray, normalized_scale = _normalized_gray(image_bgr)
+    return _PreparedFrame(normalized_gray, normalized_scale)
+
+
+def _expanded_region(
+    location: tuple[int, int],
+    template_width: int,
+    template_height: int,
+    *,
+    icon_only: bool,
+    scale: float,
+    frame_width: int,
+    frame_height: int,
+) -> Region:
+    """Map a normalized-resolution match back to a source-frame region."""
+    x = round(location[0] / scale)
+    y = round(location[1] / scale)
+    height = max(1, round(template_height / scale))
+    width = max(1, round(template_width / scale))
+    if icon_only:
+        width = round(height * _SORA_TEMPLATE_SIZE[0] / _SORA_TEMPLATE_SIZE[1])
+    width = min(width, frame_width - x)
+    height = min(height, frame_height - y)
+    return x, y, max(1, width), max(1, height)
+
+
+def detect_sora_frame(
+    image_bgr: NDArray[Any],
+    *,
+    frame_index: int = 0,
+    prepared: _PreparedFrame | None = None,
+) -> FrameLocalization:
+    """Locate the strongest sora-wordmark match in one frame.
+
+    The candidate is intentionally untrusted, and so is its score: a mask is
+    built only for a run the temporal arbiter confirms across frames.
+    """
+    if image_bgr.size == 0:
+        return FrameLocalization(frame_index, 0.0, None)
+
+    frame_height, frame_width = image_bgr.shape[:2]
+    prepared = prepared or _prepare_frame(image_bgr)
+    gray, scale = prepared.normalized_gray, prepared.normalized_scale
+    normalized_height, normalized_width = gray.shape[:2]
+    feature = _top_hat(gray)
+    best_confidence = 0.0
+    best_region: Region | None = None
+
+    for icon_only, template_key in ((False, "sora-word"), (True, "sora-icon")):
+        for relative_height in _SORA_RELATIVE_HEIGHTS:
+            base_width, base_height = _SORA_TEMPLATE_SIZE
+            if icon_only:
+                base_width = 64
+            template_height = max(
+                16, round(min(normalized_height, normalized_width) * relative_height)
+            )
+            template_width = max(1, round(base_width * template_height / base_height))
+            if template_height >= normalized_height or template_width >= normalized_width:
+                continue
+            template, template_feature = _template_feature(
+                template_key, template_width, template_height
+            )
+            scores = cv2.matchTemplate(feature, template_feature, cv2.TM_CCOEFF_NORMED)
+            _, confidence, _, location = cv2.minMaxLoc(scores)
+            if confidence <= best_confidence:
+                continue
+            if icon_only:
+                # Edge-only correlation also accepts diamonds and scene texture.
+                # Confirm the full mascot silhouette, eyes included.
+                x, y = location
+                candidate = gray[y : y + template_height, x : x + template_width]
+                shape_confidence = float(
+                    cv2.matchTemplate(candidate, template, cv2.TM_CCOEFF_NORMED)[0, 0]
+                )
+                if shape_confidence < 0.50:
+                    continue
+            best_confidence = float(confidence)
+            best_region = _expanded_region(
+                location,
+                template_width,
+                template_height,
+                icon_only=icon_only,
+                scale=scale,
+                frame_width=frame_width,
+                frame_height=frame_height,
+            )
+
+    return FrameLocalization(frame_index, best_confidence, best_region)
+
+
+# --- the temporal arbiter ---------------------------------------------------
+
+
+def _region_intersection(left: Region, right: Region) -> int:
+    lx, ly, lw, lh = left
+    rx, ry, rw, rh = right
+    return max(0, min(lx + lw, rx + rw) - max(lx, rx)) * max(0, min(ly + lh, ry + rh) - max(ly, ry))
+
+
+def _region_iou(left: Region, right: Region) -> float:
+    intersection = _region_intersection(left, right)
+    union = left[2] * left[3] + right[2] * right[3] - intersection
+    return intersection / union if union > 0 else 0.0
+
+
+def stabilize_localizations(
+    detections: tuple[FrameLocalization, ...],
+    *,
+    policy: VideoVisiblePolicy = SORA_POLICY,
+) -> list[Region | None]:
+    """Accept only spatially and temporally recurring candidates.
+
+    A run is consecutive frames whose candidates clear ``weak_floor``, stay
+    within ``_STABLE_IOU`` of their neighbour, and are no more than
+    ``_MAX_STABLE_GAP + 1`` frames apart. A run shorter than
+    ``min_stable_frames`` never fills, and a run whose best score stays below
+    ``strong_floor`` never fills either: one confident frame is a lookalike
+    until the frames around it agree.
+    """
+    accepted: list[Region | None] = [None] * len(detections)
+    runs: list[list[int]] = []
+    current: list[int] = []
+
+    for position, detection in enumerate(detections):
+        if detection.region is None or detection.confidence < policy.weak_floor:
+            continue
+        if current:
+            previous = detections[current[-1]]
+            frame_gap = detection.frame_index - previous.frame_index
+            if (
+                previous.region is None
+                or frame_gap > _MAX_STABLE_GAP + 1
+                or _region_iou(previous.region, detection.region) < _STABLE_IOU
+            ):
+                runs.append(current)
+                current = []
+        current.append(position)
+    if current:
+        runs.append(current)
+
+    for run in runs:
+        strong = max(detections[position].confidence for position in run) >= policy.strong_floor
+        if len(run) < policy.min_stable_frames or not strong:
+            continue
+        for position in run:
+            accepted[position] = detections[position].region
+        for left_position, right_position in pairwise(run):
+            if right_position - left_position <= 1:
+                continue
+            left = detections[left_position]
+            right = detections[right_position]
+            if (
+                left.region is None
+                or right.region is None
+                or _region_iou(left.region, right.region) < _STABLE_IOU
+            ):
+                continue
+            for missing_position in range(left_position + 1, right_position):
+                distance_left = missing_position - left_position
+                distance_right = right_position - missing_position
+                accepted[missing_position] = (
+                    left.region if distance_left <= distance_right else right.region
+                )
+
+    if policy.cover_after_confirmation:
+        confirmed_positions = [
+            position for position, region in enumerate(accepted) if region is not None
+        ]
+        carry_position = confirmed_positions[0] if confirmed_positions else None
+        last_supported = confirmed_positions[-1] if confirmed_positions else -1
+        for position, region in enumerate(accepted):
+            if region is not None:
+                carry_position = position
+                continue
+            raw = detections[position]
+            if (
+                raw.region is not None
+                and raw.confidence >= policy.transition_floor
+                and any(
+                    accepted[confirmed] is not None
+                    and _region_iou(raw.region, accepted[confirmed]) >= _STABLE_IOU
+                    for confirmed in confirmed_positions
+                )
+            ):
+                accepted[position] = raw.region
+                last_supported = max(last_supported, position)
+                continue
+            if carry_position is None or position > last_supported + policy.min_stable_frames:
+                continue
+            accepted[position] = accepted[carry_position]
+
+    return accepted
+
+
+# --- decode -----------------------------------------------------------------
+
+
+def _open_capture(source: Path) -> tuple[Any, int, int, float]:
+    """Open a source for frame-at-a-time decoding, or refuse with a label."""
+    capture = cv2.VideoCapture(str(source))
+    if not capture.isOpened():
+        raise ValueError(f"OpenCV could not decode video: {source}")
+    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = float(capture.get(cv2.CAP_PROP_FPS))
+    if width <= 0 or height <= 0 or fps <= 0:
+        capture.release()
+        raise ValueError(f"video has no decodable stream geometry or frame rate: {source}")
+    return capture, width, height, fps
+
+
+def scan_sora(source: Path) -> VideoScan:
+    """Decode the source once and collect one untrusted sora candidate per frame."""
+    capture, width, height, fps = _open_capture(source)
+    detections: list[FrameLocalization] = []
+    try:
+        index = 0
+        while True:
+            ok, frame = capture.read()
+            if not ok:
+                break
+            if frame.shape[:2] != (height, width):
+                raise ValueError(f"video changes frame dimensions at frame {index}: {source}")
+            detections.append(
+                detect_sora_frame(frame, frame_index=index, prepared=_prepare_frame(frame))
+            )
+            index += 1
+    finally:
+        capture.release()
+    if not detections:
+        raise ValueError(f"video contains no decodable frames: {source}")
+    return VideoScan(width, height, fps, tuple(detections))
+
+
+# --- masks and fills --------------------------------------------------------
+
+
+def mask_for_region(
+    frame_shape: tuple[int, ...],
+    region: Region,
+    *,
+    padding_fraction: float = _SORA_PADDING_FRACTION,
+) -> NDArray[Any]:
+    """Build the removal mask for one accepted region.
+
+    A padded rectangle with no dilation is exactly ``region_eraser.boxes_to_mask``,
+    the same primitive the image fill uses: a glyph-shaped mask leaves a
+    translucent rim outside the approximate synthetic silhouette, and the
+    classical fill then pulls that rim back into the hole.
+    """
+    height, width = frame_shape[:2]
+    x, y, region_width, region_height = region
+    padding = max(4, round(region_height * padding_fraction))
+    return region_eraser.boxes_to_mask(
+        (height, width),
+        [(x - padding, y - padding, region_width + 2 * padding, region_height + 2 * padding)],
+        dilate=0,
+    )
+
+
+def fill_frame(frame_bgr: NDArray[Any], mask: NDArray[Any], *, backend: str) -> NDArray[Any]:
+    """Fill one frame's mask through the backend the image path already uses."""
+    return region_eraser.erase(frame_bgr, mask=mask, backend=backend)
+
+
+# --- the encode pipe --------------------------------------------------------
+
+
+@dataclass
+class _RawEncoder:
+    """A running ffmpeg process fed BGR frames on standard input."""
+
+    process: subprocess.Popen[bytes]
+    stdin: BinaryIO
+    stderr_buffer: BinaryIO
+
+    def poll(self) -> int | None:
+        return self.process.poll()
+
+    def collect_stderr(self) -> str:
+        """Return bounded ffmpeg diagnostics and release the temporary file."""
+        if self.stderr_buffer.closed:
+            raise RuntimeError("ffmpeg diagnostics have already been collected")
+        try:
+            return _read_bounded_stderr(self.stderr_buffer)
+        finally:
+            self.stderr_buffer.close()
+
+    def discard_stderr(self) -> None:
+        """Release the diagnostic buffer after an abort."""
+        if not self.stderr_buffer.closed:
+            self.stderr_buffer.close()
+
+
+def _read_bounded_stderr(buffer: BinaryIO) -> str:
+    """Read bounded head-and-tail diagnostics from a seekable binary stream."""
+    buffer.seek(0, os.SEEK_END)
+    size = buffer.tell()
+    if size <= _FFMPEG_STDERR_LIMIT:
+        buffer.seek(0)
+        raw_stderr = buffer.read()
+    else:
+        payload_limit = _FFMPEG_STDERR_LIMIT - len(_FFMPEG_STDERR_TRUNCATION)
+        head_size = payload_limit // 2
+        tail_size = payload_limit - head_size
+        buffer.seek(0)
+        head = buffer.read(head_size)
+        buffer.seek(-tail_size, os.SEEK_END)
+        tail = buffer.read(tail_size)
+        raw_stderr = head + _FFMPEG_STDERR_TRUNCATION + tail
+    return raw_stderr.decode("utf-8", errors="replace")
+
+
+def _ffmpeg_path() -> str:
+    """The ffmpeg executable, or a labeled refusal; never a guessed name."""
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise ValueError("ffmpeg is required for the visible video pass and was not found")
+    return ffmpeg
+
+
+def _profile_args(profile: VideoEncodeProfile) -> list[str]:
+    """Build the output options that carry the source's own colour properties."""
+    args = ["-pix_fmt", profile.pixel_format]
+    for option, value in (
+        ("-color_range", profile.color_range),
+        ("-colorspace", profile.color_space),
+        ("-color_trc", profile.color_transfer),
+        ("-color_primaries", profile.color_primaries),
+    ):
+        if value is not None:
+            args.extend([option, value])
+    if profile.time_base is not None:
+        args.extend(["-enc_time_base:v", profile.time_base])
+    return args
+
+
+def _raw_video_command(
+    output: Path,
+    *,
+    width: int,
+    height: int,
+    fps: str,
+    profile: VideoEncodeProfile,
+    itsoffset: float | None,
+) -> list[str]:
+    """Build the ffmpeg command that reads BGR frames from standard input.
+
+    The frame rate is a measurement (the probe's ``r_frame_rate``, or the
+    decoder's own value): a visible pass re-encodes at a constant rate, so a
+    source with non-uniform intervals is refused rather than resampled.
+    """
+    command = [_ffmpeg_path(), "-y", "-loglevel", "error"]
+    if itsoffset is not None:
+        command.extend(["-itsoffset", f"{itsoffset:.6f}"])
+    command.extend(
+        [
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "bgr24",
+            "-s:v",
+            f"{width}x{height}",
+            "-r",
+            fps,
+            "-i",
+            "pipe:0",
+            "-map",
+            "0:v:0",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "medium",
+            "-crf",
+            str(_VISIBLE_CRF),
+            *_profile_args(profile),
+            "-map_metadata",
+            "-1",
+            "-map_chapters",
+            "-1",
+            str(output),
+        ]
+    )
+    return command
+
+
+def _start_raw_encoder(command: list[str]) -> _RawEncoder:
+    """Start ffmpeg and validate its raw-frame pipe.
+
+    Diagnostics go to a temporary file rather than a pipe: an encode that fills
+    a stderr pipe nobody drains would deadlock, and a bounded head-and-tail read
+    is what makes the failure message useful.
+    """
+    log.info("Starting ffmpeg visible encode: command=%s", command)
+    # The encoder owns this buffer's lifetime, not a ``with`` block: it must
+    # outlive ``_start_raw_encoder`` and is released by ``collect_stderr`` or
+    # ``discard_stderr``. Same contract as the shipped frame-timing probe.
+    stderr_buffer = tempfile.TemporaryFile(mode="w+b")  # noqa: SIM115
+    try:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=stderr_buffer,
+        )
+    except Exception:
+        stderr_buffer.close()
+        raise
+    if process.stdin is None:
+        process.kill()
+        process.wait()
+        stderr_buffer.close()
+        raise RuntimeError("could not open the ffmpeg input pipe")
+    return _RawEncoder(process, process.stdin, stderr_buffer)
+
+
+def _finish_raw_encoder(encoder: _RawEncoder, output: Path, *, timeout: float) -> None:
+    """Close the frame stream and raise when ffmpeg rejects the encode."""
+    encoder.stdin.close()
+    try:
+        return_code = encoder.process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        encoder.process.kill()
+        encoder.process.wait()
+        stderr = encoder.collect_stderr()
+        raise ValueError(
+            f"ffmpeg timed out encoding {output.name}: {stderr.strip()[:500]}"
+        ) from error
+    stderr = encoder.collect_stderr()
+    log.info("ffmpeg visible encode finished: status=%s stderr=%s", return_code, stderr)
+    if return_code != 0:
+        raise ValueError(f"ffmpeg failed to encode {output.name}: {stderr.strip()[:500]}")
+
+
+def _abort_raw_encoder(encoder: _RawEncoder) -> None:
+    """Stop an incomplete ffmpeg encode and release its diagnostic buffer."""
+    if encoder.poll() is None:
+        encoder.process.kill()
+    encoder.process.wait()
+    encoder.discard_stderr()
+
+
+def _mux_with_source_audio(
+    encoded: Path,
+    source: Path,
+    output: Path,
+    *,
+    strip_metadata: bool,
+    copy_input_timestamps: bool,
+    timeout: float,
+) -> None:
+    """Copy the encoded video and the source's own audio into ``output``.
+
+    ``-c copy`` is what keeps the audio byte-identical: no decode, no re-encode,
+    the original packets are remuxed.
+    """
+    command = [
+        _ffmpeg_path(),
+        "-y",
+        "-loglevel",
+        "error",
+        *(["-copyts"] if copy_input_timestamps else []),
+        "-i",
+        str(encoded),
+        "-i",
+        str(source),
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a?",
+        "-c",
+        "copy",
+        "-map_metadata",
+        "-1" if strip_metadata else "1",
+        "-map_chapters",
+        "-1" if strip_metadata else "1",
+    ]
+    if copy_input_timestamps:
+        command.extend(["-avoid_negative_ts", "disabled"])
+    if output.suffix.lower() in {".mp4", ".mov", ".m4v"}:
+        command.extend(["-movflags", "+faststart"])
+    command.append(str(output))
+    log.info("ffmpeg visible mux: command=%s", command)
+    try:
+        result = run_command(command, timeout=timeout, output_limit=100_000)
+    except FileNotFoundError as error:
+        raise ValueError("ffmpeg is required to mux the visible pass output") from error
+    except ExternalCommandTimeout as error:
+        raise ValueError(f"ffmpeg timed out muxing {output.name}") from error
+    if result.returncode != 0:
+        raise ValueError(f"ffmpeg failed to mux {output.name}: {result.stderr_text.strip()[:500]}")
+
+
+def _measured_frame_times(source: Path, *, timeout: float) -> tuple[float, ...] | None:
+    """The source's frame display times, or ``None`` when they cannot be read.
+
+    ``video_encoding.probe_video_timestamps`` cannot answer for a source whose
+    first frame carries SEI side data: ffprobe's CSV writer appends the
+    side-data warning to the first value, so the whole read is discarded as
+    unparseable (``clip.mkv`` from this ticket's own fixture is one). This is a
+    JSON read of the same field, so a measurable timeline stays measurable. An
+    unreadable one returns ``None`` and is never reported as a constant one.
+    """
+    try:
+        result = run_command(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "frame=best_effort_timestamp_time",
+                "-of",
+                "json",
+                str(source),
+            ],
+            timeout=timeout,
+            output_limit=DEFAULT_OUTPUT_LIMIT,
+        )
+    except (FileNotFoundError, ExternalCommandTimeout):
+        return None
+    if result.returncode != 0 or result.stdout_truncated:
+        return None
+    try:
+        frames = json.loads(result.stdout_text)["frames"]
+        times = tuple(float(frame["best_effort_timestamp_time"]) for frame in frames)
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if len(times) < 3 or not all(math.isfinite(time) for time in times):
+        return None
+    return times
+
+
+def _timing_label(source: Path, *, timeout: float) -> str:
+    """Label the source's frame timeline, refusing a non-uniform one.
+
+    A constant-rate encode of a variable-rate source would move frames against
+    the bitstream-copied audio, so the pass refuses instead of approximating.
+    """
+    times = _measured_frame_times(source, timeout=timeout)
+    if times is None:
+        return VISIBLE_TIMING_UNMEASURED
+    intervals = [right - left for left, right in pairwise(times)]
+    if (
+        intervals
+        and intervals[0] > 0
+        and all(abs(interval - intervals[0]) < 1e-6 for interval in intervals)
+    ):
+        return VISIBLE_TIMING_CONSTANT
+    raise ValueError(
+        "visible video removal re-encodes at a constant frame rate; this source has "
+        "non-uniform frame timestamps, so a fill would desynchronize the copied audio"
+    )
+
+
+def _require_sdr_8bit(profile: VideoEncodeProfile) -> None:
+    """Refuse a source the 8-bit BGR pipe cannot carry back unchanged."""
+    if (profile.component_depth or 0) > 8 or profile.color_transfer in _HDR_TRANSFERS:
+        source_format = profile.source_pixel_format or "unknown pixel format"
+        raise ValueError(
+            "visible video removal supports SDR 8-bit input only; refusing to "
+            f"silently reduce {source_format} / "
+            f"{profile.color_transfer or 'unknown transfer'} to 8-bit SDR"
+        )
+
+
+def _itsoffset_seconds(profile: VideoEncodeProfile) -> float | None:
+    """The source's non-zero start offset in seconds, when it is measurable."""
+    if profile.start_pts in (None, 0) or profile.time_base is None:
+        return None
+    offset = profile.start_pts * float(Fraction(profile.time_base))
+    return offset if offset > 0 else None
+
+
+@contextmanager
+def _staged_frames_video(dest: Path) -> Iterator[Path]:
+    """Yield the encoded-video temporary path, removed whatever happens."""
+    handle, temp_name = tempfile.mkstemp(
+        prefix=f".{dest.name}-video-", suffix=".mkv", dir=dest.parent
+    )
+    os.close(handle)
+    encoded = Path(temp_name)
+    try:
+        yield encoded
+    finally:
+        encoded.unlink(missing_ok=True)
+
+
+# --- the pass ---------------------------------------------------------------
+
+
+def _explicit_mask_provider(
+    mask_path: Path,
+) -> Callable[[NDArray[Any], int], NDArray[Any] | None]:
+    """A per-frame mask provider for an operator-named PGM mask."""
+    mask = read_pgm(mask_path)
+    expected = (mask.height, mask.width)
+    flat = np.frombuffer(bytes(mask.data), dtype=np.uint8)
+
+    def provider(frame_bgr: NDArray[Any], _index: int) -> NDArray[Any] | None:
+        shape = frame_bgr.shape[:2]
+        if shape != expected:
+            raise ValueError(
+                f"mask {mask_path} is {mask.width}x{mask.height} but the video frame is "
+                f"{shape[1]}x{shape[0]}"
+            )
+        return flat.reshape(expected)
+
+    return provider
+
+
+def _box_mask_provider(
+    box: tuple[int, int, int, int],
+) -> Callable[[NDArray[Any], int], NDArray[Any] | None]:
+    """A per-frame mask provider for an operator-named box."""
+
+    def provider(frame_bgr: NDArray[Any], _index: int) -> NDArray[Any] | None:
+        return region_eraser.boxes_to_mask(frame_bgr.shape[:2], [box], dilate=0)
+
+    return provider
+
+
+def encode_clean_video(
+    source: Path,
+    dest: Path,
+    *,
+    mask_provider: Callable[[NDArray[Any], int], NDArray[Any] | None],
+    backend: str,
+    remove_metadata: bool,
+    temporal_consistency: bool,
+    timeout: float,
+    expected_frames: int | None = None,
+) -> tuple[int, str]:
+    """Decode, fill every masked frame, and publish the result atomically.
+
+    Returns the number of frames whose pixels changed and the measured timing
+    label. The destination appears only after a completed encode and mux; any
+    failure removes the staged files and leaves the destination exactly as it
+    was.
+    """
+    if backend not in VISIBLE_FILL_BACKENDS:
+        raise ValueError(
+            f"unknown visible fill backend {backend!r}; expected one of "
+            f"{', '.join(VISIBLE_FILL_BACKENDS)}"
+        )
+    profile = probe_video_encode_profile(source, timeout=min(timeout, DEFAULT_PROBE_TIMEOUT))
+    _require_sdr_8bit(profile)
+    timing = _timing_label(source, timeout=min(timeout, DEFAULT_PROBE_TIMEOUT))
+    itsoffset = _itsoffset_seconds(profile)
+
+    capture, width, height, capture_fps = _open_capture(source)
+    fps = profile.frame_rate or f"{capture_fps:.12g}"
+    removed_frames = 0
+    frame_index = 0
+    encoder: _RawEncoder | None = None
+    try:
+        with atomic_video_output(dest) as temporary, _staged_frames_video(dest) as encoded:
+            encoder = _start_raw_encoder(
+                _raw_video_command(
+                    encoded,
+                    width=width,
+                    height=height,
+                    fps=fps,
+                    profile=profile,
+                    itsoffset=itsoffset,
+                )
+            )
+            previous_source: NDArray[Any] | None = None
+            previous_cleaned: NDArray[Any] | None = None
+            previous_mask: NDArray[Any] | None = None
+            try:
+                while True:
+                    ok, frame = capture.read()
+                    if not ok:
+                        break
+                    if frame.shape[:2] != (height, width):
+                        raise ValueError(
+                            f"video changes frame dimensions at frame {frame_index}: {source}"
+                        )
+                    source_frame = frame
+                    mask = mask_provider(frame, frame_index)
+                    if mask is not None:
+                        cleaned = fill_frame(frame, mask, backend=backend)
+                        if (
+                            temporal_consistency
+                            and previous_source is not None
+                            and previous_cleaned is not None
+                            and previous_mask is not None
+                        ):
+                            cleaned = stabilize_filled_frame(
+                                previous_source,
+                                previous_cleaned,
+                                previous_mask,
+                                source_frame,
+                                cleaned,
+                                mask,
+                                copy=False,
+                            )
+                        frame = cleaned
+                        removed_frames += 1
+                        previous_source = source_frame
+                        previous_cleaned = frame
+                        previous_mask = mask
+                    encoder.stdin.write(frame.tobytes())
+                    frame_index += 1
+            except BaseException:
+                _abort_raw_encoder(encoder)
+                encoder = None
+                raise
+            _finish_raw_encoder(encoder, encoded, timeout=timeout)
+            encoder = None
+            if expected_frames is not None and frame_index != expected_frames:
+                raise ValueError(
+                    f"video ended after {frame_index} frames; the scan measured "
+                    f"{expected_frames} — refusing to fill a partial clip"
+                )
+            _mux_with_source_audio(
+                encoded,
+                source,
+                temporary,
+                strip_metadata=remove_metadata,
+                copy_input_timestamps=itsoffset is not None,
+                timeout=timeout,
+            )
+    finally:
+        capture.release()
+        if encoder is not None:
+            _abort_raw_encoder(encoder)
+    return removed_frames, timing
+
+
+def clean_visible_video(
+    source: Path,
+    dest: Path,
+    *,
+    mark: str | None = None,
+    mask_path: Path | None = None,
+    box: tuple[int, int, int, int] | None = None,
+    backend: str = "cv2",
+    remove_metadata: bool = True,
+    temporal_consistency: bool = True,
+    timeout: float = DEFAULT_VIDEO_TIMEOUT,
+) -> VisibleRemoval:
+    """Run one visible pass: detection-driven, or an operator-named region.
+
+    A detection pass with no accepted candidate writes the metadata-only
+    remux: no frame is filled without evidence. An explicit mask or box fills
+    the named region on every frame and reports the removal as verifiable.
+    """
+    explicit = mask_path is not None or box is not None
+    if explicit and mark is not None:
+        raise ValueError("exactly one localization source may be configured")
+    if not explicit and mark is None:
+        raise ValueError("a visible video pass needs a mark, a mask, or a box")
+
+    if explicit:
+        if mask_path is not None:
+            source_label = f"mask:{mask_path}"
+            mask_provider = _explicit_mask_provider(mask_path)
+        else:
+            if box is None:
+                raise ValueError("a box pass needs a box")
+            source_label = f"box:{','.join(map(str, box))}"
+            mask_provider = _box_mask_provider(box)
+        removed_frames, timing = encode_clean_video(
+            source,
+            dest,
+            mask_provider=mask_provider,
+            backend=backend,
+            remove_metadata=remove_metadata,
+            temporal_consistency=temporal_consistency,
+            timeout=timeout,
+        )
+        return VisibleRemoval(
+            source=source_label,
+            mark=None,
+            status="cleaned",
+            verification="verifiable",
+            backend=backend,
+            total_frames=removed_frames,
+            detected_frames=removed_frames,
+            removed_frames=removed_frames,
+            timing=timing,
+            note=(
+                "the operator named the region; the pixels that changed are exactly the "
+                "named region, so this removal is verifiable rather than best-effort"
+            ),
+        )
+
+    scan = scan_sora(source)
+    regions = stabilize_localizations(scan.detections)
+    detected_frames = sum(region is not None for region in regions)
+    if detected_frames == 0:
+        # A detection pass with no accepted candidate changes no pixel: the
+        # metadata strip still produces the destination, as a stream copy.
+        remux_video(source, dest, strip_metadata=remove_metadata, timeout=timeout)
+        return VisibleRemoval(
+            source=f"detection:{mark}",
+            mark=mark,
+            status="no-mark",
+            verification="best-effort",
+            backend=backend,
+            total_frames=len(scan.detections),
+            detected_frames=0,
+            removed_frames=0,
+            timing=VISIBLE_TIMING_NOT_RUN,
+            note=(
+                "no candidate recurred across adjacent frames, so no frame was filled; "
+                "detection-driven removal is best-effort and this run found nothing to remove"
+            ),
+        )
+
+    def provider(frame_bgr: NDArray[Any], index: int) -> NDArray[Any] | None:
+        if index >= len(regions):
+            raise ValueError(
+                f"video has more frames than the {len(regions)}-frame scan; refusing to "
+                "fill a clip whose length changed between the scan and the encode"
+            )
+        region = regions[index]
+        if region is None:
+            return None
+        return mask_for_region(frame_bgr.shape, region)
+
+    removed_frames, timing = encode_clean_video(
+        source,
+        dest,
+        mask_provider=provider,
+        backend=backend,
+        remove_metadata=remove_metadata,
+        temporal_consistency=temporal_consistency,
+        timeout=timeout,
+        expected_frames=len(scan.detections),
+    )
+    return VisibleRemoval(
+        source=f"detection:{mark}",
+        mark=mark,
+        status="cleaned" if removed_frames else "no-mark",
+        verification="best-effort",
+        backend=backend,
+        total_frames=len(scan.detections),
+        detected_frames=detected_frames,
+        removed_frames=removed_frames,
+        timing=timing,
+        note=(
+            "the temporal arbiter accepted a mark that recurs at the same place across "
+            "adjacent frames; a detection-driven fill is best-effort, not a guarantee"
+        ),
+    )

@@ -12,6 +12,12 @@ planning step calls, :func:`inspect_video` is read-only, and
 :func:`clean_video` is the only write path. No surface calls a video cleaner
 directly -- ``clean_asset`` dispatches here for the ``video`` kind.
 
+Metadata removal is verifiable and on by default. Visible-mark removal is
+opt-in through ``VideoPlan.visible`` and labeled best-effort when a detector
+authorized the fill, or verifiable when the operator named the region. Its
+engine lives in ``video_visible``, which is imported only when the opt-in is
+present so a metadata-only clean never needs OpenCV.
+
 A note on absence: a video that carries no supported marker is reported as
 ``unknown``, never as clean. The readers cover three fixed containers; a
 signal outside them was not measured, and "not measured" is not "not there".
@@ -24,11 +30,18 @@ import shutil
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from common import MAX_INPUT_BYTES, read_bytes_bounded
 from container_readers import read_container_findings
 from optional_deps import module_available
-from video_encoding import remux_video
+from video_encoding import DEFAULT_VIDEO_TIMEOUT, remux_video
+
+if TYPE_CHECKING:
+    # Annotation-only. The visible engine needs OpenCV, so its plan section is
+    # imported at runtime only when the operator opts in -- the metadata-only
+    # default must not pull a pixel library into the clean path.
+    from video_visible import VisibleVideoPlan
 
 #: The audio disposition every video result carries. The original stream is
 #: bitstream-copied by the remux, but nothing inspected it, so the value is a
@@ -82,15 +95,24 @@ class VideoPlan:
     """The frozen video policy carried on ``CleanPlan``.
 
     ``remove_metadata`` is the default: a clean with no video flags strips the
-    native provenance markers and touches no pixel. A later visible stage joins
-    as its own gate rather than widening this flag.
+    native provenance markers and touches no pixel. ``visible`` is the opt-in:
+    ``None`` means no frame is decoded and no frame can change, and a present
+    plan means a visible pass runs under its own gate.
     """
 
     remove_metadata: bool = True
+    visible: VisibleVideoPlan | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.remove_metadata, bool):
             raise TypeError("remove_metadata must be a bool")
+        if self.visible is not None:
+            # Imported here, not at module load: the visible engine needs
+            # OpenCV, and a metadata-only clean must not require it.
+            from video_visible import VisibleVideoPlan as _VisibleVideoPlan
+
+            if not isinstance(self.visible, _VisibleVideoPlan):
+                raise TypeError("visible must be a VisibleVideoPlan or None")
 
 
 def _container_name(data: bytes) -> str:
@@ -132,13 +154,20 @@ def _marker_key(marker: dict) -> tuple[str, str]:
 
 @dataclass(frozen=True, slots=True)
 class VideoCleanResult:
-    """The verifiable outcome of one metadata strip, plus the audio boundary."""
+    """The verifiable outcome of one metadata strip, plus the audio boundary.
+
+    ``visible`` is the visible pass's own report, or ``None`` when no visible
+    pass was requested. It carries the field that matters most here:
+    ``verification``, ``best-effort`` for detection-driven removal and
+    ``verifiable`` for a region the operator named.
+    """
 
     container: str
     markers_detected: tuple[dict, ...]
     markers_removed: tuple[dict, ...]
     markers_remaining: tuple[dict, ...]
     audio: str = AUDIO_UNVERIFIED
+    visible: dict | None = None
 
     @property
     def residual(self) -> bool:
@@ -153,6 +182,7 @@ class VideoCleanResult:
             "markers_remaining": [dict(marker) for marker in self.markers_remaining],
             "audio": self.audio,
             "audio_verified": False,
+            "visible": dict(self.visible) if self.visible is not None else None,
         }
 
 
@@ -167,16 +197,36 @@ def clean_video(
 
     The source's markers are read before the write and the destination's after,
     so every removed and every surviving marker is named. A survivor is not an
-    error: it is a reported residual that fails the clean. The remux copies
-    every stream, audio included, and stages the destination, so a failure
-    leaves ``dest`` untouched.
+    error: it is a reported residual that fails the clean. With no visible plan
+    the remux copies every stream, audio included; with a visible plan the
+    frames are re-encoded through the fill backend and the audio is still
+    stream-copied. Either way the destination is staged, so a failure leaves
+    ``dest`` untouched.
     """
     missing = video_runtime()
     if missing:
         raise ValueError(video_runtime_hint(missing))
     source_container, detected = _read_video(source)
-    remux_kwargs = {} if timeout is None else {"timeout": timeout}
-    remux_video(source, dest, strip_metadata=plan.remove_metadata, **remux_kwargs)
+    visible: dict | None = None
+    if plan.visible is None:
+        remux_kwargs = {} if timeout is None else {"timeout": timeout}
+        remux_video(source, dest, strip_metadata=plan.remove_metadata, **remux_kwargs)
+    else:
+        # Imported here, not at module load: the visible engine needs OpenCV,
+        # and a metadata-only clean (the default) must not require it.
+        from video_visible import clean_visible_video
+
+        visible = clean_visible_video(
+            source,
+            dest,
+            mark=plan.visible.mark,
+            mask_path=plan.visible.mask_path,
+            box=plan.visible.box,
+            backend=plan.visible.backend,
+            remove_metadata=plan.remove_metadata,
+            temporal_consistency=plan.visible.temporal_consistency,
+            timeout=DEFAULT_VIDEO_TIMEOUT if timeout is None else timeout,
+        ).to_dict()
     dest_container, remaining = _read_video(dest)
     remaining_keys = {_marker_key(marker) for marker in remaining}
     removed = tuple(marker for marker in detected if _marker_key(marker) not in remaining_keys)
@@ -185,6 +235,7 @@ def clean_video(
         markers_detected=detected,
         markers_removed=removed,
         markers_remaining=remaining,
+        visible=visible,
     )
 
 
