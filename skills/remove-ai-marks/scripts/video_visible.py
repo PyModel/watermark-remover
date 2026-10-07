@@ -120,6 +120,15 @@ _VIDU_WEAK_CONFIDENCE = 0.52
 _VIDU_STRONG_CONFIDENCE = 0.58
 _VIDU_RELATIVE_HEIGHTS = tuple(value / 1000 for value in range(34, 61, 3))
 
+#: Kling's wordmark core. Its per-frame score does not separate texture from the
+#: label (an OpenArt export with no Kling mark scored 0.81 against 0.63 for a
+#: real overlay), so the run must stay anchored far tighter than the shared 0.80
+#: and the label must reach the bottom-right frame edge.
+_KLING_WEAK_CONFIDENCE = 0.20
+_KLING_STRONG_CONFIDENCE = 0.24
+_KLING_MIN_WHITE_FRACTION = 0.02
+_KLING_RELATIVE_HEIGHTS = tuple(value / 1000 for value in range(24, 49, 3))
+
 #: Every detector runs on a frame whose short side is at most this many pixels,
 #: so one measurement holds at every input resolution.
 _NORMALIZED_SHORT_SIDE = 480
@@ -327,6 +336,16 @@ VIDU_POLICY = VideoVisiblePolicy(
     anchor_iou=0.80,
 )
 
+KLING_POLICY = VideoVisiblePolicy(
+    weak_floor=_KLING_WEAK_CONFIDENCE,
+    strong_floor=_KLING_STRONG_CONFIDENCE,
+    transition_floor=0.30,
+    min_stable_frames=_MIN_FIXED_MARK_STABLE_FRAMES,
+    cover_after_confirmation=True,
+    anchor_iou=0.95,
+    padding_fraction=0.12,
+)
+
 #: One row per served mark. The arbiter, gate and fill are shared; a row is the
 #: only per-mark tuning. Provenance relaxation is dropped from every row: this
 #: tree's AIGC readers carry no generator claim that could relax a floor, so
@@ -339,6 +358,7 @@ VISIBLE_MARK_POLICIES: dict[str, VideoVisiblePolicy] = {
     "dola": DOLA_POLICY,
     "hailuo": HAILUO_POLICY,
     "vidu": VIDU_POLICY,
+    "kling": KLING_POLICY,
 }
 
 
@@ -435,7 +455,7 @@ def _template_sources() -> dict[str, NDArray[Any]]:
     """Return every immutable synthetic template by detector-local key."""
     sora_word, sora_icon = _sora_templates()
     veo_diamond, veo_text = _veo_templates()
-    return {
+    sources = {
         "sora-word": sora_word,
         "sora-icon": sora_icon,
         "veo-diamond": veo_diamond,
@@ -445,7 +465,12 @@ def _template_sources() -> dict[str, NDArray[Any]]:
         "dola": _asset_template("video/video_dola_hershey_duplex.png"),
         "hailuo": _hailuo_template(),
         "vidu": _vidu_template(),
+        "kling-logo": _kling_logo_template(),
     }
+    sources.update(
+        {f"kling-{index}": template for index, template in enumerate(_kling_templates())}
+    )
+    return sources
 
 
 @cache
@@ -727,6 +752,37 @@ def _vidu_template() -> NDArray[Any]:
     return canvas
 
 
+@lru_cache(maxsize=1)
+def _kling_templates() -> tuple[NDArray[Any], ...]:
+    """Return synthetic font and capitalization variants for the Kling wordmark core."""
+    templates: list[NDArray[Any]] = []
+    for text, asset_stem in (("KLING AI", "kling_ai"), ("KlingAI", "klingai")):
+        canvas = Image.new("L", (430, 104), 0)
+        ImageDraw.Draw(canvas).text(
+            (2, 12),
+            text,
+            font=_scalable_default_font(64),
+            fill=255,
+            stroke_width=1,
+            stroke_fill=255,
+        )
+        templates.append(_crop_nonzero(np.asarray(canvas, dtype=np.uint8)))
+        # Frozen OpenCV 4 Hershey renders; see assets/video/PROVENANCE.md for why.
+        templates.extend(
+            _asset_template(f"video/video_{asset_stem}_hershey_{font}.png")
+            for font in ("simplex", "duplex")
+        )
+    return tuple(templates)
+
+
+@lru_cache(maxsize=1)
+def _kling_logo_template() -> NDArray[Any]:
+    """Return a synthetic ring approximation of the Kling swirl."""
+    template = np.zeros((100, 100), dtype=np.uint8)
+    cv2.circle(template, (50, 50), 34, 255, 14, cv2.LINE_AA)
+    return _crop_nonzero(template)
+
+
 # --- fixed-mark detection primitives ---------------------------------------
 
 
@@ -1003,6 +1059,111 @@ def detect_vidu_frame(
     )
 
 
+def _reaches_kling_edge(region: Region, frame_width: int, frame_height: int) -> bool:
+    """Whether a Kling candidate box reaches the bottom-right frame edge."""
+    x, y, width, height = region
+    return x + width >= frame_width * 0.96 and y + height >= frame_height * 0.94
+
+
+def detect_kling_frame(
+    image_bgr: NDArray[Any],
+    *,
+    frame_index: int = 0,
+    prepared: _PreparedFrame | None = None,
+) -> FrameLocalization:
+    """Locate the fixed Kling wordmark core and include its version suffix."""
+    if image_bgr.size == 0:
+        return FrameLocalization(frame_index, 0.0, None)
+    frame_height, frame_width = image_bgr.shape[:2]
+    prepared = prepared or _prepare_frame(image_bgr)
+    normalized = prepared.normalized_gray, prepared.normalized_scale
+    expanded: list[FrameLocalization] = []
+    for template_index, _template in enumerate(_kling_templates()):
+        detection = _detect_fixed_mark(
+            image_bgr,
+            f"kling-{template_index}",
+            relative_heights=_KLING_RELATIVE_HEIGHTS,
+            search_origin=(0.64, 0.84),
+            kernel_fraction=0.18,
+            prefer_larger_within=0.06,
+            normalized=normalized,
+            frame_index=frame_index,
+        )
+        if detection.region is None:
+            continue
+        x, y, width, height = detection.region
+        left_padding = round(height * 1.8)
+        right_padding = round(height * 4.0)
+        vertical_padding = round(height * 0.4)
+        region = _bounded_region(
+            x - left_padding,
+            y - vertical_padding,
+            width + left_padding + right_padding,
+            height + vertical_padding * 2,
+            frame_width=frame_width,
+            frame_height=frame_height,
+        )
+        expanded.append(FrameLocalization(frame_index, detection.confidence, region))
+    if not expanded:
+        return FrameLocalization(frame_index, 0.0, None)
+    edge_candidates = [
+        candidate
+        for candidate in expanded
+        if candidate.region is not None
+        and _reaches_kling_edge(candidate.region, frame_width, frame_height)
+    ]
+    font_candidate = (
+        None
+        if not edge_candidates
+        else max(edge_candidates, key=lambda candidate: candidate.confidence)
+    )
+
+    logo = _detect_fixed_mark(
+        image_bgr,
+        "kling-logo",
+        relative_heights=tuple(value / 1000 for value in range(20, 61, 3)),
+        search_origin=(0.62, 0.90),
+        kernel_fraction=0.18,
+        prefer_larger_within=0.03,
+        normalized=normalized,
+        frame_index=frame_index,
+    )
+    logo_candidate: FrameLocalization | None = None
+    logo_x: int | None = None
+    if logo.region is not None and logo.confidence >= 0.44:
+        logo_x, logo_y, _, logo_height = logo.region
+        logo_region = _bounded_region(
+            logo_x - round(logo_height * 0.2),
+            logo_y - round(logo_height * 0.25),
+            round(logo_height * 7.8),
+            round(logo_height * 1.5),
+            frame_width=frame_width,
+            frame_height=frame_height,
+        )
+        # The swirl arm must reach the same frame edge as the text arm: a swirl
+        # match on wood grain 11% short of the right edge covered every frame of
+        # a Higgsfield Cinema Studio clip (2026-09-25).
+        if _reaches_kling_edge(logo_region, frame_width, frame_height):
+            logo_candidate = FrameLocalization(frame_index, logo.confidence, logo_region)
+
+    best = font_candidate or logo_candidate
+    if (
+        font_candidate is not None
+        and font_candidate.region is not None
+        and logo_candidate is not None
+        and logo_x is not None
+    ):
+        font_x, _, font_width, _ = font_candidate.region
+        if font_x - round(font_width * 0.08) <= logo_x <= font_x + round(font_width * 0.50):
+            best = logo_candidate
+    if best is None or best.region is None:
+        return FrameLocalization(frame_index, 0.0, None)
+    x, y, width, height = best.region
+    if _white_fraction(image_bgr[y : y + height, x : x + width]) < _KLING_MIN_WHITE_FRACTION:
+        return FrameLocalization(frame_index, 0.0, None)
+    return best
+
+
 def detect_veo_frame(
     image_bgr: NDArray[Any],
     *,
@@ -1260,6 +1421,7 @@ _MARK_DETECTORS: dict[str, Callable[..., FrameLocalization]] = {
     "dola": detect_dola_frame,
     "hailuo": detect_hailuo_frame,
     "vidu": detect_vidu_frame,
+    "kling": detect_kling_frame,
 }
 
 

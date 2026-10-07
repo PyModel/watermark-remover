@@ -31,7 +31,7 @@ from test_video_visible import (
 
 #: The marks this file covers. Ticket 05's sora pass is pinned in
 #: ``test_video_visible.py``; these seven run through the same engine.
-_MARKS = ("veo", "seedance", "doubao", "dola", "hailuo", "vidu")
+_MARKS = ("veo", "seedance", "doubao", "dola", "hailuo", "vidu", "kling")
 
 #: Where each mark is drawn and how tall, chosen so the mark sits inside the
 #: detector's own search region and at a size the detector's height sweep hits.
@@ -52,6 +52,11 @@ _PLACEMENT: dict[str, tuple[str, int, int, int]] = {
     "hailuo": ("hailuo", 6, 60, 100),
     # vidu: logo plus wordmark, bottom-right, inside the (0.70, 0.84) search.
     "vidu": ("vidu", 6, 120, 106),
+    # kling: the frozen Hershey simplex wordmark core. The wordmark's own
+    # expanded box must reach the frame edge, so it is drawn flush toward the
+    # corner; the Pillow glyph variant is avoided because its matching ring
+    # lookalike contracts the region and leaves the glyph's left half behind.
+    "kling": ("kling-3", 6, 112, 108),
 }
 
 
