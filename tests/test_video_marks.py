@@ -156,3 +156,37 @@ def test_a_stable_mark_is_removed_and_reported_best_effort(
     assert _accepted_frames(dest, mark) == 0
     # The frames were re-encoded, so a stream copy cannot explain the result.
     assert _stream_md5(dest, "0:v:0") != _stream_md5(src, "0:v:0")
+
+
+# --- criterion 2: a one-frame flicker from this set is never filled --------
+
+
+@requires_visible_runtime
+@pytest.mark.parametrize("mark", _MARKS)
+def test_a_mark_in_only_one_frame_is_never_filled(
+    mark: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A one-frame flicker is not evidence: no candidate run, no fill."""
+    from video import VideoPlan
+    from video_visible import VisibleVideoPlan
+
+    _stub_video_extra(monkeypatch)
+    src = _mark_clip(tmp_path, mark, marked_frames=(5,))
+    dest = tmp_path / "clean.mkv"
+    frames_before = _stream_md5(src, "0:v:0")
+
+    payload = _clean_video_asset(
+        src, dest, VideoPlan(visible=VisibleVideoPlan(mark=mark))
+    ).to_dict()
+    visible = payload["visible"]
+
+    assert visible is not None
+    assert visible["mark"] == mark
+    assert visible["status"] == "no-mark"
+    assert visible["verification"] == "best-effort"
+    assert visible["detected_frames"] == 0
+    assert visible["removed_frames"] == 0
+    assert visible["timing"] == "not-run"
+    assert dest.exists()
+    # No frame changed at all, so the isolated flicker survives untouched.
+    assert _stream_md5(dest, "0:v:0") == frames_before
