@@ -52,10 +52,11 @@ _PLACEMENT: dict[str, tuple[str, int, int, int]] = {
     "hailuo": ("hailuo", 6, 60, 100),
     # vidu: logo plus wordmark, bottom-right, inside the (0.70, 0.84) search.
     "vidu": ("vidu", 6, 120, 106),
-    # kling: the frozen Hershey simplex wordmark core. The wordmark's own
+    # kling: the Pillow-rendered "KlingAI" wordmark variant. The wordmark's own
     # expanded box must reach the frame edge, so it is drawn flush toward the
-    # corner; the Pillow glyph variant is avoided because its matching ring
-    # lookalike contracts the region and leaves the glyph's left half behind.
+    # corner. The "KLING AI" variant is avoided because its matching ring
+    # lookalike contracts the region onto the glyph's right half and leaves the
+    # left half behind after the fill; this wider variant's box still covers it.
     "kling": ("kling-3", 6, 112, 108),
 }
 
