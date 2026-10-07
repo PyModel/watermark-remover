@@ -88,6 +88,12 @@ _VEO_REFERENCE_SHORT_SIDE = 720
 _VEO_DIAMOND_PROFILES = ((56, 92, 92), (48, 72, 72), (44, 29, 40))
 _MIN_VEO_STABLE_FRAMES = 12
 
+#: Seedance's boxed ``AI`` label is a fixed-position mark; its floors and
+#: stability length are the reference's measured ones.
+_SEEDANCE_WEAK_CONFIDENCE = 0.38
+_SEEDANCE_STRONG_CONFIDENCE = 0.43
+_MIN_FIXED_MARK_STABLE_FRAMES = 12
+
 #: Every detector runs on a frame whose short side is at most this many pixels,
 #: so one measurement holds at every input resolution.
 _NORMALIZED_SHORT_SIDE = 480
@@ -245,6 +251,16 @@ VEO_POLICY = VideoVisiblePolicy(
     padding_fraction=0.18,
 )
 
+SEEDANCE_POLICY = VideoVisiblePolicy(
+    weak_floor=_SEEDANCE_WEAK_CONFIDENCE,
+    strong_floor=_SEEDANCE_STRONG_CONFIDENCE,
+    transition_floor=0.30,
+    min_stable_frames=_MIN_FIXED_MARK_STABLE_FRAMES,
+    cover_after_confirmation=True,
+    padding_fraction=0.0,
+    anchor_iou=0.80,
+)
+
 #: One row per served mark. The arbiter, gate and fill are shared; a row is the
 #: only per-mark tuning. Provenance relaxation is dropped from every row: this
 #: tree's AIGC readers carry no generator claim that could relax a floor, so
@@ -252,6 +268,7 @@ VEO_POLICY = VideoVisiblePolicy(
 VISIBLE_MARK_POLICIES: dict[str, VideoVisiblePolicy] = {
     "sora": SORA_POLICY,
     "veo": VEO_POLICY,
+    "seedance": SEEDANCE_POLICY,
 }
 
 
@@ -353,6 +370,7 @@ def _template_sources() -> dict[str, NDArray[Any]]:
         "sora-icon": sora_icon,
         "veo-diamond": veo_diamond,
         "veo-text": veo_text,
+        "seedance": _seedance_template(),
     }
 
 
@@ -537,6 +555,25 @@ def _veo_templates() -> tuple[NDArray[Any], NDArray[Any]]:
     return np.asarray(diamond_canvas, dtype=np.uint8), text
 
 
+@lru_cache(maxsize=1)
+def _seedance_template() -> NDArray[Any]:
+    """Return a synthetic boxed-AI silhouette for Seedance exports."""
+    canvas = Image.new("L", (160, 120), 0)
+    draw = ImageDraw.Draw(canvas)
+    draw.rounded_rectangle((8, 8, 142, 105), radius=28, outline=255, width=7)
+    draw.text(
+        (35, 17),
+        "AI",
+        font=_scalable_default_font(70),
+        fill=255,
+        stroke_width=1,
+        stroke_fill=255,
+    )
+    draw.rounded_rectangle((142, 94, 157, 109), radius=3, outline=255, width=2)
+    draw.text((145, 94), "AI", font=_scalable_default_font(8), fill=255)
+    return np.asarray(canvas, dtype=np.uint8)
+
+
 # --- fixed-mark detection primitives ---------------------------------------
 
 
@@ -602,6 +639,102 @@ def _bounded_region(
         bounded_y,
         min(frame_width - bounded_x, width + x - bounded_x),
         min(frame_height - bounded_y, height + y - bounded_y),
+    )
+
+
+def _detect_fixed_mark(
+    image_bgr: NDArray[Any],
+    template_key: str,
+    *,
+    relative_heights: tuple[float, ...],
+    search_origin: tuple[float, float],
+    kernel_fraction: float,
+    prefer_larger_within: float = 0.0,
+    normalized: tuple[NDArray[Any], float] | None = None,
+    frame_index: int,
+) -> FrameLocalization:
+    """Match one fixed synthetic mark inside a normalized-frame search region."""
+    if image_bgr.size == 0:
+        return FrameLocalization(frame_index, 0.0, None)
+
+    frame_height, frame_width = image_bgr.shape[:2]
+    gray, scale = normalized if normalized is not None else _normalized_gray(image_bgr)
+    normalized_height, normalized_width = gray.shape[:2]
+    short_side = min(normalized_height, normalized_width)
+    search_x = round(normalized_width * search_origin[0])
+    search_y = round(normalized_height * search_origin[1])
+    search_region = (
+        search_x,
+        search_y,
+        normalized_width - search_x,
+        normalized_height - search_y,
+    )
+    matches: list[tuple[float, Region]] = []
+    base_template = _template_sources()[template_key]
+    for relative_height in relative_heights:
+        template_height = max(6, round(short_side * relative_height))
+        template_width = max(
+            1, round(base_template.shape[1] * template_height / base_template.shape[0])
+        )
+        kernel_size = max(3, round(template_height * kernel_fraction) | 1)
+        resized, template_feature = _resized_template_feature(
+            template_key,
+            template_width,
+            template_height,
+            kernel_size,
+        )
+        confidence, candidate = _match_template(
+            gray,
+            resized,
+            region=search_region,
+            kernel_size=kernel_size,
+            template_feature=template_feature,
+        )
+        if candidate is not None and confidence > 0:
+            matches.append((confidence, candidate))
+    if not matches:
+        return FrameLocalization(frame_index, 0.0, None)
+    best_confidence, best_region = max(matches, key=lambda match: match[0])
+    if prefer_larger_within > 0:
+        eligible = [
+            (confidence, candidate)
+            for confidence, candidate in matches
+            if confidence >= best_confidence - prefer_larger_within
+        ]
+        best_confidence, best_region = max(
+            eligible,
+            key=lambda match: (match[1][2] * match[1][3], match[0]),
+        )
+
+    return FrameLocalization(
+        frame_index,
+        best_confidence,
+        _restore_region(
+            best_region,
+            scale=scale,
+            frame_width=frame_width,
+            frame_height=frame_height,
+        ),
+    )
+
+
+def detect_seedance_frame(
+    image_bgr: NDArray[Any],
+    *,
+    frame_index: int = 0,
+    prepared: _PreparedFrame | None = None,
+) -> FrameLocalization:
+    """Locate the strongest fixed Seedance boxed-AI candidate."""
+    return _detect_fixed_mark(
+        image_bgr,
+        "seedance",
+        relative_heights=(0.065, 0.075, 0.085, 0.095, 0.105),
+        search_origin=(0.68, 0.72),
+        kernel_fraction=0.12,
+        normalized=None
+        if prepared is None
+        else (prepared.normalized_gray, prepared.normalized_scale),
+        frame_index=frame_index,
     )
 
 
@@ -857,6 +990,7 @@ def _scan_with_detector(
 _MARK_DETECTORS: dict[str, Callable[..., FrameLocalization]] = {
     "sora": detect_sora_frame,
     "veo": detect_veo_frame,
+    "seedance": detect_seedance_frame,
 }
 
 

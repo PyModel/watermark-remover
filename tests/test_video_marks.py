@@ -31,13 +31,16 @@ from test_video_visible import (
 
 #: The marks this file covers. Ticket 05's sora pass is pinned in
 #: ``test_video_visible.py``; these seven run through the same engine.
-_MARKS = ("veo",)
+_MARKS = ("veo", "seedance")
 
 #: Where each mark is drawn and how tall, chosen so the mark sits inside the
 #: detector's own search region and at a size the detector's height sweep hits.
 #: ``(template key, template height, origin x, origin y)`` on the 160x120 clip.
 _PLACEMENT: dict[str, tuple[str, int, int, int]] = {
     "veo": ("veo-diamond", 16, 142, 102),
+    # seedance: template height 10 = round(120 * 0.085), a swept height, drawn
+    # inside the detector's bottom-right search region.
+    "seedance": ("seedance", 10, 120, 95),
 }
 
 
