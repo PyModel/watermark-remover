@@ -100,6 +100,12 @@ _MIN_FIXED_MARK_STABLE_FRAMES = 12
 _DOUBAO_WEAK_CONFIDENCE = 0.35
 _DOUBAO_STRONG_CONFIDENCE = 0.55
 
+#: Dola's compact text label, matched from the frozen Hershey duplex render at
+#: a flat sweep of relative heights.
+_DOLA_STRICT_WEAK_CONFIDENCE = 0.50
+_DOLA_STRONG_CONFIDENCE = 0.52
+_DOLA_RELATIVE_HEIGHTS = tuple(value / 1000 for value in range(22, 41))
+
 #: Every detector runs on a frame whose short side is at most this many pixels,
 #: so one measurement holds at every input resolution.
 _NORMALIZED_SHORT_SIDE = 480
@@ -277,6 +283,16 @@ DOUBAO_POLICY = VideoVisiblePolicy(
     anchor_iou=0.80,
 )
 
+DOLA_POLICY = VideoVisiblePolicy(
+    weak_floor=_DOLA_STRICT_WEAK_CONFIDENCE,
+    strong_floor=_DOLA_STRONG_CONFIDENCE,
+    transition_floor=0.40,
+    min_stable_frames=_MIN_FIXED_MARK_STABLE_FRAMES,
+    cover_after_confirmation=True,
+    padding_fraction=0.20,
+    anchor_iou=0.80,
+)
+
 #: One row per served mark. The arbiter, gate and fill are shared; a row is the
 #: only per-mark tuning. Provenance relaxation is dropped from every row: this
 #: tree's AIGC readers carry no generator claim that could relax a floor, so
@@ -286,6 +302,7 @@ VISIBLE_MARK_POLICIES: dict[str, VideoVisiblePolicy] = {
     "veo": VEO_POLICY,
     "seedance": SEEDANCE_POLICY,
     "doubao": DOUBAO_POLICY,
+    "dola": DOLA_POLICY,
 }
 
 
@@ -389,6 +406,7 @@ def _template_sources() -> dict[str, NDArray[Any]]:
         "veo-text": veo_text,
         "seedance": _seedance_template(),
         "doubao": _asset_template("doubao_outline_alpha.png"),
+        "dola": _asset_template("video/video_dola_hershey_duplex.png"),
     }
 
 
@@ -782,6 +800,26 @@ def detect_doubao_frame(
     )
 
 
+def detect_dola_frame(
+    image_bgr: NDArray[Any],
+    *,
+    frame_index: int = 0,
+    prepared: _PreparedFrame | None = None,
+) -> FrameLocalization:
+    """Locate the strongest fixed Dola AI text candidate."""
+    return _detect_fixed_mark(
+        image_bgr,
+        "dola",
+        relative_heights=_DOLA_RELATIVE_HEIGHTS,
+        search_origin=(0.65, 0.85),
+        kernel_fraction=0.50,
+        normalized=None
+        if prepared is None
+        else (prepared.normalized_gray, prepared.normalized_scale),
+        frame_index=frame_index,
+    )
+
+
 def detect_veo_frame(
     image_bgr: NDArray[Any],
     *,
@@ -1036,6 +1074,7 @@ _MARK_DETECTORS: dict[str, Callable[..., FrameLocalization]] = {
     "veo": detect_veo_frame,
     "seedance": detect_seedance_frame,
     "doubao": detect_doubao_frame,
+    "dola": detect_dola_frame,
 }
 
 
