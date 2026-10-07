@@ -31,7 +31,7 @@ from test_video_visible import (
 
 #: The marks this file covers. Ticket 05's sora pass is pinned in
 #: ``test_video_visible.py``; these seven run through the same engine.
-_MARKS = ("veo", "seedance", "doubao", "dola")
+_MARKS = ("veo", "seedance", "doubao", "dola", "hailuo")
 
 #: Where each mark is drawn and how tall, chosen so the mark sits inside the
 #: detector's own search region and at a size the detector's height sweep hits.
@@ -47,6 +47,9 @@ _PLACEMENT: dict[str, tuple[str, int, int, int]] = {
     # dola: all swept heights collapse to 6 at this clip size; the mark is the
     # frozen Hershey duplex render the detector matches.
     "dola": ("dola", 6, 115, 106),
+    # hailuo: the composite MINIMAX/hailuo label is wide, so it starts well left
+    # of the corner but inside the detector's bottom-left search region.
+    "hailuo": ("hailuo", 6, 60, 100),
 }
 
 

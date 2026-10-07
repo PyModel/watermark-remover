@@ -106,6 +106,14 @@ _DOLA_STRICT_WEAK_CONFIDENCE = 0.50
 _DOLA_STRONG_CONFIDENCE = 0.52
 _DOLA_RELATIVE_HEIGHTS = tuple(value / 1000 for value in range(22, 41))
 
+#: Hailuo's composite MINIMAX/hailuo AI label is white; the reference measured
+#: 0.02 of bright low-saturation pixels separating the label from a wood-grain
+#: lookalike that outscored it.
+_HAILUO_WEAK_CONFIDENCE = 0.30
+_HAILUO_STRONG_CONFIDENCE = 0.34
+_HAILUO_RELATIVE_HEIGHTS = tuple(value / 1000 for value in range(28, 56, 3))
+_HAILUO_MIN_WHITE_FRACTION = 0.02
+
 #: Every detector runs on a frame whose short side is at most this many pixels,
 #: so one measurement holds at every input resolution.
 _NORMALIZED_SHORT_SIDE = 480
@@ -293,6 +301,16 @@ DOLA_POLICY = VideoVisiblePolicy(
     anchor_iou=0.80,
 )
 
+HAILUO_POLICY = VideoVisiblePolicy(
+    weak_floor=_HAILUO_WEAK_CONFIDENCE,
+    strong_floor=_HAILUO_STRONG_CONFIDENCE,
+    transition_floor=0.28,
+    min_stable_frames=_MIN_FIXED_MARK_STABLE_FRAMES,
+    cover_after_confirmation=True,
+    padding_fraction=0.12,
+    anchor_iou=0.80,
+)
+
 #: One row per served mark. The arbiter, gate and fill are shared; a row is the
 #: only per-mark tuning. Provenance relaxation is dropped from every row: this
 #: tree's AIGC readers carry no generator claim that could relax a floor, so
@@ -303,6 +321,7 @@ VISIBLE_MARK_POLICIES: dict[str, VideoVisiblePolicy] = {
     "seedance": SEEDANCE_POLICY,
     "doubao": DOUBAO_POLICY,
     "dola": DOLA_POLICY,
+    "hailuo": HAILUO_POLICY,
 }
 
 
@@ -407,6 +426,7 @@ def _template_sources() -> dict[str, NDArray[Any]]:
         "seedance": _seedance_template(),
         "doubao": _asset_template("doubao_outline_alpha.png"),
         "dola": _asset_template("video/video_dola_hershey_duplex.png"),
+        "hailuo": _hailuo_template(),
     }
 
 
@@ -607,6 +627,36 @@ def _seedance_template() -> NDArray[Any]:
     )
     draw.rounded_rectangle((142, 94, 157, 109), radius=3, outline=255, width=2)
     draw.text((145, 94), "AI", font=_scalable_default_font(8), fill=255)
+    return np.asarray(canvas, dtype=np.uint8)
+
+
+@lru_cache(maxsize=1)
+def _hailuo_template() -> NDArray[Any]:
+    """Return a synthetic MINIMAX/Hailuo composite-label silhouette."""
+    canvas = Image.new("L", (680, 112), 0)
+    draw = ImageDraw.Draw(canvas)
+
+    # Five symmetric waveform strokes approximate the provider-independent
+    # geometry at the left edge without copying pixels from an export.
+    waveform_heights = (42, 70, 96, 70, 42)
+    center_y = 56
+    for index, height in enumerate(waveform_heights):
+        x = 10 + index * 13
+        draw.rounded_rectangle(
+            (x, center_y - height // 2, x + 5, center_y + height // 2),
+            radius=2,
+            fill=255,
+        )
+
+    font = _scalable_default_font(58)
+    draw.text((84, 18), "MINIMAX", font=font, fill=255, stroke_width=1, stroke_fill=255)
+    draw.rectangle((342, 18, 347, 92), fill=255)
+
+    # The Hailuo symbol is a ring with a small offset highlight.
+    draw.ellipse((370, 20, 446, 96), outline=255, width=12)
+    draw.ellipse((397, 38, 434, 76), fill=255)
+    draw.ellipse((397, 29, 420, 52), fill=0)
+    draw.text((456, 18), "hailuo AI", font=font, fill=255, stroke_width=1, stroke_fill=255)
     return np.asarray(canvas, dtype=np.uint8)
 
 
@@ -818,6 +868,52 @@ def detect_dola_frame(
         else (prepared.normalized_gray, prepared.normalized_scale),
         frame_index=frame_index,
     )
+
+
+def _white_fraction(roi: NDArray[Any]) -> float:
+    """Share of bright, low-saturation pixels, the color of the white video labels."""
+    if roi.size == 0:
+        return 0.0
+    if roi.ndim == 2:
+        return float(np.mean(roi >= 180))
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    return float(np.mean((hsv[:, :, 1] <= 55) & (hsv[:, :, 2] >= 180)))
+
+
+def detect_hailuo_frame(
+    image_bgr: NDArray[Any],
+    *,
+    frame_index: int = 0,
+    prepared: _PreparedFrame | None = None,
+) -> FrameLocalization:
+    """Locate the strongest fixed MINIMAX/Hailuo composite-label candidate."""
+    detection = _detect_fixed_mark(
+        image_bgr,
+        "hailuo",
+        relative_heights=_HAILUO_RELATIVE_HEIGHTS,
+        search_origin=(0.28, 0.76),
+        kernel_fraction=0.18,
+        normalized=None
+        if prepared is None
+        else (prepared.normalized_gray, prepared.normalized_scale),
+        frame_index=frame_index,
+    )
+    if detection.region is None:
+        return detection
+    frame_width = image_bgr.shape[1]
+    x, y, width, height = detection.region
+    if _white_fraction(image_bgr[y : y + height, x : x + width]) < _HAILUO_MIN_WHITE_FRACTION:
+        return FrameLocalization(frame_index, 0.0, None)
+    horizontal_padding = round(height * 1.25)
+    region = _bounded_region(
+        x - horizontal_padding,
+        y,
+        width + horizontal_padding * 2,
+        height,
+        frame_width=frame_width,
+        frame_height=image_bgr.shape[0],
+    )
+    return FrameLocalization(frame_index, detection.confidence, region)
 
 
 def detect_veo_frame(
@@ -1075,6 +1171,7 @@ _MARK_DETECTORS: dict[str, Callable[..., FrameLocalization]] = {
     "seedance": detect_seedance_frame,
     "doubao": detect_doubao_frame,
     "dola": detect_dola_frame,
+    "hailuo": detect_hailuo_frame,
 }
 
 
