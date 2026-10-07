@@ -82,9 +82,7 @@ def _mark_frames(
     template_key, template_height, x, y = _PLACEMENT[mark]
     base = video_visible._template_sources()[template_key]
     template_width = max(1, round(base.shape[1] * template_height / base.shape[0]))
-    mark_image = cv2.resize(
-        base, (template_width, template_height), interpolation=cv2.INTER_AREA
-    )
+    mark_image = cv2.resize(base, (template_width, template_height), interpolation=cv2.INTER_AREA)
     frames = []
     for index in range(count):
         frame = np.full((height, width, 3), 40, dtype=np.uint8)
@@ -99,7 +97,9 @@ def _mark_frames(
     return frames
 
 
-def _mark_clip(tmp_path: Path, mark: str, *, marked_frames: range | tuple[int, ...] = range(12)) -> Path:
+def _mark_clip(
+    tmp_path: Path, mark: str, *, marked_frames: range | tuple[int, ...] = range(12)
+) -> Path:
     """A real video carrying one mark on the frames the caller names."""
     frames = _mark_frames(mark, marked_frames=marked_frames)
     path = tmp_path / f"{mark}.mkv"

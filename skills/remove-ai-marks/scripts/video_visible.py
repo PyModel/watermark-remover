@@ -1386,9 +1386,7 @@ def _open_capture(source: Path) -> tuple[Any, int, int, float]:
     return capture, width, height, fps
 
 
-def _scan_with_detector(
-    source: Path, detector: Callable[..., FrameLocalization]
-) -> VideoScan:
+def _scan_with_detector(source: Path, detector: Callable[..., FrameLocalization]) -> VideoScan:
     """Decode the source once and collect one untrusted candidate per frame."""
     capture, width, height, fps = _open_capture(source)
     detections: list[FrameLocalization] = []
@@ -1400,9 +1398,7 @@ def _scan_with_detector(
                 break
             if frame.shape[:2] != (height, width):
                 raise ValueError(f"video changes frame dimensions at frame {index}: {source}")
-            detections.append(
-                detector(frame, frame_index=index, prepared=_prepare_frame(frame))
-            )
+            detections.append(detector(frame, frame_index=index, prepared=_prepare_frame(frame)))
             index += 1
     finally:
         capture.release()
@@ -2073,9 +2069,7 @@ def clean_visible_video(
         region = regions[index]
         if region is None:
             return None
-        return mask_for_region(
-            frame_bgr.shape, region, padding_fraction=policy.padding_fraction
-        )
+        return mask_for_region(frame_bgr.shape, region, padding_fraction=policy.padding_fraction)
 
     removed_frames, timing = encode_clean_video(
         source,
