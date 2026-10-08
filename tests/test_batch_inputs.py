@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from batch_inputs import select_inputs
+from batch_inputs import BATCH_MODES, resolve_batch_mode, select_inputs
 
 
 @pytest.mark.parametrize("source_kind", ["missing", "symlink"])
@@ -81,6 +81,39 @@ def test_select_inputs_excludes_roots(tmp_path: Path) -> None:
 
     assert included_file in [item.path for item in selection.items]
     assert excluded_file not in [item.path for item in selection.items]
+
+
+def test_resolve_batch_mode_defaults_to_metadata() -> None:
+    policy = resolve_batch_mode(None)
+
+    assert policy.mode == "metadata"
+    assert policy.stages == ("metadata",)
+    assert policy.visible is False
+    assert policy.strip_metadata is True
+
+
+@pytest.mark.parametrize(
+    ("mode", "stages"),
+    (
+        ("metadata", ("metadata",)),
+        ("visible", ("visible",)),
+        ("all", ("visible", "metadata")),
+    ),
+)
+def test_resolve_batch_mode_selects_its_stages(mode: str, stages: tuple[str, ...]) -> None:
+    policy = resolve_batch_mode(mode)
+
+    assert policy.mode == mode
+    assert policy.stages == stages
+
+
+def test_resolve_batch_mode_rejects_an_unknown_mode() -> None:
+    with pytest.raises(ValueError, match="unknown batch mode 'everything'"):
+        resolve_batch_mode("everything")
+
+
+def test_batch_modes_names_the_three_choices() -> None:
+    assert BATCH_MODES == ("metadata", "visible", "all")
 
 
 def test_select_inputs_rejects_parent_traversal_pattern(tmp_path: Path) -> None:

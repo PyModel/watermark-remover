@@ -23,6 +23,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 DEGRADE_CLI_CHOICES = ("freq-dct", "blur", "median", "jpeg", "rotate", "two-stage")
 MORPHO_CLI_CHOICES = ("grid", "diagonal", "noise", "quantize")
+# ``asset_kind`` keeps video out of SUPPORTED_EXTENSIONS on purpose (its own
+# comment defers the extension until the routing ticket), so the family set is
+# read here rather than duplicated. The private name is the only form the
+# routing contract exposes; the batch command widens only its own discovery
+# allow-list with it and leaves the shared default (and inspect's) alone.
+from asset_kind import _VIDEO_EXTENSIONS, SUPPORTED_EXTENSIONS
+from batch_inputs import BATCH_MODES, batch_summary, resolve_batch_mode
 from clean_pipeline import execute
 from clean_request import (
     DEFAULT_TIMEOUT,
@@ -64,6 +71,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--glob", default="*", help="Directory glob (use with --recursive for **-style traversal)"
     )
     p.add_argument("--extensions", help="Comma-separated extension allow-list")
+    p.add_argument(
+        "--mode",
+        choices=BATCH_MODES,
+        default=None,
+        help="Which stages a batch runs: 'metadata' (the default), 'visible' "
+        "(visible marks only), or 'all' (both). Absent, the run is unchanged",
+    )
     p.add_argument("--nfkc", action="store_true", help="Text: NFKC normalize")
     p.add_argument("--aggressive-homoglyphs", action="store_true")
     p.add_argument(
@@ -249,9 +263,32 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def request_from_cli(args) -> CleanRequest:
-    """Adapt parser output into the argparse-independent canonical request."""
+    """Adapt parser output into the argparse-independent canonical request.
+
+    ``--mode`` selects a stage set and is translated here into the request
+    fields the planner already understands: the visible stage is the
+    registry-driven ``--mark auto`` pass and the metadata stage is
+    ``keep_non_ai_metadata=False``. An explicit localization
+    (``--mark``/``--detect-command``/``--visible-mask``/``--visible-box``) always
+    wins over the mode's default; the mode only supplies the stage gate.
+    """
     values = vars(args).copy()
     values["paths"] = tuple(values.pop("path", ()) or ())
+    if not values.get("extensions") and any(path.is_dir() for path in values["paths"]):
+        # A recursive batch routes video as its own asset kind, and a directory
+        # batch that cannot see ``.mkv`` selects nothing. The allow-list is this
+        # command's own flag, so the default is widened here: SUPPORTED_EXTENSIONS
+        # is shared with every other surface and stays as it is.
+        values["extensions"] = ",".join(sorted(SUPPORTED_EXTENSIONS | _VIDEO_EXTENSIONS))
+    mode = values.pop("mode", None)
+    if mode is not None:
+        policy = resolve_batch_mode(mode)
+        values["keep_non_ai_metadata"] = not policy.strip_metadata
+        localized = any(
+            values.get(name) for name in ("visible_mask", "visible_box", "detect_command", "mark")
+        )
+        if policy.visible and not localized:
+            values["mark"] = "auto"
     return CleanRequest(**values)
 
 
@@ -298,7 +335,7 @@ def main() -> int:
         return ExitCode.USAGE_ERROR.value
 
     results = [item.payload for item in run.results]
-    payload: dict | list = {"total": len(results), "results": results} if run.batch else results[0]
+    payload: dict | list = batch_summary(results, mode=args.mode) if run.batch else results[0]
     _write_audit(request, payload)
     if request.dry_run and not request.json and not request.quiet:
         for result in results:
