@@ -168,9 +168,6 @@ VISIBLE_TIMING_NOT_RUN = "not-run"
 _FFMPEG_STDERR_LIMIT = 8_000
 _FFMPEG_STDERR_TRUNCATION = b"\n... [truncated]\n"
 
-#: The video marks this build can localize, in the order the reference lists
-#: them. Sora ships first because it is the mark the engine was proved end to
-#: end on; the other seven run the same pass with their own detector and policy.
 #: ``--mark auto`` on a video: scan every shipped mark and fill the one the
 #: temporal arbiter accepts on the most frames.
 AUTO_VIDEO_MARK = "auto"

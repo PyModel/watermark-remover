@@ -68,9 +68,10 @@ _CONTAINER_LOCATIONS = {
 #: The EBML header that opens every Matroska and WebM file.
 _MATROSKA_MAGIC = b"\x1a\x45\xdf\xa3"
 
-#: The marks the visible video engine (``video_visible``) can detect. Kept
-#: here, beside the plan, so request validation can name them without
-#: importing OpenCV.
+#: The marks the visible video engine (``video_visible``) can detect, in the
+#: order the reference lists them. Sora ships first because it is the mark the
+#: engine was proved end to end on. Kept here, beside the plan, so request
+#: validation can name them without importing OpenCV.
 VISIBLE_VIDEO_MARKS = ("sora", "veo", "seedance", "doubao", "dola", "hailuo", "vidu", "kling")
 
 
