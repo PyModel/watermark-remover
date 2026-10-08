@@ -1,3 +1,6 @@
+# Ported from wiltodelta/remove-ai-watermarks tests/test_video.py, Apache-2.0;
+# modified: the byte layouts drive this tree's inspect and clean seams, and the
+# external tools are faked through the command runner.
 """Behavioral contract for video provenance inspection and verifiable cleaning.
 
 Two agreed seams. The inspect surface is the data seam

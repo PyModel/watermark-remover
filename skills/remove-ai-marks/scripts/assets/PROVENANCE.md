@@ -25,7 +25,7 @@ committed file. The system fonts render the glyphs but are **never shipped**.
 | microsoft_alpha.png | render_vendor_silhouettes.py (`draw_msbadge`) | scripts/render_vendor_silhouettes.py | Apache-2.0 (ported portions) | microsoft (2) | Drawn pill with dark-text holes + sparkle cutout; Arial Bold. |
 | microsoft_text_alpha.png | render_vendor_silhouettes.py (`render`) | scripts/render_overlay_variants.py | Apache-2.0 (ported portions) | microsoft (2) | Arial. |
 | runninghub_alpha.png | render_vendor_silhouettes.py (`render`) | scripts/render_vendor_silhouettes.py | Apache-2.0 (ported portions) | runninghub (2) | Faint mid-gray top-left mark; STHeiti Medium. |
-| dola_alpha.png | render_vendor_silhouettes.py (`render`) | scripts/render_vendor_silhouettes.py | Apache-2.0 (ported portions) | dola (2) | Arial Bold; upstream's video-form Hershey templates are out of scope here (no video engine ships). |
+| dola_alpha.png | render_vendor_silhouettes.py (`render`) | scripts/render_vendor_silhouettes.py | Apache-2.0 (ported portions) | dola (2) | Arial Bold. The video-form Hershey templates ship separately under `assets/video/` (see its PROVENANCE.md). |
 | workbuddy_alpha.png | render_vendor_silhouettes.py (`centered_lines`) | scripts/render_overlay_variants.py | Apache-2.0 (ported portions) | workbuddy (2) | Two-line block; Hiragino Sans GB. |
 | wan_alpha.png | render_vendor_silhouettes.py (`draw_wan`) | scripts/render_vendor_silhouettes.py | Apache-2.0 (ported portions) | wan (3, provisional) | Hexagon-logo approximation + Avenir Next wordmark. |
 | openart_alpha.png | render_vendor_silhouettes.py (`draw_openart`) | scripts/build_openart_alpha.py | Apache-2.0 (ported portions) | openart (3, provisional) | Procedural reconstruction of the public OpenArt mark (bowtie icon + Hershey wordmark, peak alpha 173). Upstream pinned OpenCV 4.x for Hershey glyph parity; this tree regenerates with the pixel extra's OpenCV 5 and ships that rendering. |
@@ -171,6 +171,5 @@ greps the whole tree and fails if any of these names appears:
 Upstream's unregistered candidate silhouettes (catlogo, hailuo, notebooklm,
 mindvideo, higgsfield, capcut, zsky, chromastudio, digenai, gendo, jianying,
 xinghui, qingyan, gemini_text) are also not ported: no engine in this repo
-registers them. The video-form Hershey templates are synthetic but are not
-shipped (no video engine); they can be regenerated from the upstream recipe if
-a video ticket ever claims one.
+registers them. The video-form Hershey templates ship under `assets/video/`, with their own
+PROVENANCE.md.

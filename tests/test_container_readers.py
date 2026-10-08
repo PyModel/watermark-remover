@@ -1,3 +1,6 @@
+# Ported from wiltodelta/remove-ai-watermarks tests/test_video.py, Apache-2.0;
+# modified: only the synthetic Matroska, FLV, and AVI marker layouts are kept,
+# asserted against this tree's container_readers interface.
 """Container provenance readers: synthetic Matroska, FLV, and AVI markers.
 
 The byte layouts are built in pure Python, adapted from the reference tree's

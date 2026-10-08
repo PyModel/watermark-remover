@@ -1,4 +1,4 @@
-# Ported from wiltodelta/remove-ai-watermarks src/remove_ai_watermarks/dola_engine.py, Apache-2.0; modified: scripts package imports are flattened to this repo's stdlib script package and the detection-silhouette aspect follows this tree's rendered ``dola_alpha.png`` (347x87). Upstream's video-form Hershey templates are out of scope here (no video engine ships).
+# Ported from wiltodelta/remove-ai-watermarks src/remove_ai_watermarks/dola_engine.py, Apache-2.0; modified: scripts package imports are flattened to this repo's stdlib script package and the detection-silhouette aspect follows this tree's rendered ``dola_alpha.png`` (347x87). The video-form Hershey templates live under ``assets/video/`` and are used by ``video_visible.py``.
 """Detect the bottom-right Dola AI image disclosure, independently of video marks."""
 
 from __future__ import annotations
