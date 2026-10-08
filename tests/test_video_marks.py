@@ -191,3 +191,51 @@ def test_a_mark_in_only_one_frame_is_never_filled(
     assert dest.exists()
     # No frame changed at all, so the isolated flicker survives untouched.
     assert _stream_md5(dest, "0:v:0") == frames_before
+
+
+# --- --mark auto: every shipped mark is scanned, the accepted one is filled --
+
+
+@requires_visible_runtime
+@pytest.mark.parametrize("mark", _MARKS)
+def test_auto_finds_the_mark_the_clip_carries(
+    mark: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--mark auto`` (the batch ``--mode visible`` default) works on video."""
+    from video import VideoPlan
+    from video_visible import VisibleVideoPlan
+
+    _stub_video_extra(monkeypatch)
+    src = _mark_clip(tmp_path, mark)
+    dest = tmp_path / "clean.mkv"
+
+    payload = _clean_video_asset(
+        src, dest, VideoPlan(visible=VisibleVideoPlan(mark="auto"))
+    ).to_dict()
+    visible = payload["visible"]
+
+    assert visible["mark"] == mark
+    assert visible["status"] == "cleaned"
+    assert visible["verification"] == "best-effort"
+    assert _accepted_frames(dest, mark) == 0
+
+
+@requires_visible_runtime
+def test_auto_on_a_clip_with_no_mark_fills_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from video import VideoPlan
+    from video_visible import VisibleVideoPlan
+
+    _stub_video_extra(monkeypatch)
+    src = _mark_clip(tmp_path, "vidu", marked_frames=())
+    dest = tmp_path / "clean.mkv"
+    frames_before = _stream_md5(src, "0:v:0")
+
+    payload = _clean_video_asset(
+        src, dest, VideoPlan(visible=VisibleVideoPlan(mark="auto"))
+    ).to_dict()
+
+    assert payload["visible"]["status"] == "no-mark"
+    assert payload["visible"]["removed_frames"] == 0
+    assert _stream_md5(dest, "0:v:0") == frames_before

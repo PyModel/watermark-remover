@@ -335,6 +335,25 @@ def test_an_explicit_visible_flag_on_a_video_is_carried_not_silently_dropped(
     assert plan.video.visible.box is not None
 
 
+def test_batch_mode_visible_reaches_a_video_as_mark_auto(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--mode visible`` sets ``--mark auto``; a video must accept it, not refuse."""
+    from clean_request import CleanRequest, plan_work, select_request_inputs
+
+    _fake_runtime(tmp_path, monkeypatch)
+    src = tmp_path / "clip.mkv"
+    src.write_bytes(matroska(LABEL))
+    request = CleanRequest(paths=(src,), output=tmp_path / "out.mkv", mark="auto", mode="visible")
+
+    selection = select_request_inputs(request)
+    _item, _output, plan = plan_work(selection.items, request, selection.batch)[0]
+
+    assert plan.video is not None
+    assert plan.video.visible is not None
+    assert plan.video.visible.mark == "auto"
+
+
 # --- real tools: the measurement a fake cannot make ------------------------
 
 _FFMPEG = shutil.which("ffmpeg")

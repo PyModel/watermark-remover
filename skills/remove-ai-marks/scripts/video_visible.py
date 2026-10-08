@@ -171,6 +171,9 @@ _FFMPEG_STDERR_TRUNCATION = b"\n... [truncated]\n"
 #: them. Sora ships first because it is the mark the engine was proved end to
 #: end on; the other seven run the same pass with their own detector and policy.
 VISIBLE_VIDEO_MARKS = ("sora", "veo", "seedance", "doubao", "dola", "hailuo", "vidu", "kling")
+#: ``--mark auto`` on a video: scan every shipped mark and fill the one the
+#: temporal arbiter accepts on the most frames.
+AUTO_VIDEO_MARK = "auto"
 
 #: Fill backends, in the vocabulary the image path uses. ``cv2`` is the
 #: classical floor (always available); ``migan`` and ``lama`` are the same
@@ -203,7 +206,7 @@ class VisibleVideoPlan:
         sources = sum(source is not None for source in (self.mark, self.mask_path, self.box))
         if sources != 1:
             raise ValueError("exactly one visible video localization source is required")
-        if self.mark is not None and self.mark not in VISIBLE_VIDEO_MARKS:
+        if self.mark is not None and self.mark not in (*VISIBLE_VIDEO_MARKS, AUTO_VIDEO_MARK):
             raise ValueError(
                 f"unknown visible video mark {self.mark!r}; this build ships "
                 f"{', '.join(VISIBLE_VIDEO_MARKS)}"
@@ -1978,6 +1981,39 @@ def encode_clean_video(
     return removed_frames, timing
 
 
+def _accepted_regions(source: Path, mark: str) -> tuple[VideoScan, list[Any], int]:
+    """Scan *source* for *mark* and keep the localizations the arbiter accepts."""
+    scan = scan_mark(source, mark)
+    regions = stabilize_localizations(scan.detections, policy=VISIBLE_MARK_POLICIES[mark])
+    return scan, regions, sum(region is not None for region in regions)
+
+
+def _best_auto_mark(source: Path) -> tuple[str, VideoScan, list[Any], int]:
+    """Scan every shipped mark; keep the one accepted on the most frames.
+
+    Several detectors can accept the same overlay, so a tie on accepted frames
+    goes to the higher mean confidence on those frames. An all-zero result
+    keeps the first mark, so a clip with no mark reports ``no-mark`` and fills
+    nothing.
+    """
+    # ponytail: decodes the clip once per mark (8 passes); share one decode
+    # across detectors if auto scans on long clips get slow.
+    best: tuple[str, VideoScan, list[Any], int] | None = None
+    best_rank: tuple[int, float] = (-1, 0.0)
+    for key in VISIBLE_VIDEO_MARKS:
+        scan, regions, detected = _accepted_regions(source, key)
+        accepted = [
+            detection.confidence
+            for detection, region in zip(scan.detections, regions, strict=False)
+            if region is not None
+        ]
+        rank = (detected, sum(accepted) / len(accepted) if accepted else 0.0)
+        if rank > best_rank:
+            best, best_rank = (key, scan, regions, detected), rank
+    assert best is not None
+    return best
+
+
 def clean_visible_video(
     source: Path,
     dest: Path,
@@ -2036,10 +2072,11 @@ def clean_visible_video(
             ),
         )
 
-    scan = scan_mark(source, mark)
+    if mark == AUTO_VIDEO_MARK:
+        mark, scan, regions, detected_frames = _best_auto_mark(source)
+    else:
+        scan, regions, detected_frames = _accepted_regions(source, mark)
     policy = VISIBLE_MARK_POLICIES[mark]
-    regions = stabilize_localizations(scan.detections, policy=policy)
-    detected_frames = sum(region is not None for region in regions)
     if detected_frames == 0:
         # A detection pass with no accepted candidate changes no pixel: the
         # metadata strip still produces the destination, as a stream copy.
