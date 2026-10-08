@@ -237,5 +237,7 @@ def test_auto_on_a_clip_with_no_mark_fills_nothing(
     ).to_dict()
 
     assert payload["visible"]["status"] == "no-mark"
+    assert payload["visible"]["mark"] == "auto"
+    assert payload["visible"]["source"] == "detection:auto"
     assert payload["visible"]["removed_frames"] == 0
     assert _stream_md5(dest, "0:v:0") == frames_before

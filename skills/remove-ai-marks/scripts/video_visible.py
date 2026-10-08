@@ -1989,9 +1989,8 @@ def _best_auto_mark(source: Path) -> tuple[str, VideoScan, list[Any], int]:
     """Scan every shipped mark; keep the one accepted on the most frames.
 
     Several detectors can accept the same overlay, so a tie on accepted frames
-    goes to the higher mean confidence on those frames. An all-zero result
-    keeps the first mark, so a clip with no mark reports ``no-mark`` and fills
-    nothing.
+    goes to the higher mean confidence on those frames. With no accepted frame
+    the caller reports ``no-mark`` under ``auto`` and fills nothing.
     """
     # ponytail: decodes the clip once per mark (8 passes); share one decode
     # across detectors if auto scans on long clips get slow.
@@ -2070,10 +2069,11 @@ def clean_visible_video(
         )
 
     if mark == AUTO_VIDEO_MARK:
-        mark, scan, regions, detected_frames = _best_auto_mark(source)
+        found, scan, regions, detected_frames = _best_auto_mark(source)
+        if detected_frames:
+            mark = found
     else:
         scan, regions, detected_frames = _accepted_regions(source, mark)
-    policy = VISIBLE_MARK_POLICIES[mark]
     if detected_frames == 0:
         # A detection pass with no accepted candidate changes no pixel: the
         # metadata strip still produces the destination, as a stream copy.
@@ -2093,6 +2093,8 @@ def clean_visible_video(
                 "detection-driven removal is best-effort and this run found nothing to remove"
             ),
         )
+
+    policy = VISIBLE_MARK_POLICIES[mark]
 
     def provider(frame_bgr: NDArray[Any], index: int) -> NDArray[Any] | None:
         if index >= len(regions):
