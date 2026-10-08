@@ -33,7 +33,13 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from asset_kind import SUPPORTED_EXTENSIONS, AssetKind, classify_asset
-from batch_inputs import InputItem, InputSelection, safe_output_path, select_inputs
+from batch_inputs import (
+    BATCH_MODES,
+    InputItem,
+    InputSelection,
+    safe_output_path,
+    select_inputs,
+)
 from clean_asset import (
     CleanPlan,
     ImageDegradePlan,
@@ -94,6 +100,10 @@ class CleanRequest:
     recursive: bool = False
     glob: str = "*"
     extensions: str | None = None
+    # The batch ``--mode`` as given; ``clean_file.request_from_cli`` has
+    # already translated it into the stage fields below, so it is carried for
+    # ``command_line`` and the batch summary only.
+    mode: str | None = None
 
     # --- routing ---------------------------------------------------------
     force_type: str = "auto"
@@ -183,6 +193,8 @@ class CleanRequest:
             raise ValueError(f"unknown rewrite strength: {self.rewrite}")
         if self.char_mode not in PERTURB_MODES:
             raise ValueError(f"unknown perturb mode: {self.char_mode}")
+        if self.mode is not None and self.mode not in BATCH_MODES:
+            raise ValueError(f"unknown batch mode: {self.mode}")
         if self.mark is not None:
             from watermark_registry import mark_keys, validate_sensitivity
 
@@ -281,6 +293,8 @@ class CleanRequest:
             argv += ["--glob", self.glob]
         if self.extensions:
             argv += ["--extensions", self.extensions]
+        if self.mode is not None:
+            argv += ["--mode", self.mode]
         if self.force_type != "auto":
             argv += ["--as", self.force_type]
         if self.force_text:

@@ -280,7 +280,7 @@ def request_from_cli(args) -> CleanRequest:
         # command's own flag, so the default is widened here: SUPPORTED_EXTENSIONS
         # is shared with every other surface and stays as it is.
         values["extensions"] = ",".join(sorted(SUPPORTED_EXTENSIONS | _VIDEO_EXTENSIONS))
-    mode = values.pop("mode", None)
+    mode = values.get("mode")
     if mode is not None:
         policy = resolve_batch_mode(mode)
         values["keep_non_ai_metadata"] = not policy.strip_metadata
