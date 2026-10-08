@@ -310,28 +310,29 @@ def test_the_default_video_plan_removes_metadata_only(
     assert plan.pixel is None
 
 
-def test_an_explicit_visible_flag_on_a_video_is_refused_not_silently_dropped(
+def test_an_explicit_visible_flag_on_a_video_is_carried_not_silently_dropped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import clean_pipeline
-    from clean_request import CleanPlanPreflightError, CleanRequest
+    from clean_request import CleanRequest, plan_work, select_request_inputs
 
     _fake_runtime(tmp_path, monkeypatch)
     src = tmp_path / "clip.mkv"
     src.write_bytes(matroska(LABEL))
-    dest = tmp_path / "out.mkv"
     request = CleanRequest(
         paths=(src,),
-        output=dest,
+        output=tmp_path / "out.mkv",
         visible_box=(0, 0, 8, 8),
         visible_backend="simple",
     )
 
-    with pytest.raises(CleanPlanPreflightError, match="visible"):
-        clean_pipeline.execute(request)
+    selection = select_request_inputs(request)
+    work = plan_work(selection.items, request, selection.batch)
+    _item, _output, plan = work[0]
 
-    # A refusal before the first write: no partial output.
-    assert not dest.exists()
+    assert plan.video is not None
+    assert plan.video.remove_metadata is True
+    assert plan.video.visible is not None
+    assert plan.video.visible.box is not None
 
 
 # --- real tools: the measurement a fake cannot make ------------------------
