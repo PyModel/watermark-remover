@@ -6,6 +6,7 @@ import importlib.util
 import math
 import os
 import stat
+import sys
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
@@ -27,6 +28,7 @@ from common import (
 )
 from container_meta import clean_container
 from dct_frequency import DEGRADE_STRATEGIES, degrade_image
+from external_command import command_from_template, run_command
 from image_io import PixelDependencyUnavailable, _import_pixel
 from image_meta import clean_image, detect_format
 from inspect_soft_binding import inspect_soft_binding
@@ -42,7 +44,14 @@ from morphomod import (
     remove_visible,
     write_pgm,
 )
+from operation import ExitCode
 from video import VideoPlan, clean_video
+from watermark_profiles import (
+    DEFAULT_PROFILE,
+    resolve_effective_profile,
+    resolve_seed,
+    resolve_strength,
+)
 
 _PIXEL_BACKENDS = {
     "ctrlregen": ("ctrlregen", "NOAI_WATERMARK_DIR"),
@@ -82,6 +91,192 @@ def _resolve_pixel_backend(name: str) -> Any:
         raise RuntimeError(capability["reason"])
     module, _ = _PIXEL_BACKENDS[name]
     return __import__(module)
+
+
+#: The shipped adapters for the optional GPU invisible-removal engines. Each is
+#: the backend's own CLI, invoked as one argument vector with a timeout; both
+#: report exit code 3 for "remover unavailable", the contract ``clean_ctrlregen``
+#: and ``markdiffusion_harness`` document, so an uninstalled engine becomes a
+#: labeled skip instead of a crash. The argv is fixed here, never a shell string.
+_INVISIBLE_ENGINE_ADAPTERS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "ctrlregen": (
+        "clean_ctrlregen.py",
+        ("{input}", "-o", "{output}", "--json", "--strength", "{strength}"),
+    ),
+    "diffusion": (
+        "markdiffusion_harness.py",
+        (
+            "purify",
+            "{input}",
+            "-o",
+            "{output}",
+            "--json",
+            "--purification-strength",
+            "{strength}",
+        ),
+    ),
+}
+
+#: The stage's default deadline. A regeneration is a long GPU call, but it is
+#: still bounded: a hung engine is a failed file, never an open-ended wait.
+DEFAULT_INVISIBLE_TIMEOUT = 1800.0
+
+#: Bounded engine output. The tail is what a failure reports; a chatty engine
+#: cannot grow the clean's memory.
+_INVISIBLE_ENGINE_OUTPUT_LIMIT = 64 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class InvisiblePlan:
+    """The optional invisible-watermark regeneration stage's frozen policy.
+
+    Presence of this on ``CleanPlan`` requests the stage; whether it actually
+    runs is decided at execution time by the invisible-target gate, so a file
+    with nothing to remove never reaches the engine. ``profile`` is a
+    ``watermark_profiles`` id and is what selects the engine and its calibrated
+    strength for each image. ``command`` is an explicit engine argv template
+    (``{input} {output} {profile} {strength} {seed}``) and exists for the same
+    reason ``VisiblePlan.command`` does: a caller that already drives an
+    adapter should not be forced through the shipped default.
+    """
+
+    profile: str = DEFAULT_PROFILE
+    backend: str = "ctrlregen"
+    strength: float | None = None
+    seed: int | None = None
+    timeout: float = DEFAULT_INVISIBLE_TIMEOUT
+    command: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.profile, str) or not self.profile.strip():
+            raise ValueError("invisible profile must be a non-empty string")
+        if self.backend not in _PIXEL_BACKENDS:
+            raise ValueError(f"unsupported invisible backend: {self.backend}")
+        if self.strength is not None and (
+            isinstance(self.strength, bool)
+            or not isinstance(self.strength, (int, float))
+            or not math.isfinite(self.strength)
+            or not 0.0 < self.strength <= 1.0
+        ):
+            raise ValueError("invisible strength must be a finite number in (0, 1]")
+        if self.seed is not None and (
+            isinstance(self.seed, bool) or not isinstance(self.seed, int)
+        ):
+            raise TypeError("invisible seed must be an integer or None")
+        if (
+            isinstance(self.timeout, bool)
+            or not isinstance(self.timeout, (int, float))
+            or not math.isfinite(self.timeout)
+            or self.timeout <= 0
+        ):
+            raise ValueError("invisible timeout must be a finite positive number")
+        if self.command is not None and (
+            not isinstance(self.command, str) or not self.command.strip()
+        ):
+            raise ValueError("invisible command must be a non-empty string or None")
+
+
+def invisible_target_scheme(path: Path) -> tuple[str | None, str | None]:
+    """The open invisible-watermark scheme *path* carries: ``(scheme, error)``.
+
+    Detection is the stage's gate: regenerating pixels is destructive, so the
+    stage runs only on a file a local decoder identified. A missing ``detect``
+    extra is "no target" here -- the engine's own availability probe is what
+    reports an absent engine. A decode error is returned, not raised, so the
+    stage can report a labeled skip instead of failing an otherwise good clean.
+    """
+    from invisible_watermark import detect_invisible_watermark
+
+    try:
+        return detect_invisible_watermark(path), None
+    except Exception as error:  # decode errors must not fail the metadata clean
+        return None, str(error)
+
+
+def _invisible_engine_available(plan: InvisiblePlan) -> bool:
+    """Whether *plan*'s engine can run. An explicit command is its own adapter."""
+    if plan.command is not None:
+        return True
+    return bool(pixel_backend_capability(plan.backend)["available"])
+
+
+def _invisible_engine_argv(
+    plan: InvisiblePlan,
+    *,
+    source: Path,
+    output: Path,
+    profile: str,
+    strength: float,
+    seed: int,
+) -> tuple[str, ...]:
+    """The engine invocation for *plan*, as one shell-free argument vector."""
+    values = {
+        "input": str(source),
+        "output": str(output),
+        "profile": profile,
+        "strength": f"{strength:g}",
+        "seed": str(seed),
+    }
+    if plan.command is not None:
+        return command_from_template(plan.command, **values)
+    script, tokens = _INVISIBLE_ENGINE_ADAPTERS[plan.backend]
+    adapter = Path(__file__).resolve().parent / script
+    return (sys.executable, str(adapter), *(token.format_map(values) for token in tokens))
+
+
+def _run_invisible_stage(
+    source: Path,
+    output: Path,
+    plan: InvisiblePlan,
+) -> dict[str, Any]:
+    """Regenerate *source* into *output* (a staging path), or raise.
+
+    Stateful-tier controls, in one place: the engine is one bounded subprocess
+    with a timeout and no retry; it writes only the staging path; the caller
+    publishes nothing unless this returns ``completed``. Exit code 3 from the
+    adapter is the adapter's own "engine unavailable" contract and is reported
+    as a labeled skip, not an error.
+    """
+    resolved_profile = resolve_effective_profile(plan.profile, None)
+    size = _probe_dimensions(source) or (1024, 1024)
+    strength = resolve_strength(plan.strength, None, resolved_profile, size=size)
+    seed = resolve_seed(plan.seed)
+    argv = _invisible_engine_argv(
+        plan,
+        source=source,
+        output=output,
+        profile=resolved_profile,
+        strength=strength,
+        seed=seed,
+    )
+    completed = run_command(
+        argv,
+        timeout=plan.timeout,
+        output_limit=_INVISIBLE_ENGINE_OUTPUT_LIMIT,
+    )
+    report: dict[str, Any] = {
+        "status": "completed",
+        "best_effort": True,
+        "profile": resolved_profile,
+        "backend": plan.backend,
+        "strength": strength,
+        "seed": seed,
+        "returncode": completed.returncode,
+    }
+    if completed.returncode == ExitCode.BACKEND_UNAVAILABLE.value:
+        report["status"] = "skipped"
+        report["reason"] = "engine-unavailable"
+        report["detail"] = completed.stderr_text[-_INVISIBLE_ENGINE_OUTPUT_LIMIT:]
+        return report
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "invisible-watermark engine failed "
+            f"(exit {completed.returncode}): "
+            f"{completed.stderr_text[-_INVISIBLE_ENGINE_OUTPUT_LIMIT:]}"
+        )
+    if not output.is_file():
+        raise RuntimeError("invisible-watermark engine produced no output")
+    return report
 
 
 from perturb_text import MODES as PERTURB_MODES
@@ -345,6 +540,10 @@ class CleanPlan:
     also_layer_a_text: bool = True
     #: The frozen video policy, built only when the asset kind is video.
     video: VideoPlan | None = None
+    #: The optional invisible-watermark regeneration stage. ``None`` means the
+    #: stage is not requested; a present plan means the stage may run, gated at
+    #: execution time by whether the file actually carries an invisible target.
+    invisible: InvisiblePlan | None = None
 
     def __post_init__(self) -> None:
         if self.forced_kind not in ("auto", "text", "image", "container", "video"):
@@ -377,6 +576,8 @@ class CleanPlan:
             raise TypeError("degrade must be an ImageDegradePlan or None")
         if self.video is not None and not isinstance(self.video, VideoPlan):
             raise TypeError("video must be a VideoPlan or None")
+        if self.invisible is not None and not isinstance(self.invisible, InvisiblePlan):
+            raise TypeError("invisible must be an InvisiblePlan or None")
         if not isinstance(self.humanize, bool):
             raise TypeError("humanize must be a bool")
         if self.humanize_seed is not None and (
@@ -404,6 +605,11 @@ class CleanResult:
     output: Path
     residual: bool
     _details: Mapping[str, Any] = field(repr=False, compare=False)
+    #: True when a requested optional backend was unavailable and its stage was
+    #: skipped with a labeled report. The pipeline maps this to exit code 3
+    #: (``operation.ExitCode.BACKEND_UNAVAILABLE``); it is deliberately not part
+    #: of ``to_dict`` so the JSON report shape stays unchanged.
+    backend_unavailable: bool = False
 
     def __post_init__(self) -> None:
         details = dict(self._details)
@@ -412,6 +618,8 @@ class CleanResult:
         details.pop("output", None)
         if "exit_code" in details:
             raise ValueError("CleanResult details must not contain exit_code")
+        if not isinstance(self.backend_unavailable, bool):
+            raise TypeError("backend_unavailable must be a bool")
         object.__setattr__(self, "_details", _freeze_json(details))
 
     def to_dict(self) -> dict[str, Any]:
@@ -758,6 +966,8 @@ def _clean_image_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
     pixel = _image_pixel_plan(plan)
     soft = inspect_soft_binding(path) if plan.inspect_soft_binding else None
     visible_report = None
+    invisible_report = None
+    backend_unavailable = False
     verification_status = "VERIFIED"
     final_mask_output = pixel.visible.mask_output if pixel.visible is not None else None
 
@@ -928,6 +1138,41 @@ def _clean_image_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
         if plan.humanize:
             report["humanize"] = _apply_humanize_stage(staged_final, path, plan.humanize_seed)
 
+        if plan.invisible is not None:
+            # Runs last, after the visible pass's outside-mask verification: an
+            # invisible-watermark regeneration is allowed to change every pixel,
+            # so it must not be judged against the named-region invariant.
+            #
+            # A file with no invisible target gets no report key at all: the
+            # stage was requested for every image (it is gated by the target, not
+            # by a flag), so always emitting a key would change the JSON shape of
+            # the common `wm image.png` run. A key appears only when the stage had
+            # something to say: it ran, it could not run, or detection failed.
+            resolved_profile = resolve_effective_profile(plan.invisible.profile, None)
+            scheme, detection_error = invisible_target_scheme(path)
+            if scheme is not None or detection_error is not None:
+                invisible_report = {
+                    "best_effort": True,
+                    "profile": resolved_profile,
+                    "backend": plan.invisible.backend,
+                }
+                if scheme is None:
+                    invisible_report["status"] = "skipped"
+                    invisible_report["reason"] = "detection-failed"
+                    invisible_report["error"] = detection_error
+                elif not _invisible_engine_available(plan.invisible):
+                    invisible_report["status"] = "skipped"
+                    invisible_report["reason"] = "engine-unavailable"
+                    backend_unavailable = True
+                else:
+                    staged_invisible = staging / f"invisible{path.suffix or '.png'}"
+                    invisible_report.update(
+                        _run_invisible_stage(path, staged_invisible, plan.invisible)
+                    )
+                    invisible_report["scheme"] = scheme
+                    if invisible_report["status"] == "completed":
+                        staged_final = staged_invisible
+
         mask_data = (
             staged_mask.read_bytes()
             if staged_mask.is_file() and final_mask_output is not None
@@ -963,6 +1208,8 @@ def _clean_image_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
     report["input"] = str(path)
     if visible_report is not None:
         report["visible"] = visible_report
+    if invisible_report is not None:
+        report["invisible"] = invisible_report
     if soft is not None:
         report["soft_binding"] = soft
     soft_found = bool(soft and soft["soft_binding"]["found"])
@@ -972,7 +1219,9 @@ def _clean_image_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
         or soft_found
         or verification_status != "VERIFIED"
     )
-    return CleanResult("image", path, dest, residual, report)
+    return CleanResult(
+        "image", path, dest, residual, report, backend_unavailable=backend_unavailable
+    )
 
 
 def _clean_container_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:

@@ -319,8 +319,16 @@ def main() -> int:
         if run.batch:
             errors = sum(r.get("exit_code", 0) != 0 for r in results)
             eprint(f"done: {len(results)} file(s), {errors} with warnings/errors")
-    if all(r.get("exit_code", 0) == 0 for r in results):
+    codes = {r.get("exit_code", 0) for r in results}
+    if codes <= {0}:
         return ExitCode.SUCCESS.value
+    # Exit 3 only when every non-zero item is a skipped backend: a real residual
+    # or error (1/2) stays the dominant outcome, so base behaviour is unchanged.
+    if ExitCode.BACKEND_UNAVAILABLE.value in codes and codes <= {
+        0,
+        ExitCode.BACKEND_UNAVAILABLE.value,
+    }:
+        return ExitCode.BACKEND_UNAVAILABLE.value
     return ExitCode.RESIDUAL_OR_ERROR.value
 
 
