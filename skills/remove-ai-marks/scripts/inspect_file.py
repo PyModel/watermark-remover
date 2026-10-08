@@ -25,6 +25,7 @@ from identify import ProvenanceVerdict, identify_file, unknown_verdict
 from image_meta import inspect_image
 from inspect_soft_binding import inspect_soft_binding
 from text_unicode import human_report, inspect_text
+from video import inspect_video
 
 
 def main() -> int:
@@ -184,6 +185,20 @@ def _inspect_asset(
             None,
         )
 
+    if kind == "video":
+        # Before the container fallthrough: a video is its own kind, and the
+        # document inspector would read it as an unsupported container.
+        report = inspect_video(path)
+        return (
+            {
+                "kind": "video",
+                "path": str(path),
+                **report,
+                "suspicious": bool(report["markers"]),
+            },
+            None,
+        )
+
     report = inspect_container(path)
     return (
         {
@@ -282,6 +297,11 @@ def _inspect_single(path: Path, args) -> dict:
     print(f"Kind: {kind}")
     print(f"Path: {result['path']}")
     print(f"Format: {result.get('format')}")
+    if kind == "video":
+        print(f"Provenance: {result.get('verdict')}")
+        for marker in result.get("markers", []):
+            print(f"  - {marker['location']}: {marker['label']}")
+        return result
     print(f"C2PA: {result.get('has_c2pa')}")
     print(f"AI metadata: {result.get('has_ai_metadata')}")
     for finding in result.get("findings", []):

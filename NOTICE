@@ -13,6 +13,20 @@ in CONTRIBUTING.md ("Ported code provenance"). Redistributors must preserve
 this NOTICE together with those per-file headers under the Apache License,
 Version 2.0, in addition to this project's MIT license.
 
+## Third-party: remove-ai-watermarks container readers (Apache-2.0)
+
+`skills/remove-ai-marks/scripts/container_readers.py` ports the native TC260
+AIGC container readers from `wiltodelta/remove-ai-watermarks`, licensed under
+the Apache License, Version 2.0:
+
+- Matroska/WebM — `src/remove_ai_watermarks/_internal/ebml.py`
+- FLV — `src/remove_ai_watermarks/_internal/flv.py`
+- AVI — `src/remove_ai_watermarks/_internal/riff.py`
+
+Modifications: the readers take bytes instead of a path, return parsed TC260
+labels as findings instead of raw payloads, and share one module with a
+magic-byte dispatch. The full note is in the file's provenance header.
+
 ## Third-party: invisible-watermark (MIT)
 
 `skills/remove-ai-marks/scripts/dwt_dct.py` derives from

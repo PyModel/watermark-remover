@@ -55,6 +55,16 @@ pixel = [
     "opencv-python-headless",
     "Pillow",
 ]
+# The video runtime (video_encoding.py): the two system binaries the video path
+# shells out to (ffmpeg, ffprobe) plus PyAV, which serves exactly one lookup --
+# av.VideoFormat(...).components for component bit depth -- and falls back to
+# ffprobe's own bits_per_raw_sample when it is absent. av 18.x is the tested
+# range (Q1; upstream pins it) and ships cp311-abi3 wheels only, so the extra
+# carries a Python >= 3.11 floor while the core stays on >= 3.10, per the floor
+# ADR. ffmpeg/ffprobe are system packages, never pip requirements.
+video = [
+    "av>=18,<19; python_version >= '3.11'",
+]
 quality = [
     "scikit-image",
 ]
