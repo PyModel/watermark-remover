@@ -18,7 +18,7 @@ tui-check:
 
 # web/dist is committed so wheels and Docker need no Bun; this fails when it is stale.
 web-check:
-	cd skills/remove-ai-marks/web && bun install --frozen-lockfile && bun run typecheck && bun test && bun run build
+	cd skills/remove-ai-marks/web && bun install --frozen-lockfile && bun run typecheck && bun run test && bun run build
 	git diff --exit-code --stat -- skills/remove-ai-marks/web/dist
 	test -z "$$(git status --porcelain -- skills/remove-ai-marks/web/dist)"
 

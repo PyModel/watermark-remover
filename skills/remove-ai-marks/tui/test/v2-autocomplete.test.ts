@@ -13,9 +13,9 @@ test("argument-taking commands pass argumentHint through to slash completions", 
   expect(byName.get("clean") ?? "").not.toContain("PATH —")
 })
 
-test("the README key table documents file selection and prompt history", () => {
+test("the terminal UI doc key table documents file selection and prompt history", () => {
   const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..")
-  const readme = readFileSync(resolve(repoRoot, "README.md"), "utf8")
+  const readme = readFileSync(resolve(repoRoot, "docs/terminal-ui.md"), "utf8")
   const start = readme.indexOf("| Key | Does |")
   const end = readme.indexOf("**First run**")
   const table = readme.slice(start, end)
