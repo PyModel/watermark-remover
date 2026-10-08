@@ -10,7 +10,7 @@ import pipeline_actions as act
 from clean_asset import CleanPlan, clean_asset
 from clean_request import CleanRequest, dropped_text_transforms, plan_work, select_request_inputs
 from common import cleaned_path
-from operation import OperationStatus, status_to_exit_code
+from operation import ExitCode, OperationStatus, status_to_exit_code
 from rewrite_text import TokenSink, remote_warning
 
 
@@ -106,7 +106,14 @@ def _execute_item(
             status = (
                 OperationStatus.VERIFIED if not result.residual else OperationStatus.RESIDUAL_RISK
             )
-            payload["exit_code"] = status_to_exit_code(status)
+            # A skipped optional backend is its own outcome: the stage did not
+            # run, so the residual verdict cannot express it. Exit code 3 says
+            # "not installed", keeping 1 for "ran and left signal".
+            payload["exit_code"] = (
+                ExitCode.BACKEND_UNAVAILABLE.value
+                if result.backend_unavailable
+                else status_to_exit_code(status)
+            )
             dropped = dropped_text_transforms(request, result.kind)
             if dropped:
                 payload["skipped_text_transforms"] = list(dropped)

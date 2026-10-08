@@ -38,6 +38,7 @@ from clean_asset import (
     CleanPlan,
     ImageDegradePlan,
     ImagePixelPlan,
+    InvisiblePlan,
     TextCleanPlan,
 )
 from common import (
@@ -438,6 +439,45 @@ def missing_video_runtime() -> tuple[str, ...]:
     return video_runtime()
 
 
+def _video_visible_plan(request: CleanRequest):
+    """The visible-video pass *request* asks for, or None.
+
+    Only an explicit localization source is a visible request on a video: a
+    detection-driven ``--mark``, or a region the operator named as
+    ``--visible-mask`` or ``--visible-box``. The image-only visible knobs
+    (``--dilate``/``--inpaint-command``) do not on their own name a region, so
+    they are refused rather than silently doing nothing. Returns the
+    ``VisibleVideoPlan`` type only through a deferred import: the visible engine
+    needs OpenCV, and a metadata-only clean must not pull it in.
+    """
+    from video_visible import VISIBLE_FILL_BACKENDS, VisibleVideoPlan
+
+    if request.mark is None and request.visible_mask is None and request.visible_box is None:
+        if request.visible_requested():
+            raise ValueError(
+                "visible cleaning needs --mark, --visible-mask, or --visible-box on a "
+                "video; --dilate/--inpaint-command/--visible-backend alone name no region"
+            )
+        return None
+    if request.visible_backend in VISIBLE_FILL_BACKENDS:
+        backend = request.visible_backend
+    elif request.visible_backend in ("texture", "simple"):
+        # The image vocabulary's texture/simple passes have no video equivalent;
+        # cv2 is the same classical floor the video plan defaults to.
+        backend = "cv2"
+    else:
+        raise ValueError(
+            f"--visible-backend {request.visible_backend!r} has no video equivalent; "
+            f"use one of {', '.join(VISIBLE_FILL_BACKENDS)}"
+        )
+    return VisibleVideoPlan(
+        mark=request.mark,
+        mask_path=request.visible_mask,
+        box=request.visible_box,
+        backend=backend,
+    )
+
+
 def build_clean_plan(request: CleanRequest, dest: Path, kind: AssetKind) -> CleanPlan:
     """Compose the immutable ``CleanPlan`` for one asset."""
     if kind == "video":
@@ -447,13 +487,6 @@ def build_clean_plan(request: CleanRequest, dest: Path, kind: AssetKind) -> Clea
         missing = missing_video_runtime()
         if missing:
             raise ValueError(video_runtime_hint(missing))
-        if request.visible_requested():
-            # A silent no-op would let a caller believe a visible mark was
-            # removed. Until the visible-video stage lands, refuse instead.
-            raise ValueError(
-                "visible cleaning is not available for video assets yet; "
-                "run without a visible flag to strip video metadata"
-            )
     if (request.degrade or request.morpho) and kind != "image":
         raise ValueError("--degrade/--morpho are only valid for image assets")
     if request.humanize and kind != "image":
@@ -529,7 +562,14 @@ def build_clean_plan(request: CleanRequest, dest: Path, kind: AssetKind) -> Clea
             external_backend=None,
         )
 
-    video_plan = VideoPlan() if kind == "video" else None
+    video_plan = None
+    if kind == "video":
+        video_plan = VideoPlan(visible=_video_visible_plan(request))
+
+    # The invisible-watermark stage is available on every image clean and is
+    # gated at execution time by whether the file actually carries a target, so
+    # nothing here has to open the pixels.
+    invisible_plan = InvisiblePlan() if kind == "image" else None
 
     return CleanPlan(
         forced_kind=kind,
@@ -547,6 +587,7 @@ def build_clean_plan(request: CleanRequest, dest: Path, kind: AssetKind) -> Clea
         humanize_seed=request.seed,
         also_layer_a_text=request.also_layer_a_text,
         video=video_plan,
+        invisible=invisible_plan,
     )
 
 
