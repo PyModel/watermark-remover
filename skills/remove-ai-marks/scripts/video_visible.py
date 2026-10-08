@@ -57,6 +57,7 @@ from image_io import imread
 from morphomod import read_pgm
 from numpy.typing import NDArray
 from PIL import Image, ImageDraw, ImageFont
+from video import VISIBLE_VIDEO_MARKS
 from video_encoding import (
     DEFAULT_OUTPUT_LIMIT,
     DEFAULT_PROBE_TIMEOUT,
@@ -170,7 +171,6 @@ _FFMPEG_STDERR_TRUNCATION = b"\n... [truncated]\n"
 #: The video marks this build can localize, in the order the reference lists
 #: them. Sora ships first because it is the mark the engine was proved end to
 #: end on; the other seven run the same pass with their own detector and policy.
-VISIBLE_VIDEO_MARKS = ("sora", "veo", "seedance", "doubao", "dola", "hailuo", "vidu", "kling")
 #: ``--mark auto`` on a video: scan every shipped mark and fill the one the
 #: temporal arbiter accepts on the most frames.
 AUTO_VIDEO_MARK = "auto"

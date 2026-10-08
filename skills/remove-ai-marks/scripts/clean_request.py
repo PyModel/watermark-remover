@@ -59,7 +59,7 @@ from common import (
 from morphomod import DEFAULT_DILATION_RADIUS, VisiblePlan
 from perturb_text import MODES as PERTURB_MODES
 from rewrite_text import REWRITE_STRENGTHS, RewritePlan
-from video import VideoPlan, video_runtime, video_runtime_hint
+from video import VISIBLE_VIDEO_MARKS, VideoPlan, video_runtime, video_runtime_hint
 
 #: Layer B strengths that ``--rewrite`` accepts.  ``tsapa`` is included so
 #: ``--rewrite tsapa`` and the older ``--tsapa`` flag mean the same thing.
@@ -199,8 +199,12 @@ class CleanRequest:
             from watermark_registry import mark_keys, validate_sensitivity
 
             validate_sensitivity(self.sensitivity)
-            if self.mark != "auto" and self.mark not in mark_keys():
-                raise ValueError(f"unknown mark {self.mark!r}; expected 'auto' or a registry key")
+            # A video-only mark (sora, veo, ...) is checked against the video
+            # engine's own list.
+            if self.mark not in ("auto", *mark_keys(), *VISIBLE_VIDEO_MARKS):
+                raise ValueError(
+                    f"unknown mark {self.mark!r}; expected 'auto', a registry key, or a video mark"
+                )
         if (
             isinstance(self.timeout, bool)
             or not isinstance(self.timeout, (int, float))

@@ -357,6 +357,33 @@ def test_batch_mode_visible_reaches_a_video_as_mark_auto(
     assert plan.video.visible.mark == "auto"
 
 
+@pytest.mark.parametrize("mark", ["sora", "veo", "seedance", "hailuo", "vidu"])
+def test_a_video_only_mark_is_accepted_by_the_request(
+    mark: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Marks only the video engine knows must not be refused as unknown image marks."""
+    from clean_request import CleanRequest, plan_work, select_request_inputs
+
+    _fake_runtime(tmp_path, monkeypatch)
+    src = tmp_path / "clip.mkv"
+    src.write_bytes(matroska(LABEL))
+    request = CleanRequest(paths=(src,), output=tmp_path / "out.mkv", mark=mark)
+
+    selection = select_request_inputs(request)
+    _item, _output, plan = plan_work(selection.items, request, selection.batch)[0]
+
+    assert plan.video is not None
+    assert plan.video.visible is not None
+    assert plan.video.visible.mark == mark
+
+
+def test_an_unknown_mark_is_still_refused() -> None:
+    from clean_request import CleanRequest
+
+    with pytest.raises(ValueError, match="unknown mark"):
+        CleanRequest(mark="not-a-mark")
+
+
 # --- real tools: the measurement a fake cannot make ------------------------
 
 _FFMPEG = shutil.which("ffmpeg")
