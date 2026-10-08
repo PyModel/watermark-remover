@@ -3,106 +3,68 @@
 <p align="center">
   <a href="https://pypi.org/project/watermark-remover/"><img alt="PyPI" src="https://img.shields.io/pypi/v/watermark-remover?logo=pypi&logoColor=white&label=pypi&color=e8a33d&labelColor=0f1110"></a>
   <a href="https://pypi.org/project/watermark-remover/"><img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-30363d?logo=python&logoColor=white&labelColor=0f1110"></a>
-  <a href="https://pepy.tech/project/watermark-remover"><img alt="Downloads" src="https://img.shields.io/pepy/dt/watermark-remover?logo=python&logoColor=white&label=downloads&color=30363d&labelColor=0f1110"></a>
   <a href="https://github.com/PyModel/watermark-remover/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/PyModel/watermark-remover/ci.yml?logo=github&logoColor=white&label=ci&labelColor=0f1110"></a>
-  <a href="https://github.com/PyModel/watermark-remover/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/PyModel/watermark-remover?logo=github&logoColor=white&label=stars&color=30363d&labelColor=0f1110"></a>
   <a href="https://github.com/PyModel/watermark-remover/blob/main/LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-30363d?labelColor=0f1110"></a>
-  <a href="https://hits.sh/github.com/PyModel/watermark-remover/"><img alt="Visitors" src="https://hits.sh/github.com/PyModel/watermark-remover.svg?label=visitors&color=30363d&labelColor=0f1110"></a>
 </p>
 
-Inspect and clean files you own: remove hidden Unicode characters from text and AI/provenance metadata from images and documents. Originals stay untouched unless you explicitly choose `--in-place`.
+watermark-remover finds and removes hidden marks from files you own: invisible Unicode in text, AI and provenance metadata in images, documents, and video, and visible logos when you tell it where they are. It writes a new file and leaves the original alone unless you pass `--in-place`.
 
-Use it as an **agent skill**, install the **PyPI command-line package**, or run the **CLI/TUI from a clone**. The core needs Python 3.10+ and has no required dependencies. A model is optional: text rewriting uses your own local model; visible image removal requires a supplied mask/box or detector.
+Every result says how far you can trust it. Deterministic cleaners report exactly what they removed. Model rewrites, inpainting, and detector evasion are labeled best-effort, and nothing here promises that a vendor's detector will miss the result.
 
-**Honesty contract:** deterministic cleaners report exactly what they removed. Rewrite, inpainting, and detector-evasion methods are labeled best-effort. Nothing here certifies that a vendor detector will fail.
-
-## What ships
-
-| Layer | Target | Method | Result class |
-| --- | --- | --- | --- |
-| **A** | Hidden Unicode, bidi controls, tags, exotic spaces | Context-aware deterministic scrub | Verifiable |
-| **B** | Token-distribution text watermarks | Paraphrase, back-translation, structural rewrite, or TSAPA-style evolutionary search | Best-effort |
-| **V** | Visible image logos and overlays | Supplied mask/box/detector or opt-in `--mark` registry detection; hole fill, dilation, inpaint, restore | Mask removal verifiable, fidelity best-effort |
-| **M** | C2PA, EXIF, XMP, document properties | Format-aware metadata rewrite | Verifiable per format |
-| Soft binding | Remote manifests, in-content binding | Detection and warning only | Detection only |
-| SynthID | Pixel-domain SynthID-class signal | Optional external adapter | Score + best-effort removal |
-
-Optional edges, none required by the core:
-
-- `pypdf` for structural PDF rewrite
-- `exiftool` and `c2patool` as system tools
-- a local Ollama or OpenAI-compatible endpoint for Layer B
-- an external detector, LaMa, MI-GAN, or diffusion command for visible marks
-- `gradio` for the demo UI
-
----
-
-## Choose how to use it
-
-| Route | Best for | Needs |
-| --- | --- | --- |
-| Browser | Clean files without installing anything: [watermark.pymodel.com](https://watermark.pymodel.com) | A current browser; files never leave the device |
-| Agent skill | Ask your coding agent to inspect/clean a file | Python + a harness that can read skills and run commands |
-| PyPI package | Installed `wm` and `wm-tui` commands | Python; Bun for the TUI |
-| Clone / CLI | Development or running without installing the package | Python; Bun for the TUI |
-
-### 1. Agent skill — any skill-capable harness
-
-Clone once, then link the **whole skill folder**, not just `SKILL.md`, into your harness's skills directory:
-
-```bash
-git clone https://github.com/PyModel/watermark-remover.git
-cd watermark-remover
-
-# Pi example; replace this directory with your harness's skills directory.
-mkdir -p ~/.pi/agent/skills
-ln -s "$(pwd)/skills/remove-ai-marks" ~/.pi/agent/skills/remove-ai-marks
-```
-
-Common directories: Pi `~/.pi/agent/skills`, Codex `~/.agents/skills`, Claude Code `~/.claude/skills`, Cursor `.cursor/skills`, Grok `.grok/skills`. Keep the clone where the link points; use your harness's configured directory if different.
-
-Reload skills, then invoke `/remove-ai-marks` **if your harness supports skill commands**, or ask:
-
-> Use the remove-ai-marks skill to inspect `/absolute/path/draft.md`. Explain the findings, then clean to a new file. Do not overwrite the original.
-
-For a harness without skill discovery, ask it to read `skills/remove-ai-marks/SKILL.md` from the clone and follow those instructions. The skill uses the same Python cleaners as the CLI; it does not require Pi or any specific agent vendor. The agent's model is separate from the optional local rewrite model.
-
-### 2. PyPI package — installed commands
+## Install
 
 ```bash
 python3 -m pip install watermark-remover
-
-# Remove hidden characters / metadata, preserving originals.
-wm draft.md -o draft.cleaned.md
-wm image.png -o image.cleaned.png
-
-# JSON result plus an audit record.
-wm draft.md -o draft.cleaned.md --json --audit
-
-# Interactive UI (requires Bun on PATH).
-wm-tui ./drafts
 ```
 
-Installed commands: `wm` cleans, `wm-tui` is the terminal UI, `wm-serve` exposes the HTTP API, and `wm-audit-dir` / `wm-audit-site` inspect directories/sites. Optional extras: `[visible]`, `[quality]`, `[ai]`, `[provenance]`, `[detect]`, `[source-classify]`, `[classify]`, `[classify-onnx]`, `[trustmark]`, `[all]`; none is required for the core clean. `[detect]` and `[source-classify]` join `[all]`; `[trustmark]`, `[classify]`, and `[classify-onnx]` stay standalone (torch is opt-in). Detection extras only ever report evidence — absence of a signal is unknown, never clean.
+The core needs Python 3.10 or later and nothing else. Heavier features are optional extras, listed under [Optional extras](#optional-extras).
 
-### 3. Clone — CLI or local TUI development
+You can also skip the install and use the browser version at [watermark.pymodel.com](https://watermark.pymodel.com). Files stay on your device.
+
+## First run
+
+Clean a Markdown file that has a zero-width space, a word joiner, a zero-width joiner, and a no-break space hidden in it:
 
 ```bash
-git clone https://github.com/PyModel/watermark-remover.git
-cd watermark-remover
-SCRIPTS=skills/remove-ai-marks/scripts
-
-# Inspect first; this writes nothing.
-python3 "$SCRIPTS/inspect_file.py" draft.md
-
-# Clean to a new file.
-python3 "$SCRIPTS/clean_file.py" draft.md -o draft.cleaned.md
-
-# Run the local TUI source; no build needed. Restart after edits.
-python3 "$SCRIPTS/tui.py" ./drafts
+wm draft.md -o draft.cleaned.md
 ```
 
-Hidden-mark and metadata cleaning need no model. To rewrite plain text as well, use your own local OpenAI-compatible server:
+```text
+wrote draft.cleaned.md format=markdown
+  - no AI frontmatter keys or embedded data URIs removed
+  - layer A text: removed=3 replaced=1
+```
+
+Three hidden characters were removed and the no-break space became a normal space. Add `--json` for a machine-readable report, or `--audit` to write a JSON record of what was removed.
+
+Exit codes: 0 means nothing risky is left, 1 means a file failed or still carries a signal you asked to remove, 2 is a usage error, and 3 means an optional backend the clean needed is not installed, so that stage was skipped.
+
+## Common tasks
+
+Clean an image's metadata (C2PA, EXIF, XMP):
+
+```bash
+wm photo.jpg -o photo.cleaned.jpg
+```
+
+Clean a whole folder, keeping the folder layout:
+
+```bash
+wm ./inputs -o ./cleaned --recursive
+wm ./inputs -o ./cleaned --recursive --glob "*.png" --extensions png
+wm ./inputs -o ./cleaned --recursive --mode all --json
+```
+
+`--mode` picks what a batch does: `metadata` (the default), `visible` (known visible marks only), or `all`. With `--json`, a batch prints a summary with each file's outcome and the counts.
+
+Remove a visible logo by pointing at it, or let the mark registry find known vendor marks (needs the `[pixel]` extra and a PNG output):
+
+```bash
+wm input.png -o output.png --visible-box 900,920,120,60
+wm input.png -o output.png --mark auto
+```
+
+Rewrite text through your own local model, then re-scrub it:
 
 ```bash
 wm draft.txt -o draft.cleaned.txt \
@@ -110,687 +72,151 @@ wm draft.txt -o draft.cleaned.txt \
   --rewrite-base-url http://127.0.0.1:8000 --rewrite-model YOUR_MODEL_ID
 ```
 
-Replace the port and model ID with yours. For Ollama, use `--rewrite-backend ollama` and port `11434`. From a clone, replace `wm` with `python3 "$SCRIPTS/clean_file.py"`.
+Endpoints that are not on your machine are refused unless you pass `--rewrite-allow-remote`. For Ollama, use `--rewrite-backend ollama` and port 11434.
 
-### Batch mode
-
-Directory mode preserves relative paths, skips its own `.cleaned.*`, `.mask.*`, and `.bak` artifacts, rejects output collisions, and returns non-zero when any file fails or retains a requested risk signal.
+Strip provenance from a video (needs the `[video]` extra, Python 3.11 or later, and a system `ffmpeg` and `ffprobe`):
 
 ```bash
-# All supported files below a directory
-python3 "$SCRIPTS/clean_file.py" ./inputs -o ./cleaned --recursive
-
-# Glob and extension allow-list
-python3 "$SCRIPTS/clean_file.py" ./inputs -o ./cleaned \
-  --recursive --glob "*.png" --extensions png
-
-# Inspect a tree
-python3 "$SCRIPTS/inspect_file.py" ./inputs --recursive --glob "*.md" --json
+python3 -m pip install 'watermark-remover[video]'
+wm clip.mp4 -o clip.cleaned.mp4
+wm clip.mp4 -o clip.cleaned.mp4 --mark sora
 ```
+
+Visible marks on video are opt-in. `--mark` takes one of sora, veo, seedance, doubao, dola, hailuo, vidu, or kling, or `auto` to check them all; a mark is filled only on frames where it recurs. `--visible-box` fills a region you name on every frame.
+
+Audit a folder or a website without changing anything:
+
+```bash
+wm-audit-dir ./inputs --json
+wm-audit-site --sitemap https://example.com/sitemap.xml --json
+```
+
+Run the HTTP service and web UI on `http://127.0.0.1:8765/`:
+
+```bash
+wm-serve
+```
+
+## Ways to run it
+
+| Command | What it does |
+| --- | --- |
+| `wm` | Cleans files and folders |
+| `wm-tui` | Terminal UI for inspecting and cleaning |
+| `wm-serve` | HTTP API and web UI |
+| `wm-audit-dir` | Audits a directory, with JSON or SARIF output |
+| `wm-audit-site` | Audits a website from its sitemap |
+
+### Agent skill
+
+The same cleaners ship as an agent skill. Clone the repository and link the whole skill folder into your harness's skills directory:
+
+```bash
+git clone https://github.com/PyModel/watermark-remover.git
+ln -s "$(pwd)/watermark-remover/skills/remove-ai-marks" ~/.claude/skills/remove-ai-marks
+```
+
+Use your harness's own directory (Pi `~/.pi/agent/skills`, Codex `~/.agents/skills`, Cursor `.cursor/skills`). Then invoke `/remove-ai-marks`, or ask the agent to read `skills/remove-ai-marks/SKILL.md` and follow it.
 
 ### Terminal UI
 
 ```bash
-wm-tui                     # the current directory
 wm-tui ./drafts --recursive --glob "*.md"
 ```
 
-`wm-tui` is a single-screen terminal UI in the style of opencode and pi. It
-renders on [@earendil-works/pi-tui](https://github.com/earendil-works/pi/tree/main/packages/tui)
-(alternate-screen fullscreen layout, differential rendering), so it needs
-[Bun](https://bun.sh) 1.4 or later on the `PATH`. The Python install stays
-dependency-free: on first launch `wm-tui` runs
-`bun install --frozen-lockfile --production` for its frontend — three runtime
-packages, not the previous hundreds — and it prints the install hint if Bun is
-missing. A read-only install is copied into the user cache before that install.
-macOS, Linux and Windows are supported.
+`wm-tui` renders with [@earendil-works/pi-tui](https://github.com/earendil-works/pi/tree/main/packages/tui) and needs [Bun](https://bun.sh) 1.4 or later on the `PATH`. On first launch it runs `bun install --frozen-lockfile --production`, which installs three runtime packages for the frontend. Move to a file, press Space to mark it, Ctrl+E to inspect, and Ctrl+R to clean only the marked file. Set `PI_TUI_WRITE_LOG` to a file or directory to capture the raw terminal output when reporting a rendering bug. Keys, presets, and setup are in [docs/terminal-ui.md](https://github.com/PyModel/watermark-remover/blob/main/docs/terminal-ui.md).
 
-The screen has four parts:
+### From a clone
 
-- **The file list** on the left: `→` is the focused row, `[x]` is the one file marked for cleaning. Moving the arrow does not change the mark.
-- **The selected file** on the right: what was found, what was removed, and a
-  before/after diff.
-- **One prompt** at the bottom:
-  - a path adds files;
-  - a `--flag` adds a `wm` option (any flag `wm` accepts, checked by the
-    CLI's own parser; type a bare flag again to turn it off);
-  - a `/command` runs a command.
-- **The footer** prompts you to mark a file, then shows the `wm …` command for that marked file.
-
-| Key | Does |
-| --- | --- |
-| `ctrl+e` | inspect, which writes nothing |
-| `ctrl+r` | clean **only the marked file**; writes `NAME.cleaned.EXT` beside it, preserving the original |
-| `tab` | next preset: Hidden marks, Hidden marks aggressive, Deep clean (LLM rewrite), Images |
-| `ctrl+p` | every command: model, history, doctor, setup, help |
-| `up` / `down` | previous / next file when the prompt is empty; cursor/completion while typing |
-| `space` | mark the focused file; marking another replaces the old mark; Space again unmarks it |
-| `ctrl+k` / `ctrl+j` | alternative previous / next file shortcuts |
-| `alt+up` / `alt+down` | prompt history |
-| `enter` | submit the typed path, flag or command; never automatically clean |
-| `esc` | stop after the current file |
-
-**Typical workflow:** ↑/↓ to a file → Space to mark it → Ctrl+E to inspect → Ctrl+R to clean. Ctrl+E inspects the discovered list; Ctrl+R never cleans the whole directory. With no mark, cleaning is refused.
-
-**Your local model:** type `/model` to choose a model reported by a local server, or select **Enter a server**. Use ←/→ to choose Ollama/OpenAI-compatible, Tab to edit the local URL and model ID (Ctrl+U clears a field), then Enter to save. Each user supplies their own server and model; there is no fixed model, Pi authentication, or cloud-model catalog. A local OpenAI-compatible URL ending in `/v1` is normalized to its server root automatically. Select **Deep clean (LLM rewrite)** with Tab or `/preset rewrite` to use it. Markdown/documents normally use container cleaning and skip rewriting; `--as text` explicitly opts into text-body rewriting.
-
-**First run** opens a three-step setup:
-
-1. What the result classes mean.
-2. A scan for a local model server. The scan only contacts `127.0.0.1`: it
-   checks Ollama, LM Studio, llama.cpp and OpenAI-compatible servers for their model lists, and
-   never sends a document.
-3. The default preset.
-
-`esc` skips the setup, and it does not come back unless you run `/setup` or
-`wm-tui --setup`. `--no-setup` never shows it.
-
-The choices are saved to `~/.config/watermark-remover/tui.json`. The API key is
-never in that file: it is read from `WATERMARKS_REWRITE_API_KEY` at run time
-and never displayed.
-
-Results are labelled by layer, never by outcome: Verifiable, Best-effort or
-Detection-only. A clean that needs confirmation stops and asks before the
-first write. That covers a remote endpoint, `--in-place`,
-`--strip-semantic-format`, and a long LLM run.
-
-The UI is two processes:
-
-- A Bun frontend (`skills/remove-ai-marks/tui/`, entry `src/index.ts`) that only
-  renders, on pi-tui. First launch installs three runtime packages with
-  `bun install --frozen-lockfile --production`.
-- A Python bridge (`scripts/tui_bridge.py`) that owns every decision. It builds
-  the request through `wm`'s own parser, `plan_work` and `run_clean_item`, so
-  it hits every refusal the CLI makes.
-
-[`tui/PROTOCOL.md`](skills/remove-ai-marks/tui/PROTOCOL.md) documents the protocol between them.
-
-Set `PI_TUI_WRITE_LOG` to a file path, or to an existing directory (a
-timestamped log is created there), to capture the raw ANSI stream the frontend
-writes. That is the rendering-bug log. It is not `WM_TUI_LOG`, which is the
-bridge stderr log.
-
----
-
-## Text
-
-### Layer A, deterministic Unicode hygiene
+The scripts in `skills/remove-ai-marks/scripts/` are plain CLIs and run without installing the package:
 
 ```bash
-python3 "$SCRIPTS/inspect_text.py" draft.txt --json
-python3 "$SCRIPTS/clean_text.py" draft.txt -o draft.cleaned.txt --stats
+python3 skills/remove-ai-marks/scripts/inspect_file.py draft.md
+python3 skills/remove-ai-marks/scripts/clean_file.py draft.md -o draft.cleaned.md
 ```
 
-Layer A removes or normalizes configured hidden carriers. Some Unicode is meaningful, so preservation rules are context-aware rather than blanket deletion: ZWJ and variation selectors affect emoji and orthographies, and bidi controls affect display order.
+`inspect_file.py` reports what it finds and writes nothing.
 
-### Layer B, rewrite attacks
+## What it removes
 
-```bash
-# No model call: emit an execution prompt
-python3 "$SCRIPTS/rewrite_text.py" draft.txt \
-  --backend print-prompt --strength paraphrase
-
-# TSAPA-style operator pack, still no model call
-python3 "$SCRIPTS/rewrite_text.py" draft.txt \
-  --backend print-prompt --strength tsapa --generations 5 --population 12
-
-# Execute against a local OpenAI-compatible endpoint
-WATERMARKS_REWRITE_BACKEND=openai-compatible \
-WATERMARKS_REWRITE_BASE_URL=http://127.0.0.1:8080 \
-WATERMARKS_REWRITE_MODEL=my-local-model \
-  python3 "$SCRIPTS/rewrite_text.py" draft.txt \
-    --strength tsapa --generations 5 --population 12
-
-# Qwen/Transformers-compatible servers: suppress reasoning preambles
-WATERMARKS_REWRITE_DISABLE_THINKING=true \
-  python3 "$SCRIPTS/rewrite_text.py" draft.txt \
-    --backend openai-compatible --base-url http://127.0.0.1:8080 \
-    --model my-thinking-model --strength paraphrase
-```
-
-The TSAPA-style engine is a real multi-objective evolutionary loop:
-
-1. Generate a diverse candidate population.
-2. Score attack fitness: PLL, n-gram diversity, lexical diversity.
-3. Score fidelity: embedding cosine similarity, with a labeled shingle-Jaccard fallback.
-4. Apply NSGA-II non-dominated sorting and crowding distance.
-5. Cross over at sentence boundaries, mutate the lowest-PLL sentence.
-6. Select the Pareto knee point.
-
-A logprobs-capable `/v1/completions` endpoint supplies PLL, and `/v1/embeddings` supplies semantic similarity. Either can fail independently and degrade to an explicitly labeled standard-library proxy. `--disable-thinking` (or `WATERMARKS_REWRITE_DISABLE_THINKING=true`) opts into the Qwen/Transformers `chat_template_kwargs.enable_thinking=false` extension; it is never sent by default to generic OpenAI-compatible servers.
-
-Layer B is also reachable from `wm` directly, so a rewrite and the Layer A
-re-scrub happen in one pass over one file or a whole tree:
-
-```bash
-wm draft.txt -o draft.cleaned.txt \
-  --rewrite humanize \
-  --rewrite-backend openai-compatible \
-  --rewrite-base-url http://127.0.0.1:8000 \
-  --rewrite-model my-local-model \
-  --rewrite-candidates 3 --rewrite-timeout 120
-
-wm draft.txt -o draft.cleaned.txt --tsapa    # alias for --rewrite tsapa
-```
-
-Strengths: `paraphrase`, `backtranslate`, `structural`, `humanize`, `code`,
-`tsapa`. Settings resolve explicit flag > environment
-(`WATERMARKS_REWRITE_*`) > default, so an existing environment still works with
-a bare `--rewrite`. Non-loopback endpoints are refused unless
-`--rewrite-allow-remote` is passed, and the warning names what leaves the
-machine. Text-body options are deliberate no-ops on non-text assets so mixed
-batches work; when that happens the run reports exactly which transforms it
-skipped rather than letting you assume the body was rewritten.
-
-**Cost:** Layer B replaces the original wording and can flatten voice or precision. Prefer a non-origin model so the rewrite does not re-stamp the same scheme.
-
-### Character-level perturbations
-
-```bash
-python3 "$SCRIPTS/perturb_text.py" draft.txt \
-  --mode zero-width --strength 0.10 --seed 42
-```
-
-This is an opt-in anti-watermark transform inspired by 2026 character-perturbation research. It intentionally adds artifacts that Layer A removes. `zero-width` and `space-swap` are Layer-A reversible, `confusable` and `case` are not. It is not a hygiene pass and carries no detector guarantee.
-
----
-
-## Visible image marks
-
-[`morphomod.py`](https://github.com/PyModel/watermark-remover/blob/main/skills/remove-ai-marks/scripts/morphomod.py) never guesses a watermark region. Supply one of:
-
-- `--mask mask.pgm|mask.png` (white means remove)
-- `--box X,Y,W,H`
-- `--detect-command '...'` with `{input}`, `{mask}`, `{prompt}` placeholders
-
-```bash
-# Stdlib texture backend (default in clean_file): nearby-patch search
-python3 "$SCRIPTS/morphomod.py" input.png -o output.png \
-  --box 900,920,120,60 --dilation 3 --backend texture
-
-# Uniform-background fallback
-python3 "$SCRIPTS/morphomod.py" input.png -o output.png \
-  --box 900,920,120,60 --dilation 3 --backend simple
-
-# Production adapter: external detector and inpainter
-python3 "$SCRIPTS/morphomod.py" input.png -o output.png \
-  --detect-command 'detector --input "{input}" --output "{mask}"' \
-  --backend external \
-  --command 'inpainter --image "{input}" --mask "{mask}" --output "{output}"'
-
-# Combined visible pass, then metadata clean
-python3 "$SCRIPTS/clean_file.py" input.png -o output.png \
-  --visible-mask mask.pgm --dilate 3 --visible-backend texture
-```
-
-The stdlib dilation is non-cascading and runs in O(width × height). PNG decoding supports non-interlaced 8-bit grayscale, RGB, and RGBA. The default `texture` backend searches nearby patches by boundary error and fully replaces the refined mask; optional feathering is available at the module interface. `simple` is retained for uniform backgrounds only. Neither is marketed as LaMa quality. JPEG visible cleaning requires an external backend, and that backend owns JPEG compositing.
-
-Paper-reported MorphoMod improvements are not this implementation's measured results. The report includes initial and refined mask pixels and requires manual fidelity review.
-
-### Automatic mark detection (opt-in)
-
-`--mark auto` (or a named key such as `--mark doubao`) replaces the manual mask
-with a registry of known vendor marks: each registered mark is localized,
-filled through one shared inpaint backend, and re-checked by the same detector.
-
-```bash
-wm input.png -o output.png --mark auto
-wm input.png -o output.png --mark auto --sensitivity strict
-wm input.png -o output.png --mark jimeng --visible-backend lama
-```
-
-- Opt-in only: without `--mark`, the explicit-mask behavior is unchanged.
-- Detection and removal are best-effort. Every removal is re-validated by the
-  same detector that found the mark — a self-consistency check, not an
-  independent oracle — and the report states `cleaned`, `partial`,
-  `unvalidated`, `error`, or `no_mark` per pass. Nothing certifies a mark is
-  gone; inspect the output.
-- `--sensitivity auto` (default) relaxes a mark's detection gate only when the
-  file's own metadata names that product (TC260 producer codes, Samsung
-  genAIType metadata, or a declared platform token in generator fields);
-  `strict` never relaxes.
-- Fills resolve through the backend stack. The `migan` or `lama` extra
-  (`pip install 'watermark-remover[migan]'` — onnxruntime + huggingface-hub)
-  enables the learned ONNX models; their weights are pinned to published
-  commits and downloaded on first use. cv2 is the no-extra floor, and
-  `--visible-backend` selects a specific tier. `--visible-backend external` is
-  not applicable to registry marks (the report warns and names the backend that
-  actually ran).
-- The mark pass runs whole-image (auto-tiling applies only to explicit-mask
-  plans, and the report says when tiling was skipped for this reason), and the
-  registered engines own their dilation: `--dilate` is not applied there, the
-  report states `engine-controlled (0 user-applied)`.
-- `--humanize` is a separate, default-off post-stage (film grain, chromatic
-  aberration, unsharp); it never runs unless asked.
-
-### Image degradation (opt-in Layer V extension)
-
-`--degrade` and `--morpho` apply frequency-domain or morphological degradation to
-PNG images after metadata cleaning:
-
-```bash
-# Frequency-domain strategies: freq-dct, blur, median, jpeg, rotate, two-stage
-python3 "$SCRIPTS/clean_file.py" photo.png -o out.png \
-  --degrade freq-dct --degrade-strength 0.5 --degrade-seed 7
-
-# Morphological strategies: grid, diagonal, noise, quantize
-python3 "$SCRIPTS/clean_file.py" photo.png -o out.png --morpho grid --degrade-seed 7
-```
-
-Semantics:
-
-- Degradation is an intentional transform, not residual risk: a degraded image
-  exits 0 and the report records the strategy under `degrade` instead of
-  printing a residual warning.
-- `--degrade-strength` (0–1) only configures `freq-dct`; the other strategies
-  use conservative built-in defaults. `--degrade-seed` makes seeded strategies
-  reproducible.
-- DCT-based strategies (`freq-dct`, `jpeg`, `two-stage`) refuse images above
-  their pixel caps (65,536 / 262,144) instead of running for hours in pure
-  Python.
-- The RGBA alpha channel is never modified, output files keep the destination's
-  existing permissions, and degradation requires PNG output.
-
----
-
-## Metadata and provenance
-
-```bash
-# PNG, JPEG, HEIC, HEIF, AVIF
-python3 "$SCRIPTS/clean_image.py" photo.heic -o photo.cleaned.heic
-
-# Any supported format
-python3 "$SCRIPTS/clean_file.py" document.pdf -o document.cleaned.pdf
-
-# Detect soft-binding or remote-manifest risk
-python3 "$SCRIPTS/inspect_soft_binding.py" image.png --json
-```
-
-C2PA facts the parser relies on:
-
-- Manifest Stores use JUMBF and BMFF structures, claims and assertions, and COSE signatures.
-- JPEG embeds through APP11/JUMBF.
-- PNG uses the private ancillary `caBX` chunk, not generic `tEXt`.
-- HEIF and AVIF are ISO-BMFF. Cleaning neutralizes matching JUMBF/C2PA UUID boxes and direct-file Exif and XMP extents in place, preserving offsets. Unsupported external or idat metadata layouts fail closed.
-
-Soft-binding removal remains out of scope. The inspector warns when an in-content binding or remote manifest may re-link provenance after hard-bound metadata is stripped.
-
-### PDF quality
-
-PDF cleaning uses this fallback order:
-
-1. `exiftool`
-2. `qpdf --linearize` structural rewrite (when qpdf is present)
-3. optional `pypdf` full-document clone (outlines, forms, attachments, and catalog retained, docinfo and XMP removed)
-4. byte-exact unchanged copy with an explicit residual warning
-
-```bash
-python3 -m pip install pypdf
-```
-
-Encrypted PDFs are never regex-edited.
-
----
-
-## Optional SynthID pixel scoring
-
-The external [`aloshdenny/reverse-SynthID`](https://github.com/aloshdenny/reverse-SynthID) checkout is not bundled and stays under its upstream non-commercial research license.
-
-```bash
-SCRIPTS=skills/remove-ai-marks/scripts
-"$SCRIPTS/setup_synthid.sh"
-
-REVERSE_SYNTHID_DIR=~/reverse-SynthID \
-  ~/reverse-SynthID/.venv/bin/python "$SCRIPTS/score_synthid.py" shot.png
-```
-
-Or build the scorer locally:
-
-```bash
-make docker-synthid-build
-docker run --rm -v "$(pwd):/data" watermark-remover-synthid-scorer /data/shot.png
-```
-
-This is scoring only. That repository's carrier model and success figures are maintainer-reported reverse-engineering claims, not public Google architecture and not an independent guarantee.
-
-Best-effort pixel-domain removal is opt-in on image cleans: `--remove-synthid` (seed-independent DCT mid-band suppression, PNG only) and `--remove-pixel ctrlregen|diffusion` (heavy external backends). All are labeled best-effort; none certifies a vendor-detector miss.
-
----
-
-## Text watermark detection and stylometry
-
-Optional, stdlib-first, fail-soft:
-
-- `score_stylometry.py` — zero-LLM stylometry (burstiness, MATTR, AI-phrase density) with confidence bands and `--explain`.
-- `text_detectors.py` / `detect_text_watermark.py` — a MarkLLM research harness (same-scheme-config only, not a vendor oracle). Both vendor detectors are reserved but unavailable, and `/capabilities` always reports them `false`: Gemini's official SynthID-text detector is wired for `WATERMARKS_GEMINI_API_KEY` (env only) but the Gemini API exposes no `DETECT_TEXT_WATERMARK` task type, and Claude detection waits on a public API.
-- MarkLLM detection reports a document-level `verdict` (`DETECTED`, `NOT_DETECTED`, `INCONCLUSIVE`, `UNSUPPORTED`, `ERROR`) alongside the raw `detector_verdict`. Only a below-threshold score with a confirmed key/provenance match and enough scored tokens reads as `NOT_DETECTED`; unknown provenance, a near-threshold score, or a short sample produces `INCONCLUSIVE`. An unsupported scheme produces `UNSUPPORTED`, and a detector result that cannot be scored produces `ERROR`. Provenance comes from the `<output>.wm.json` sidecar the `watermark` subcommand writes, or from an operator `--key-id` assertion.
-- `inspect_text.py --stylometry` and `rewrite_text.py` MarkLLM before/after hooks.
-
-```bash
-python3 "$SCRIPTS/score_stylometry.py" draft.txt --threshold 0.65 --explain
-python3 "$SCRIPTS/detect_text_watermark.py" detect draft.txt --scheme kgw --json
-```
-
----
-
-## Audit suite
-
-Directory and website audits produce JSON, human, or SARIF 2.1.0 reports (driver name `watermark-remover`, rules for C2PA, AI metadata, Layer-A Unicode, and stylometry).
-
-```bash
-wm-audit-dir ./inputs --json            # or --format sarif, --check-stylometry, -j N
-wm-audit-site --sitemap https://example.com/sitemap.xml --json
-```
-
-Exit codes: `0` no actionable findings, `1` actionable findings, `2` usage error, `3` partial scan (inconclusive — some inputs could not be scanned). The website auditor enforces same-origin, public-address, pinned-connection fetching (SSRF stack) and a 64 MiB decompressed sitemap cap.
-
----
-
-## HTTP service
-
-The whole pipeline is also exposed over HTTP (stdlib-only, no web framework). The agent skill and any web app can call it instead of running the CLIs locally.
-
-Open `http://127.0.0.1:8765/` for the web UI. Drop one file or many: each is inspected, with every hidden character lit in place in the text (or the metadata found in an image or document). Clean one file or the whole queue, then download `NAME.cleaned.EXT`. Images also get visible-mark removal (drag a box over a logo) and optional SynthID band suppression. Text gets a Layer B rewrite and the watermark detectors, when the server has them configured. After every step the page has the server re-inspect the new bytes, so "nothing remains" is the inspector's finding. The Server view lists every capability with what to set to turn it on. The page is prebuilt React served by `wm-serve` itself (no Bun or Node needed to use it), loads nothing from other origins, and asks for the bearer key when the server has one.
-
-### In the browser
-
-[watermark.pymodel.com](https://watermark.pymodel.com) is the same page with the server replaced by the same Python modules running in the tab (Pyodide, Python compiled to WebAssembly). `pages/bridge.py` drives `server.Handler` without a socket, so every answer matches `wm-serve`; `make pages-check` compares them on text, HTML, AVIF, PNG, JPEG and PDF fixtures. Files are never uploaded: the page's Content-Security-Policy allows only its own origin and `localhost`, which you can confirm in the browser's network panel. The first visit downloads about 8 MB compressed (Python, Pillow, pypdf, the cleaners), cached afterwards.
-
-What runs there: hidden characters, metadata for every format, visible-mark removal, SynthID band suppression, the style score, and Rewrite. Rewrite uses either your own model server on `localhost` (Ollama, LM Studio or any OpenAI-compatible server; the Engine view lists the steps, including `OLLAMA_ORIGINS`) or, if you choose it, the free hosted model: `pages/worker.ts` serves an OpenAI-compatible `/api/v1/chat/completions` on the same domain in front of Cloudflare Workers AI (Gemma 4). That is the one case where text leaves the device; the Worker keeps no copy. It accepts only Layer B's own rewrite prompts (`pages/rewrite-prompts.json`, generated from `rewrite_text.build_prompt`), only from the site's own origin, up to 8,000 characters and 20 rewrites per connection per day, and it stops at 8,000 of Workers AI's 10,000 free daily neurons, so it never costs money. Vendor detectors, the SynthID scorer and `exiftool`/`qpdf`/`c2patool` need keys or binaries, so they stay in `wm-serve` and the CLI. The browser limit is 40 MB per file.
-
-```bash
-make pages-check     # build web/dist-pages and compare the browser engine with native Python
-make pages-deploy    # pages-check, then wrangler deploy to Workers static assets (needs Cloudflare login)
-```
-
-`/rewrite` uses only the model in the server's environment (`WATERMARKS_REWRITE_BACKEND`, `WATERMARKS_REWRITE_MODEL`, `WATERMARKS_REWRITE_BASE_URL`); a request that names its own endpoint, model or key is refused. `/visible` runs the built-in texture and blend fills only; the external inpainting command stays CLI-only.
-
-```bash
-wm-serve                     # http://127.0.0.1:8765 (web UI at /), optional bearer key
-curl -s http://127.0.0.1:8765/health
-curl -s http://127.0.0.1:8765/capabilities
-curl -s http://127.0.0.1:8765/openapi.json
-# POST /inspect, /detect, /clean with {"file": "<base64>", "name": "x.png", "options": {...}}
-# POST /rewrite with {"file": ..., "name": "x.txt", "strength": "paraphrase"}
-# POST /visible with {"file": ..., "name": "x.png", "box": [x, y, w, h], "backend": "texture"}
-```
-
-Every deployment refuses requests for an unknown `Host` (a loopback bind answers only to `127.0.0.1`, `localhost` and `::1`, which stops DNS rebinding), refuses browser POSTs from another origin, drops idle sockets after 60 s, and runs at most 4 jobs at once (503 with `Retry-After` past that). To run it as a public service:
-
-| Variable | Effect |
-| --- | --- |
-| `WATERMARKS_SERVER_PUBLIC=1` | 30 POSTs per minute per client (429 past that), client address from the last `X-Forwarded-For` hop, and `/rewrite` and `/detect` turned off so visitors can't spend your model or vendor keys |
-| `WATERMARKS_SERVER_ALLOWED_HOSTS` | Comma-separated host names to answer to, such as `wm.example.com,healthcheck.railway.app` |
-| `WATERMARKS_SERVER_RATE_LIMIT` | POSTs per minute per client; `0` turns it off |
-| `WATERMARKS_SERVER_MAX_JOBS` | Concurrent jobs (default 4) |
-| `WATERMARKS_MAX_INPUT_BYTES` | Largest accepted file (default 256 MB) |
-| `PORT` | Listening port when `WATERMARKS_SERVER_PORT` is unset, as Railway and Cloud Run set it |
-
-`railway.json` deploys the core `Dockerfile` with `/health` as the health check.
-
-Docker (core image with exiftool + qpdf + c2patool baked in) and compose profiles for the heavy harnesses:
-
-```bash
-make docker-core-build
-docker compose up --build -d                  # core only
-docker compose --profile harness --profile heavy up --build -d
-./compose-check.sh
-```
-
-See [`skills/remove-ai-marks/references/service-mode.md`](https://github.com/PyModel/watermark-remover/blob/main/skills/remove-ai-marks/references/service-mode.md) for the thin-client curl flow and [`docs/windows-autostart.md`](https://github.com/PyModel/watermark-remover/blob/main/docs/windows-autostart.md) for a Windows login task.
-
-### Heavy backends (external checkouts, never bundled)
-
-| Backend | Purpose | License posture |
+| Target | Method | Result |
 | --- | --- | --- |
-| CtrlRegen (`noai-watermark`) | `--remove-pixel ctrlregen` regeneration removal | No LICENSE upstream — local-only image, never published |
-| reverse-SynthID | SynthID-class pixel scoring (`score_synthid.py` / sidecar) | Non-commercial Research License — local-only image, never published |
-| MarkLLM | Text scheme verification harness (`detect_text_watermark.py`) | Apache-2.0 — publishable |
-| MarkDiffusion | Image scheme harness + DiffusionPurification (`markdiffusion_harness.py`) | Apache-2.0 — publishable |
+| Hidden Unicode, bidi controls, tag characters, unusual spaces | Context-aware deterministic scrub | Verifiable |
+| C2PA, EXIF, XMP, document properties | Format-aware metadata rewrite | Verifiable per format |
+| Video container provenance | Container metadata strip and remux | Verifiable per container |
+| Visible logos and overlays | Supplied box, mask, or detector, or the opt-in mark registry, then fill | Mask removal verifiable, fill quality best-effort |
+| Statistical text watermarks | Paraphrase, back-translation, or evolutionary rewrite | Best-effort |
+| SynthID-class pixel signals | Optional external scorer, opt-in DCT suppression | Score, best-effort removal |
+| Soft bindings and remote manifests | Detection and warning | Detection only |
 
-Bootstrap any of them with `setup_ctrlregen.sh`, `setup_synthid.sh`, `setup_markllm.sh`, `setup_markdiffusion.sh` (or the `make bootstrap-*` targets). CtrlRegen/SynthID images build locally only; MarkLLM/MarkDiffusion images publish to GHCR on `v*` tags.
-
----
-
-## What's new in 0.4.0
-
-- WebP, BMP, GIF, TIFF/BigTIFF metadata parsers; AI-generator product-name hints in PNG text chunks.
-- XLSX/PPTX/EPUB container support; embedded data-URI recursion; streaming zip budget (128 MB); DOCX customXml drop + relationship pruning; qpdf step in the PDF chain; HEIF/AVIF top-level XMP `uuid` box and `avio` brand.
-- Zero-LLM stylometry, vendor/harness text detectors, MarkLLM harness.
-- CtrlRegen / MarkDiffusion pixel backends, SynthID scorer sidecar, `--remove-pixel`.
-- HTTP service (`wm-serve`) + OpenAPI, audit suite (`wm-audit-dir`, `wm-audit-site`) with SARIF export.
-- Rewrite upgrades: `humanize`/`code` strengths, `--candidates`, reasoning-effort, default-deny remote endpoints; `--api-key` removed (env-only `WATERMARKS_REWRITE_API_KEY`).
-- Docker/compose profiles, Windows CI leg, CodeQL, pip-audit, dependabot, GHCR release workflow.
-- Lightweight `clean-user-facing-text` Cursor skill + installer; lint parity with the upstream reference (pylint PLW + bandit S rules).
-
----
-
-## Format support
+### Format support
 
 | Format | Inspect and clean behavior |
 | --- | --- |
 | PNG | `caBX`, text, XMP, EXIF, and `tIME` chunks, plus the optional visible pipeline |
-| JPEG | APP11/JUMBF and APP metadata, external visible backend supported |
-| WebP | Full RIFF parse: `C2PA` chunk always stripped; `ICCP`/`EXIF`/`XMP ` per mode; RIFF size recompute |
-| BMP | Trailing-byte metadata strip with file-size rewrite |
-| GIF | Comment/XMP/unknown app extensions stripped; NETSCAPE2.0/ICC kept unless marker-hit |
-| TIFF / BigTIFF | In-place IFD patching: XMP/IPTC/Exif/GPS/MakerNote/Photoshop/XP/SubIFD/Interoperability tags dropped (nested chains zeroed), structural tags kept, orphaned payloads zeroed |
-| HEIC, HEIF, AVIF | ISO-BMFF brands (`heic`/`heif`/`avif`/`avio`), JUMBF/C2PA UUID boxes, marker-bearing `uuid` boxes (top level and inside `meta`), top-level XMP `uuid` box, direct-file Exif and XMP extents. Unsupported external or idat layouts fail closed |
+| JPEG | APP11/JUMBF and APP metadata; visible cleaning through an external backend |
+| WebP | `C2PA` chunk always stripped; `ICCP`, `EXIF`, and `XMP ` per mode |
+| BMP, GIF | Trailing metadata and comment or XMP extensions |
+| TIFF / BigTIFF | In-place IFD patching: XMP, IPTC, Exif, GPS, MakerNote, Photoshop, XP, SubIFD, and Interoperability tags dropped; structural tags kept |
+| HEIC, HEIF, AVIF | JUMBF and C2PA UUID boxes, XMP `uuid` boxes, direct Exif and XMP extents; unsupported layouts are refused |
+| MP4, MOV, M4V, WebM, MKV, AVI, FLV | Container provenance markers read and stripped |
 | SVG | `<metadata>`, XMP, provenance-like comments |
-| PDF | XMP and docinfo via exiftool, then a qpdf structural rewrite (when qpdf is present), then a full-document pypdf clone, otherwise an unchanged copy with a residual warning |
-| DOCX / XLSX / PPTX | OOXML scrub: docProps cleaned, `docProps/thumbnail` previews dropped (rels and Content-Type overrides pruned), embedded media stripped, customXml dropped with dangling relationships and Content-Type overrides pruned, Layer A on `<w:t>`/`<t>`/`<a:t>` text |
-| EPUB | OPF metadata scrub, embedded media strip, XHTML + Layer A clean, manifest pruning, mimetype stored first |
-| ODT | meta.xml scrubbed unconditionally (generator, template, creator/initial-creator, dates, description/subject, AI user-defined fields), marker-carrying non-core parts dropped, Layer A on `<text:p>` |
-| HTML | meta tags, JSON-LD provenance keys (surgical: the key goes, the payload stays), provenance-phrase comments, `data-ai*` attributes |
-| Markdown | AI-like YAML frontmatter plus a Layer A body pass |
-| Text and code | Layer A, optional Layer B or character perturbation |
+| PDF | XMP and docinfo through exiftool, then qpdf, then pypdf, otherwise an unchanged copy with a warning |
+| DOCX / XLSX / PPTX | docProps cleaned, `docProps/thumbnail` previews dropped, embedded media and customXml removed, hidden Unicode cleaned in body text |
+| EPUB, ODT | Package metadata scrubbed, hidden Unicode cleaned in body text |
+| HTML | meta tags, JSON-LD provenance keys, provenance-phrase comment blocks, `data-ai*` attributes |
+| Markdown | AI-like YAML frontmatter, hidden Unicode in the body |
+| Text and code | Hidden Unicode, optional model rewrite or character perturbation |
 
----
+Format details are in [docs/metadata.md](https://github.com/PyModel/watermark-remover/blob/main/docs/metadata.md).
 
-## Interesting techniques
+## Optional extras
 
-**Context-aware Unicode scrubbing.** [`text_unicode.py`](https://github.com/PyModel/watermark-remover/blob/main/skills/remove-ai-marks/scripts/text_unicode.py) classifies every hidden carrier rather than deleting a blocklist. Zero-width joiners hold emoji sequences together and variation selectors change glyph form, so those survive. Tag characters and bidi overrides do not. Bidi handling follows the same directional model browsers expose through [`unicode-bidi`](https://developer.mozilla.org/en-US/docs/Web/CSS/unicode-bidi), and cleaned text is normalized to NFC, the form described under [`String.prototype.normalize()`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/normalize).
+None of these is needed for text and metadata cleaning.
 
-**NSGA-II inside a text rewriter.** [`tsapa.py`](https://github.com/PyModel/watermark-remover/blob/main/skills/remove-ai-marks/scripts/tsapa.py) is a genuine multi-objective loop, not a prompt template: population generation, non-dominated sorting, crowding distance, crossover at sentence boundaries, mutation targeted at the weakest sentence, and Pareto knee selection. Attack strength and semantic fidelity are optimized as two separate objectives so neither silently wins.
+| Extra | Adds |
+| --- | --- |
+| `[visible]`, `[pixel]` | NumPy, Pillow, and OpenCV for visible-mark removal; `[pixel]` also powers the mark registry |
+| `[migan]`, `[lama]` | ONNX inpainting models, downloaded on first use |
+| `[video]` | PyAV for video probing and remuxing (Python 3.11 or later) |
+| `[provenance]` | `c2pa-python` |
+| `[quality]` | scikit-image |
+| `[ai]` | PyTorch and torchvision |
+| `[detect]`, `[source-classify]` | Invisible-watermark and source detectors |
+| `[classify]`, `[classify-onnx]`, `[trustmark]` | Image classifiers and TrustMark; installed only when named |
+| `[all]` | `[visible]`, `[quality]`, `[ai]`, `[provenance]`, `[detect]`, and `[source-classify]` |
 
-**Scoring that names its own fallback.** Pseudo-log-likelihood comes from an OpenAI-compatible endpoint with logprobs, and cosine similarity from an embeddings endpoint. Either can fail on its own and drop to a standard-library proxy, which is reported as a proxy rather than passed off as the real measurement.
+Detectors only report evidence. A missing signal means unknown, not clean.
 
-**Non-cascading dilation in pure Python.** [`morphomod.py`](https://github.com/PyModel/watermark-remover/blob/main/skills/remove-ai-marks/scripts/morphomod.py) dilates a mask in a single pass against the original buffer, so growth does not compound across iterations. It runs in O(width × height) with no array library.
+## Limits
 
-**Patch-based inpainting with no model.** The default visible backend searches nearby patches by boundary error, picks the best match, and fully replaces the refined mask so watermark pixels cannot bleed through. It is not LaMa quality and is not sold as such, but it needs nothing installed.
+| Channel | What can remain |
+| --- | --- |
+| Hidden text | Unicode that changes meaning, such as emoji joiners, is kept on purpose |
+| Statistical text | A strong or updated detector can still find the signal |
+| Visible marks | Missed regions and fill artifacts; check the output |
+| Metadata | Soft bindings, remote manifests, and pixel-level marks |
+| Pixel watermarks | The watermark itself; evasion is never certified |
+| Training backdoors | Out of scope |
 
-**In-place ISO-BMFF neutralization.** [`heif_meta.py`](https://github.com/PyModel/watermark-remover/blob/main/skills/remove-ai-marks/scripts/heif_meta.py) overwrites JUMBF and C2PA UUID boxes and direct-file Exif and XMP extents without moving anything, so every byte offset in the file stays valid. Layouts it cannot prove safe fail closed instead of being rewritten.
+No public detector covers every text watermark, so a detector miss does not prove a file is clean.
 
-**PNG chunk surgery.** [`image_meta.py`](https://github.com/PyModel/watermark-remover/blob/main/skills/remove-ai-marks/scripts/image_meta.py) walks the chunk stream, removes the private ancillary `caBX` chunk that C2PA actually uses in PNG, and recomputes CRCs with `zlib.crc32`.
+## Use it responsibly
 
-**Markup-aware container cleaning.** [`container_meta.py`](https://github.com/PyModel/watermark-remover/blob/main/skills/remove-ai-marks/scripts/container_meta.py) targets SVG [`<metadata>`](https://developer.mozilla.org/en-US/docs/Web/SVG/Element/metadata) elements, HTML [`<meta>`](https://developer.mozilla.org/en-US/docs/Web/HTML/Element/meta) tags, JSON-LD provenance blocks, and [`data-*` attributes](https://developer.mozilla.org/en-US/docs/Web/HTML/Global_attributes/data-*) matching `data-ai*`. DOCX `customXml` parts are dropped and the dangling relationships and Content-Type overrides are pruned, because customXml can re-carry provenance data; this is a provenance tool, so pruning keeps the package valid instead of leaving orphaned parts behind.
+This tool is for privacy, hygiene, accessibility, and research on content you own or may modify. Do not use it to claim others' work, bypass copyright protections, or hide AI use where you are required to disclose it. Removing a mark does not give you rights to the content or change your legal obligations. See [docs/responsible-use.md](https://github.com/PyModel/watermark-remover/blob/main/docs/responsible-use.md) and [ethics.md](https://github.com/PyModel/watermark-remover/blob/main/skills/remove-ai-marks/references/ethics.md).
 
-**Fallback chains that degrade loudly.** PDF cleaning tries `exiftool`, then a full-document `pypdf` clone, then a byte-exact copy with an explicit residual warning. The third case still returns a file, and still tells you nothing was removed.
+## More documentation
 
-**The banner is drawn, not exported.** [`assets/banner.svg`](https://github.com/PyModel/watermark-remover/blob/main/assets/banner.svg) uses two overlapping [`<clipPath>`](https://developer.mozilla.org/en-US/docs/Web/SVG/Element/clipPath) regions over one duplicated block of text, so the same codepoints render dim on the left and lit on the right. That puts the scrub line in the middle with no gradient mask and no raster asset.
-
-## Technologies and libraries
-
-Nothing below is required to run the core.
-
-- [pypdf](https://github.com/py-pdf/pypdf) for a structural PDF clone that keeps outlines, forms, and attachments while dropping docinfo and XMP.
-- [ExifTool](https://exiftool.org/), [qpdf](https://qpdf.sourceforge.io/), and [c2patool](https://github.com/contentauth/c2patool) as system binaries, used when present.
-- [Gradio](https://www.gradio.app/) for [`demo.py`](https://github.com/PyModel/watermark-remover/blob/main/demo.py), which calls the same modules as the CLI rather than reimplementing them.
-- [Ollama](https://ollama.com/) or any OpenAI-compatible endpoint for Layer B execution. Tests inject a fake callable instead.
-- [LaMa](https://github.com/advimman/lama) and [MI-GAN](https://github.com/Picsart-AI-Research/MI-GAN) as external inpainting commands behind the `external` backend.
-- [reverse-SynthID](https://github.com/aloshdenny/reverse-SynthID) for optional pixel scoring. Not bundled, and non-commercial upstream.
-- [pytest](https://docs.pytest.org/) and [Ruff](https://docs.astral.sh/ruff/) for the gate behind `make check`.
-- The [C2PA specification](https://spec.c2pa.org/specifications/specifications/2.4/specs/C2PA_Specification.html) and JUMBF (ISO/IEC 19566-5) define the box structures the parsers walk.
-
-The banner loads no web font. It requests a system monospace stack in order: `ui-monospace`, [SF Mono](https://developer.apple.com/fonts/), Menlo, [Consolas](https://learn.microsoft.com/en-us/typography/font-list/consolas), [DejaVu Sans Mono](https://dejavu-fonts.github.io/), then generic `monospace`. GitHub proxies README images, so an external font request would be stripped anyway.
-
-## Project structure
-
-```
-watermark-remover/
-├── .github/
-│   ├── ISSUE_TEMPLATE/
-│   └── workflows/
-├── assets/
-├── docs/
-│   └── windows-autostart.md
-├── integrations/
-│   └── cursor/
-├── research/                       # gitignored reference material
-├── skills/
-│   ├── clean-user-facing-text/     # lightweight Cursor skill (vendored engine)
-│   └── remove-ai-marks/
-│       ├── references/
-│       ├── scripts/
-│       ├── tui/                    # wm-tui frontend (Bun + pi-tui)
-│       └── web/                    # web UI (React; dist/ committed for wm-serve, pages/ builds the browser site)
-├── tests/
-│   └── fixtures/
-├── CODE_OF_CONDUCT.md
-├── CONTRIBUTING.md
-├── DESIGN.md
-├── Dockerfile                      # core HTTP service image
-├── Dockerfile.ctrlregen
-├── Dockerfile.markdiffusion
-├── Dockerfile.markllm
-├── Dockerfile.synthid
-├── LICENSE
-├── Makefile
-├── README.md
-├── SECURITY.md
-├── compose-check.sh
-├── compose.yaml
-├── demo.py
-├── install-skill.sh
-├── install_skill.py
-├── pyproject.toml
-├── pytest.ini
-├── requirements-demo.txt
-└── requirements-test.txt
-```
-
-[`skills/remove-ai-marks/`](https://github.com/PyModel/watermark-remover/tree/main/skills/remove-ai-marks) is the whole product. It is laid out as an agent skill so it can be symlinked into `.grok/skills` or `~/.grok/skills` and invoked directly, but [`scripts/`](https://github.com/PyModel/watermark-remover/tree/main/skills/remove-ai-marks/scripts) is a set of ordinary CLIs that work on their own. [`references/`](https://github.com/PyModel/watermark-remover/tree/main/skills/remove-ai-marks/references) holds the source notes the parsers were built from, including [`ethics.md`](https://github.com/PyModel/watermark-remover/blob/main/skills/remove-ai-marks/references/ethics.md) and the vendor behavior notes.
-
-`research/` is intentionally gitignored local evidence and dogfood material; the durable claims discipline is captured in [`DESIGN.md`](https://github.com/PyModel/watermark-remover/blob/main/DESIGN.md). [`assets/`](https://github.com/PyModel/watermark-remover/tree/main/assets) holds repository images. [`tests/fixtures/`](https://github.com/PyModel/watermark-remover/tree/main/tests/fixtures) holds the small binary files the format parsers are tested against.
-
-## Coverage and limits
-
-| Channel | What this does | What can remain |
-| --- | --- | --- |
-| Hidden text | Deterministic scrub | Meaningful Unicode kept by policy |
-| Statistical text | Best-effort rewrite or evolutionary search | A strong or updated detector signal |
-| Visible images | Mask, dilation, inpaint | Missed regions, inpaint artifacts |
-| Hard-bound metadata | Format-aware stripping | Soft bindings, remote manifests, pixel marks |
-| Pixel SynthID-class | Optional external score; best-effort DCT suppression or external regeneration (`--remove-synthid`, `--remove-pixel`) | The audio/video watermark itself; detector evasion is not certified |
-| Training backdoors | Nothing | Out of scope |
-
-No public universal text detector exists, and a detector miss does not prove every trace is gone. Stronger attacks trade fidelity for lower detectability, and provider implementations keep changing.
-
-## Ethics
-
-Built for privacy, hygiene, accessibility, and research on content you own. Not for academic fraud, evading disclosure requirements, or claiming output is proven human-written. See [`ethics.md`](https://github.com/PyModel/watermark-remover/blob/main/skills/remove-ai-marks/references/ethics.md).
-
----
-
-## Optional demo
-
-```bash
-python3 -m pip install -r requirements-demo.txt
-python3 demo.py
-```
-
-The demo calls the same modules as the CLI, it is not a second implementation. Layer B prompt generation is limited to plain-text uploads, and binary document extraction is deliberately not guessed.
-
-## Development
-
-```bash
-python3 -m venv .venv
-.venv/bin/pip install -r requirements-test.txt
-make check           # Python lint/format/tests/smoke + independent residual verifier
-make tui-check       # frozen Bun install, TypeScript check + mounted UI tests
-make web-check       # web UI typecheck + tests, rebuild, fail if committed dist/ is stale
-make pages-check     # browser build (Pyodide) + engine parity with native Python
-make packaging       # build/install wheel, verify all commands and read-only TUI boot
-# make ci            # all of the above; requires Bun 1.4+
-```
-
-CI runs Python/workflow checks, a Linux/Windows Python matrix, Linux/macOS TUI tests and a dependency audit in parallel. Independent cleaning and installed-wheel gates depend on those fast checks. **CI gate** fails if any required job fails or is skipped. Weekly/manual `deps-latest.yml` tests the newest dependencies within declared ranges, without provider credentials or document/model calls.
-
-Maintainer-pushed `v*` tags run the same full gates before Trusted Publishing. The wheel installed by the packaging test and its source distribution are promoted unchanged to PyPI, then attached to the GitHub release. No release-please or automatic version/tag creation. `WM_PACKAGING_DIST` exports verified artifacts into a **new** directory; ordinary tests keep their artifacts in temporary storage.
-
-## Documentation
-
-- [`DESIGN.md`](https://github.com/PyModel/watermark-remover/blob/main/DESIGN.md), architecture, seams, guarantee classes, roadmap
-- [`SKILL.md`](https://github.com/PyModel/watermark-remover/blob/main/skills/remove-ai-marks/SKILL.md), agent workflow
-- [`mark-classes.md`](https://github.com/PyModel/watermark-remover/blob/main/skills/remove-ai-marks/references/mark-classes.md), [`removal-matrix.md`](https://github.com/PyModel/watermark-remover/blob/main/skills/remove-ai-marks/references/removal-matrix.md), [`vendor-notes.md`](https://github.com/PyModel/watermark-remover/blob/main/skills/remove-ai-marks/references/vendor-notes.md)
-- [`CONTRIBUTING.md`](https://github.com/PyModel/watermark-remover/blob/main/CONTRIBUTING.md) and [`SECURITY.md`](https://github.com/PyModel/watermark-remover/blob/main/SECURITY.md)
-
-# Legal Disclaimer and Responsible Use
-
-Watermark-remover is built for privacy, content hygiene, and research on files you own. It's not a tool for breaking copyright protections, passing off others' work as your own, or helping you evade detection when you're supposed to disclose AI use. The tool can remove marks, but removing a mark doesn't make stolen content yours, erase legal obligations, or protect you if you use this for something illegal.
-
-## Legitimate Use
-
-You can use this tool on:
-
-- Your own AI-generated content you want cleaned for personal use or publication
-- Files you own or have explicit permission to modify
-- Research and educational work with institutional approval
-- Security testing on systems you control
-- Accessibility fixes on your own content
-
-## Not for This
-
-- Removing marks from content you don't own
-- Claiming others' work as your own
-- Bypassing copyright protections to redistribute material
-- Evading AI detection to hide required disclosures
-- Misrepresenting where content came from
-
-If you use this tool, you're responsible for what you claim afterward. Removing a watermark is just a file operation. It doesn't grant you rights, erase your obligation to say "this is AI-generated" when you're supposed to, and it won't protect you from liability if you break the law.
-
-## What We Can't Guarantee
-
-The tool does best-effort removal. We don't promise that external detectors will miss what you removed, that an evaded detector won't catch you later, or that your cleaned content will pass any vendor's detection system. The README labels every method clearly: some cleaners are verifiable (they report exactly what was removed), others are best-effort (they might work, might not). Nothing here certifies detector failure.
-
-## If You Use This
-
-You agree to:
-
-- Not use it to break protections on content you don't own
-- Follow your jurisdiction's laws, including the DMCA (US), the DSM Directive (EU), and regional anti-circumvention rules
-- Not use it for fraud, academic dishonesty, or copyright infringement
-- Understand that removing a watermark doesn't grant ownership
-- Disclose AI use when your employer, school, or publisher requires it
-
-Not sure if your use case is legal? Talk to a lawyer or your institution first.
-
-## On Legality
-
-We can't give legal advice. Whether this is legal for you depends on what you own, where you live, what you're using it for, and which specific marks you're dealing with. Research often has exemptions; fraud and commercial infringement generally don't. If you have questions, consult a lawyer.
-
-## Tell People You Used This
-
-If you use watermark-remover in research papers or published work, consider disclosing it. Transparency builds trust and shows you're not trying to hide anything.
-
-## Report Problems
-
-Security concerns or misuse reports: see [SECURITY.md](https://github.com/PyModel/watermark-remover/blob/main/SECURITY.md).
+- [Text cleaning, rewriting, and detection](https://github.com/PyModel/watermark-remover/blob/main/docs/text.md)
+- [Images: visible marks, degradation, SynthID scoring](https://github.com/PyModel/watermark-remover/blob/main/docs/images.md)
+- [Metadata and provenance](https://github.com/PyModel/watermark-remover/blob/main/docs/metadata.md)
+- [HTTP service, browser app, and Docker](https://github.com/PyModel/watermark-remover/blob/main/docs/http-service.md)
+- [Terminal UI](https://github.com/PyModel/watermark-remover/blob/main/docs/terminal-ui.md)
+- [How it works, libraries, and repository layout](https://github.com/PyModel/watermark-remover/blob/main/docs/how-it-works.md)
+- [Development and the demo app](https://github.com/PyModel/watermark-remover/blob/main/docs/development.md)
+- [Agent skill instructions](https://github.com/PyModel/watermark-remover/blob/main/skills/remove-ai-marks/SKILL.md) and [design notes](https://github.com/PyModel/watermark-remover/blob/main/DESIGN.md)
+- [Release notes](https://github.com/PyModel/watermark-remover/tree/main/docs/release-notes/), [contributing](https://github.com/PyModel/watermark-remover/blob/main/CONTRIBUTING.md), [security](https://github.com/PyModel/watermark-remover/blob/main/SECURITY.md)
 
 ## License
 
-MIT, see [LICENSE](https://github.com/PyModel/watermark-remover/blob/main/LICENSE).
-
-## Primary references
-
-- Anthropic, [*How Claude marks AI-generated content*](https://support.claude.com/en/articles/16266773-how-claude-marks-ai-generated-content)
-- Dathathri et al., [*Scalable watermarking for identifying large language model outputs*](https://www.nature.com/articles/s41586-024-08025-4) (SynthID-Text, Nature 2024)
-- Zhao et al., [*Invisible Image Watermarks Are Provably Removable Using Generative AI*](https://proceedings.neurips.cc/paper_files/paper/2024/hash/10272bfd0371ef960ec557ed6c866058-Abstract-Conference.html) (NeurIPS 2024)
-- [UnMarker](https://arxiv.org/abs/2405.08363) (IEEE S&P 2025)
-- [CtrlRegen](https://arxiv.org/abs/2410.05470) (ICLR 2025)
-- [C2PA specification](https://spec.c2pa.org/specifications/specifications/2.4/specs/C2PA_Specification.html)
-- Kirchenbauer et al., [*A Watermark for Large Language Models*](https://arxiv.org/abs/2301.10226)
-
----
- </picture>
-</a>
+MIT. See [LICENSE](https://github.com/PyModel/watermark-remover/blob/main/LICENSE).
