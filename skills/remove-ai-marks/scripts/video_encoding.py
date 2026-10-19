@@ -271,8 +271,8 @@ def atomic_video_output(dest: Path) -> Iterator[Path]:
     existing_mode = stat.S_IMODE(dest.stat().st_mode) if dest.exists() else None
     # codeql[py/path-injection] suppress creating exactly the directory the operator asked the output to land in
     dest.parent.mkdir(parents=True, exist_ok=True)
-    # codeql[py/path-injection] suppress the staged sibling only mirrors the operator's output name and parent; mkstemp composes the unique part itself
     staged_prefix = f".{dest.name}."
+    # codeql[py/path-injection] suppress the staged sibling only mirrors the operator's output name and parent; mkstemp composes the unique part itself
     handle, temp_name = tempfile.mkstemp(prefix=staged_prefix, suffix=dest.suffix, dir=dest.parent)
     os.close(handle)
     temporary = Path(temp_name)

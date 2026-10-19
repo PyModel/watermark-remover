@@ -1822,8 +1822,8 @@ def _itsoffset_seconds(profile: VideoEncodeProfile) -> float | None:
 @contextmanager
 def _staged_frames_video(dest: Path) -> Iterator[Path]:
     """Yield the encoded-video temporary path, removed whatever happens."""
-    # codeql[py/path-injection] suppress dest is the operator-named output of a local CLI run; the staged sibling mirrors only its name and parent
     staged_prefix = f".{dest.name}-video-"
+    # codeql[py/path-injection] suppress dest is the operator-named output of a local CLI run; the staged sibling mirrors only its name and parent
     handle, temp_name = tempfile.mkstemp(prefix=staged_prefix, suffix=".mkv", dir=dest.parent)
     os.close(handle)
     encoded = Path(temp_name)
