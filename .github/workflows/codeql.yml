@@ -25,4 +25,11 @@ jobs:
       - uses: github/codeql-action/init@c16c0f3f2812ec4bb3750a5ed64873fe2ce0fbef # codeql-bundle-v2.26.3
         with:
           languages: ${{ matrix.language }}
+          # The default code-scanning suite excludes kind: alert-suppression
+          # queries, so in-source "# codeql[...] suppress" comments are never
+          # stamped into the SARIF and every flagged line stays a counted
+          # alert. Adding the suppression query makes each alert whose line a
+          # suppression comment cites carry {kind: inSource}, which is how a
+          # commented guard is honored instead of re-raised on every push.
+          queries: codeql/python-queries:AlertSuppression.ql
       - uses: github/codeql-action/analyze@c16c0f3f2812ec4bb3750a5ed64873fe2ce0fbef # codeql-bundle-v2.26.3
