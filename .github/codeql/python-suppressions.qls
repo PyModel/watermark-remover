@@ -1,0 +1,9 @@
+# Stamp in-source '# codeql[...] suppress' comments into the CodeQL SARIF
+# results. The default code-scanning suite excludes kind: alert-suppression
+# queries, so without this the suppression comments are inert: every flagged
+# line keeps counting as a live alert.
+- queries: .
+  from: codeql/python-queries
+- include:
+    kind: alert-suppression
+  from: codeql/python-queries
