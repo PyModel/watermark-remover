@@ -473,6 +473,7 @@ def find_c2pa_chunk(path: Path) -> tuple[bytes | None, str | None]:
     exceeds :data:`MAX_CABX_CHUNK_BYTES` is reported, never read.
     """
     try:
+        # codeql[py/path-injection] suppress read-only header scan of the asset the caller chose to inspect; no path is composed from remote input past that choice
         stream = path.open("rb")
     except OSError:
         return None, "unreadable file"

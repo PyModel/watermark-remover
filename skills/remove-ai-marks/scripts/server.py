@@ -177,6 +177,7 @@ def static_file(path: str) -> Path | None:
     candidate = WEB_ROOT / name
     if candidate.parent != WEB_ROOT:
         return None
+    # codeql[py/path-injection] suppress the name passed the charset/suffix/parent confinement above; only a file directly under WEB_ROOT can match
     return candidate if candidate.is_file() else None
 
 
@@ -898,6 +899,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_static(self, file: Path) -> None:
+        # codeql[py/path-injection] suppress file is the WEB_ROOT-confined answer of the static resolver; the raw request line never reaches read_bytes
         data = file.read_bytes()
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", _STATIC_TYPES[file.suffix])
@@ -1219,6 +1221,7 @@ class Handler(BaseHTTPRequestHandler):
                 box=(box[0], box[1], box[2], box[3]), backend=backend, publish_mask=False
             )
             result = remove_visible(src, dest, plan)
+            # codeql[py/path-injection] suppress dest is a fixed-name file inside a server-owned request tempdir; no upload path is composed into it
             cleaned_bytes = dest.read_bytes()
         for key in ("input", "output", "mask"):
             result.pop(key, None)
@@ -1320,6 +1323,7 @@ class Handler(BaseHTTPRequestHandler):
                 # 400. An error payload is an execution failure: re-raise as
                 # RuntimeError so the handler keeps the sanitized 500.
                 raise RuntimeError(payload["error"])
+            # codeql[py/path-injection] suppress dest is a fixed-name file inside the request-scoped outdir; the upload suffix cannot carry separators into that composition
             cleaned_bytes = dest.read_bytes()
             if kind == "text":
                 if values.get("detect_after"):

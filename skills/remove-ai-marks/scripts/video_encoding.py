@@ -264,23 +264,30 @@ def atomic_video_output(dest: Path) -> Iterator[Path]:
     non-zero exit, a timeout, a killed process -- removes the temporary and
     leaves the destination exactly as it was.
     """
+    # codeql[py/path-injection] suppress dest is the operator-named output of a local CLI run; this line refuses symlink destinations, it never reads through them
     if dest.is_symlink():
         raise ValueError(f"output path is a symlink: {dest}")
+    # codeql[py/path-injection] suppress recording the existing permissions of the operator-named output file
     existing_mode = stat.S_IMODE(dest.stat().st_mode) if dest.exists() else None
+    # codeql[py/path-injection] suppress creating exactly the directory the operator asked the output to land in
     dest.parent.mkdir(parents=True, exist_ok=True)
-    handle, temp_name = tempfile.mkstemp(
-        prefix=f".{dest.name}.", suffix=dest.suffix, dir=dest.parent
-    )
+    # codeql[py/path-injection] suppress the staged sibling only mirrors the operator's output name and parent; mkstemp composes the unique part itself
+    staged_prefix = f".{dest.name}."
+    handle, temp_name = tempfile.mkstemp(prefix=staged_prefix, suffix=dest.suffix, dir=dest.parent)
     os.close(handle)
     temporary = Path(temp_name)
     try:
         yield temporary
+        # codeql[py/path-injection] suppress re-checking that the operator's output path did not become a symlink mid-write
         if dest.is_symlink():
             raise ValueError(f"output path became a symlink: {dest}")
         if existing_mode is not None:
+            # codeql[py/path-injection] suppress copying the recorded permissions onto the staged sibling before publishing
             os.chmod(temporary, existing_mode)
+        # codeql[py/path-injection] suppress publishing the staged sibling over the operator-named output in one os.replace
         os.replace(temporary, dest)
     except BaseException:
+        # codeql[py/path-injection] suppress removing the staged sibling temp file this context itself created
         temporary.unlink(missing_ok=True)
         raise
 

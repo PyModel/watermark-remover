@@ -239,6 +239,7 @@ def detect_container_format(path: Path, data: bytes | None = None) -> str:
             # directory, so when the in-memory parse fails, fall back to the
             # on-disk archive — a metadata-only read of the tail directory.
             sources: list[io.BytesIO | Path] = [io.BytesIO(data)]
+            # codeql[py/path-injection] suppress read-only fallback source for zip sniffing; path is the asset the caller already opened, not a composed route
             if path.is_file():
                 sources.append(path)
             for source in sources:

@@ -274,6 +274,7 @@ def _run_invisible_stage(
             f"(exit {completed.returncode}): "
             f"{completed.stderr_text[-_INVISIBLE_ENGINE_OUTPUT_LIMIT:]}"
         )
+    # codeql[py/path-injection] suppress output is the operator-named destination of this local run; verifying the engine produced that requested file
     if not output.is_file():
         raise RuntimeError("invisible-watermark engine produced no output")
     return report
@@ -751,6 +752,7 @@ def _probe_dimensions(path: Path) -> tuple[int, int] | None:
     does not touch numpy/cv2 so probing stays available in pixel-less
     environments and adds no stub-cv2 surface to the CLI path.
     """
+    # codeql[py/path-injection] suppress read-only header probe of the input the operator asked to clean and inspect
     with path.open("rb") as stream:
         data = stream.read(65536)
     if data[:8] == b"\x89PNG\r\n\x1a\n" and data[12:16] == b"IHDR" and len(data) >= 24:
