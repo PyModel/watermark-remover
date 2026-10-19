@@ -136,7 +136,10 @@ jobs:
       - run: python -m pip_audit
 
   ci:
-    name: CI gate
+    # main's branch protection requires a check-run context named exactly
+    # "ci-green" (with the enforcement of admins on), so the umbrella job must
+    # report under that name rather than a friendlier label.
+    name: ci-green
     if: always()
     needs: [lint, test, tui, verify, packaging, audit]
     runs-on: ubuntu-latest
