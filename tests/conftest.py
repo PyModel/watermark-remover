@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -53,4 +54,20 @@ def fake_command_result(returncode: int, *, stdout: str = "", stderr: str = ""):
         stderr_text=stderr,
         stdout_truncated=False,
         stderr_truncated=False,
+    )
+
+
+def exiftool_free_path() -> str:
+    """PATH minus every directory that ships ``exiftool``.
+
+    The golden outputs and the TUI line-level expectations encode the
+    tool-absent contract: the optional ``exiftool -all=`` strip only runs when
+    the binary is on PATH, so a CI host that installs exiftool would otherwise
+    append steps those expectations must not depend on.
+    """
+    entries = os.environ.get("PATH", "").split(os.pathsep)
+    return os.pathsep.join(
+        entry
+        for entry in entries
+        if entry and not any((Path(entry) / name).exists() for name in ("exiftool", "exiftool.exe"))
     )

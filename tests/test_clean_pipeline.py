@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 import clean_pipeline
 from clean_request import CleanRequest
+from conftest import exiftool_free_path
 from pipeline_actions import drop_png_chunk, report_actions
 
 
@@ -39,12 +41,18 @@ def test_edge_sentence_goldens_match_base_smoke_outputs(tmp_path):
     fixtures = root / "tests" / "fixtures"
 
     def run(*args, input_text=None):
+        # encoding: the scripts reconfigure stdio to UTF-8; decode it explicitly so
+        # a cp1252 Windows host never chokes on the child's stream. PATH: the
+        # goldens encode the exiftool-absent contract, so an installed exiftool
+        # (CI installs it) must not run inside these smokes.
         result = subprocess.run(
             [sys.executable, *map(str, args)],
             input=input_text,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             check=False,
+            env={**os.environ, "PATH": exiftool_free_path()},
         )
         assert result.returncode == 0, result.stderr
         return result.stdout + result.stderr

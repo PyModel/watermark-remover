@@ -160,6 +160,12 @@ def test_demo_video_without_runtime_returns_the_same_refusal(
 
 
 def _fake_tool(directory: Path, name: str) -> None:
+    if sys.platform == "win32":
+        # Windows lookup only resolves PATHEXT executables, so the fake
+        # must be a .bat; the POSIX spelling does not exist on win32.
+        tool = directory / f"{name}.bat"
+        tool.write_text("@echo off\r\nexit 0\r\n", encoding="utf-8")
+        return
     tool = directory / name
     tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     tool.chmod(0o755)

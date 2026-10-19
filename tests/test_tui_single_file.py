@@ -45,8 +45,8 @@ def test_marked_clean_keeps_discovery_list_but_previews_and_writes_only_one_file
     result = bridge.clean(2, {"state": state})
     assert result["total"] == 1 and result["errors"] == 0
     assert not files[0].with_name("a.cleaned.txt").exists()
-    assert files[1].with_name("b.cleaned.txt").read_text() == "hello world\n"
-    assert all("\u200b" in path.read_text() for path in files)
+    assert files[1].with_name("b.cleaned.txt").read_text(encoding="utf-8") == "hello world\n"
+    assert all("\u200b" in path.read_text(encoding="utf-8") for path in files)
 
 
 def test_no_mark_never_falls_back_to_cleaning_the_directory(tmp_path, monkeypatch):
@@ -64,7 +64,7 @@ def test_mark_must_still_belong_to_the_discovered_regular_files(tmp_path, monkey
     if target == "directory":
         path.mkdir()
     elif target == "outside.txt":
-        path.write_text("outside\u200b")
+        path.write_text("outside\u200b", encoding="utf-8")
     state["clean_path"] = str(path)
     with pytest.raises(InvalidOptions, match="no longer in"):
         bridge.clean(1, {"state": state})
@@ -88,8 +88,8 @@ def test_only_the_marked_file_is_preflighted(tmp_path, monkeypatch):
     assert "1 file will be overwritten" in plan["confirm"][0]["message"]
     result = bridge.clean(2, {"state": state, "confirmed": ["in_place"]})
     assert result["total"] == 1 and result["errors"] == 0
-    assert "\u200b" in files[0].read_text()
-    assert "\u200b" not in files[1].read_text()
+    assert "\u200b" in files[0].read_text(encoding="utf-8")
+    assert "\u200b" not in files[1].read_text(encoding="utf-8")
 
 
 def test_disappearing_mark_does_not_keep_a_stale_file_list(tmp_path, monkeypatch):

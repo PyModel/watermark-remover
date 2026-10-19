@@ -924,7 +924,13 @@ def test_informational_notes_are_neither_counted_nor_shown_as_marks(tmp_path):
     ]
 
 
-def test_a_cleaned_heif_reports_no_metadata_left(tmp_path):
+def test_a_cleaned_heif_reports_no_metadata_left(tmp_path, monkeypatch):
+    from conftest import exiftool_free_path
+
+    # The line list encodes the exiftool-absent contract: an installed
+    # exiftool (CI installs it) would append "Stripped remaining metadata
+    # with exiftool." to what the cleaned file reported.
+    monkeypatch.setenv("PATH", exiftool_free_path())
     source = tmp_path / "sample_c2pa.avif"
     source.write_bytes((ROOT / "tests" / "fixtures" / "sample_c2pa.avif").read_bytes())
     bridge, sink = make_bridge()

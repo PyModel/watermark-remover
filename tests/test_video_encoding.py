@@ -330,9 +330,18 @@ def test_an_absent_ffmpeg_fails_labeled_without_writing(monkeypatch, tmp_path: P
 def test_a_filename_with_quotes_and_spaces_is_passed_as_one_argument(
     monkeypatch, tmp_path: Path
 ) -> None:
-    source = tmp_path / 'clip "quoted" and spaced.mp4'
+    if sys.platform == "win32":
+        # Windows forbids double quotes in filenames: keep the same
+        # hard-to-tokenize spelling the host can actually store. The argv-list
+        # invariant the test asserts does not depend on the quote character.
+        source_name = "clip quoted (and spaced).mp4"
+        dest_name = "out copy 2026.mp4"
+    else:
+        source_name = 'clip "quoted" and spaced.mp4'
+        dest_name = 'out "copy" 2026.mp4'
+    source = tmp_path / source_name
     source.write_bytes(b"source-bytes")
-    dest = tmp_path / 'out "copy" 2026.mp4'
+    dest = tmp_path / dest_name
     seen: list = []
 
     def fake_run(argv, **_kwargs):

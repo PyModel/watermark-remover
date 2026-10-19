@@ -27,10 +27,13 @@ CLEAN_FILE = SCRIPTS / "clean_file.py"
 
 
 def _run(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    # encoding: the scripts reconfigure stdio to UTF-8; decode it explicitly so a
+    # cp1252 Windows host never chokes on the child's JSON report.
     return subprocess.run(
         [sys.executable, str(CLEAN_FILE), *args],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
         env=env,
     )
@@ -391,6 +394,7 @@ def test_clean_file_cv2_backend_end_to_end_with_stub_opencv(tmp_path: Path, back
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
         env=env,
     )

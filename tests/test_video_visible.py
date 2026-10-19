@@ -83,9 +83,15 @@ def _fake_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     bindir = tmp_path / "tools"
     bindir.mkdir(exist_ok=True)
     for name in ("ffmpeg", "ffprobe"):
-        tool = bindir / name
-        tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        tool.chmod(0o755)
+        if sys.platform == "win32":
+            # Windows lookup only resolves PATHEXT executables, so the fake
+            # must be a .bat; the POSIX spelling does not exist on win32.
+            tool = bindir / f"{name}.bat"
+            tool.write_text("@echo off\r\nexit 0\r\n", encoding="utf-8")
+        else:
+            tool = bindir / name
+            tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            tool.chmod(0o755)
     monkeypatch.setenv("PATH", str(bindir))
     monkeypatch.setitem(sys.modules, "av", types.ModuleType("av"))
 
