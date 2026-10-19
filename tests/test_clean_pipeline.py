@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import os
 import subprocess
 import sys
@@ -44,9 +45,13 @@ def test_edge_sentence_goldens_match_base_smoke_outputs(tmp_path):
         # encoding: the scripts reconfigure stdio to UTF-8; decode it explicitly so
         # a cp1252 Windows host never chokes on the child's stream. INPUT: pass raw
         # bytes so stdin stays untranslated -- a text-mode pipe rewrites "\n" as
-        # os.linesep on Windows, which would inflate every length report by one.
-        # PATH: the goldens encode the exiftool-absent contract, so an installed
-        # exiftool (CI installs it) must not run inside these smokes.
+        # os.linesep on Windows, which would inflate every length report by one
+        # (the scripts read sys.stdin.buffer verbatim). CAPTURE: stay in bytes and
+        # decode with universal newlines so the child's stdout rewrite of "\n" to
+        # os.linesep on Windows matches the goldens' LF-only logical report --
+        # exactly what a text-mode capture did on read. PATH: the goldens encode
+        # the exiftool-absent contract, so an installed exiftool (CI installs it)
+        # must not run inside these smokes.
         result = subprocess.run(
             [sys.executable, *map(str, args)],
             input=input_text.encode("utf-8") if input_text is not None else None,
@@ -54,8 +59,12 @@ def test_edge_sentence_goldens_match_base_smoke_outputs(tmp_path):
             check=False,
             env={**os.environ, "PATH": exiftool_free_path()},
         )
-        assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
-        return result.stdout.decode("utf-8") + result.stderr.decode("utf-8")
+        stderr = io.TextIOWrapper(
+            io.BytesIO(result.stderr), encoding="utf-8", newline=None, errors="replace"
+        ).read()
+        assert result.returncode == 0, stderr
+        stdout = io.TextIOWrapper(io.BytesIO(result.stdout), encoding="utf-8", newline=None).read()
+        return stdout + stderr
 
     wm_a = tmp_path / "wm-a.txt"
     wm_b = tmp_path / "wm-b.txt"
