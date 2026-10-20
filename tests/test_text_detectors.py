@@ -105,38 +105,32 @@ def test_gemini_available_is_false_until_endpoint_is_supported(monkeypatch):
 
 
 def test_gemini_http_error(monkeypatch):
-    """Disabled detector never reaches request_json, so no HTTP call is made."""
+    """No request layer ships for the disabled slot, so no HTTP call can be
+    made by construction (the module must not even carry the machinery)."""
     monkeypatch.setenv("WATERMARKS_GEMINI_API_KEY", "k")
-    calls = {"n": 0}
-
-    def boom(*a, **kw):
-        calls["n"] += 1
-        raise text_detectors.LayerBHTTPError("Layer B HTTP request failed with HTTP 401")
-
-    monkeypatch.setattr(text_detectors, "request_json", boom)
+    assert not hasattr(text_detectors, "request_json")
+    assert not hasattr(text_detectors, "_call_gemini")
     report = text_detectors.GeminiSynthIDTextDetector().detect("some text")
-    assert calls["n"] == 0, "disabled detector must not call request_json"
     assert report["available"] is False
     assert "DETECT_TEXT_WATERMARK" in report["error"]
 
 
-def test_gemini_oversize_skips(monkeypatch):
+def test_gemini_oversize_never_reports_available(monkeypatch):
+    """available() and detect() can never disagree: oversize text used to
+    report available=True from a skip branch no request could follow."""
     monkeypatch.setenv("WATERMARKS_GEMINI_API_KEY", "k")
-    monkeypatch.setenv("WATERMARKS_GEMINI_MAX_CHARS", "10")
     report = text_detectors.GeminiSynthIDTextDetector().detect("x" * 100)
-    assert report["available"] is True
-    assert report["configured"] is True
-    assert report["skipped"] is True
-    assert report["is_watermarked"] is None
-
-
-def test_gemini_malformed_max_chars_env_does_not_crash(monkeypatch):
-    """Malformed WATERMARKS_GEMINI_MAX_CHARS falls back to default; detector still disabled."""
-    monkeypatch.setenv("WATERMARKS_GEMINI_API_KEY", "k")
-    monkeypatch.setenv("WATERMARKS_GEMINI_MAX_CHARS", "not-a-number")
-    report = text_detectors.GeminiSynthIDTextDetector().detect("short text")
     assert report["available"] is False
-    assert "DETECT_TEXT_WATERMARK" in report["error"]
+    assert report["configured"] is True
+    assert "skipped" not in report
+
+
+def test_gemini_configured_reflects_the_key(monkeypatch):
+    monkeypatch.setenv("WATERMARKS_GEMINI_API_KEY", "k")
+    report = text_detectors.GeminiSynthIDTextDetector().detect("short text")
+    # Key set but unusable endpoint: configured is True, available stays False.
+    assert report["configured"] is True
+    assert report["available"] is False
 
 
 # --- parse_gemini_detect_response (standalone unit tests) ------------------

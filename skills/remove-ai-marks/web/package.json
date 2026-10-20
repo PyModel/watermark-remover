@@ -1,0 +1,23 @@
+{
+  "name": "wm-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "rm -rf dist && bun build ./index.html --outdir dist --production --define 'process.env.WM_TARGET=\"server\"' && bun scripts/normalize-dist.mjs",
+    "test": "bun test src",
+    "typecheck": "tsc --noEmit",
+    "build:pages": "bun pages/build.ts",
+    "test:pages": "bun test pages"
+  },
+  "dependencies": {
+    "pyodide": "314.0.7",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "typescript": "^5.9.0"
+  }
+}

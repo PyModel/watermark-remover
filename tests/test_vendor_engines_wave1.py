@@ -1,0 +1,1076 @@
+"""Vendor engine wave 1 tests — the calibrated CJK set (ticket 08).
+
+The upstream vectors (test_jimeng_engine.py, test_baidu_engine.py, test_yuanbao_engine.py,
+test_doubao_engine.py, test_kling_engine.py, test_qwen_engine.py,
+test_generic_ai_label_engine.py, test_pill_engine.py) are adapted to this tree's
+constraints: fixtures compose each engine's own renderer-synthetic silhouette at the
+engine's measured geometry (the upstream capture-solved assets are forbidden here), and
+removal exercises the shared fill directly through ``region_eraser`` — the registry that
+wraps these engines is a later ticket's seam.
+
+What is pinned per engine: detect on a synthetic fixture, the correct corner, NCC within
+its calibrated gate, quiet verdicts on non-matching images, the bounded/degenerate-input
+contract, and the provenance posture (strict-only engines never relax; the generic label
+never relaxes at all).
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import cv2
+import numpy as np
+import pytest
+from baidu_engine import BaiduEngine
+from doubao_engine import DoubaoEngine
+from doubao_engine import _template_match_score as _doubao_score
+from generic_ai_label_engine import DETECT_NCC_THRESHOLD as _GENERIC_GATE
+from generic_ai_label_engine import GenericAiLabelEngine
+from generic_ai_label_engine import _alpha_template as _generic_alpha
+from generic_ai_label_engine import _glyph_silhouette as _generic_silhouette
+from generic_ai_label_engine import _template_match_score as _generic_score
+from jimeng_engine import _ALPHA_WIDTH_FRAC as _JIMENG_ALPHA_WFRAC
+from jimeng_engine import DETECT_NCC_THRESHOLD as _JIMENG_GATE
+from jimeng_engine import JimengEngine
+from jimeng_engine import _alpha_template as _jimeng_alpha
+from jimeng_engine import _glyph_silhouette as _jimeng_silhouette
+from jimeng_engine import _template_match_score as _jimeng_score
+from kling_engine import _LATIN_CONFIG, KlingEngine
+from kling_engine import _glyph_silhouette as _kling_silhouette
+from numpy.typing import NDArray
+from pill_engine import _DETECT_THRESHOLD as _PILL_GATE
+from pill_engine import PillEngine
+from qwen_engine import QwenEngine
+from qwen_engine import _glyph_silhouette as _qwen_silhouette
+from region_eraser import erase as erase_mask
+from yuanbao_engine import YuanbaoEngine
+
+ASSETS = Path(__file__).resolve().parents[1] / "skills" / "remove-ai-marks" / "scripts" / "assets"
+
+
+def _asset(name: str) -> NDArray[np.float32]:
+    """A shipped silhouette as float [0,1], or assert (every engine's asset ships)."""
+    img = cv2.imread(str(ASSETS / name), cv2.IMREAD_GRAYSCALE)
+    assert img is not None, f"asset missing: {name}"
+    return img.astype(np.float32) / 255.0
+
+
+def _compose_mark(
+    asset_name: str,
+    w: int,
+    h: int,
+    *,
+    width_frac: float,
+    aspect: float,
+    bg: float | tuple[float, float, float] = 100.0,
+    foreground: float = 255.0,
+    alpha: float = 1.0,
+    basis: str = "short",
+    margin_right: float = 0.015,
+    margin_bottom: float = 0.015,
+) -> tuple[NDArray[np.uint8], tuple[int, int, int, int]]:
+    """Composite a vendor silhouette at its measured geometry onto a flat background.
+
+    Mirrors every upstream engine test's forward model: ``out = a*fg + (1-a)*bg``.
+    ``basis`` sizes the mark off the short side (the engine's scale basis for all
+    bottom-right marks here) or the width; the mark anchors into the bottom-right
+    corner with the given margins. Returns ``(image, (ax, ay, gw, gh))``.
+    """
+    img = np.empty((h, w, 3), np.float32)
+    img[:] = bg
+    at = _asset(asset_name)
+    base = min(w, h) if basis == "short" else w
+    gw = max(4, int(width_frac * base))
+    gh = max(4, int(gw * aspect))
+    ax = w - int(margin_right * base) - gw
+    ay = h - int(margin_bottom * base) - gh
+    amap = np.zeros((h, w), np.float32)
+    amap[ay : ay + gh, ax : ax + gw] = cv2.resize(at, (gw, gh)) * alpha
+    a3 = amap[:, :, None]
+    wm = (a3 * foreground + (1 - a3) * img).clip(0, 255).astype(np.uint8)
+    return wm, (ax, ay, gw, gh)
+
+
+def _fill(engine: Any, img: NDArray[np.uint8], **kwargs: Any) -> NDArray[np.uint8]:
+    """The shared fill: engine footprint mask -> region_eraser cv2 backend."""
+    mask = engine.footprint_mask(img, **kwargs)
+    assert mask is not None
+    out = erase_mask(img, mask=mask, backend="cv2")
+    assert out.shape == img.shape
+    return out
+
+
+class TestJimengEngine:
+    """Vectors adapted from upstream test_jimeng_engine.py.
+
+    Deviation from upstream: the capture-solved Jimeng wordmark silhouette is
+    forbidden in this tree, so the engine carries the shipped synthetic
+    ``jimeng_label_alpha.png`` as its detection silhouette (asset name, alpha
+    geometry, and this compose helper all follow the shipped asset); the calibrated
+    corner, gates, and provenance factor are upstream's.
+    """
+
+    def test_locate_anchored_bottom_right(self):
+        eng = JimengEngine()
+        img = np.zeros((2048, 2048, 3), np.uint8)
+        loc = eng.locate(img)
+        assert 2048 - (loc.x + loc.w) < int(2048 * 0.03)
+        assert 2048 - (loc.y + loc.h) < int(2048 * 0.03)
+
+    def test_locate_scales_with_width(self):
+        eng = JimengEngine()
+        small = eng.locate(np.zeros((1024, 1024, 3), np.uint8))
+        large = eng.locate(np.zeros((2048, 2048, 3), np.uint8))
+        assert large.w == pytest.approx(small.w * 2, rel=0.1)
+
+    def test_clean_gradient_not_detected(self):
+        eng = JimengEngine()
+        ramp = np.tile(np.linspace(0, 255, 1024, dtype=np.uint8), (1024, 1))
+        img = cv2.cvtColor(ramp, cv2.COLOR_GRAY2BGR)
+        assert not eng.detect(img).detected
+
+    def test_solid_blob_corner_not_detected(self):
+        """A bright blob is not the glyph shape -> low correlation, not detected."""
+        eng = JimengEngine()
+        img = np.zeros((1024, 1024, 3), np.uint8)
+        x, y, bw, bh = eng.locate(img).bbox
+        img[y + bh // 4 : y + bh * 3 // 4, x : x + bw // 2] = 200
+        assert not eng.detect(img).detected
+
+    def test_silhouette_loads_binary(self):
+        sil = _jimeng_silhouette()
+        assert sil is not None
+        assert set(np.unique(sil)).issubset({0, 255})
+
+    def test_match_score_shape_sensitive(self):
+        """The glyph silhouette correlates with itself, not with a filled block."""
+        sil = _jimeng_silhouette()
+        h, w = sil.shape
+        box = np.zeros((h + 8, w * 3), np.uint8)
+        box[4 : 4 + h, 4 : 4 + w] = sil
+        # scale_base that puts the detection template at the silhouette's own size
+        # (the substituted asset's nominal width), so "self" really is self.
+        nominal_base = int(w / _JIMENG_ALPHA_WFRAC)
+        assert _jimeng_score(box, nominal_base) >= _JIMENG_GATE
+        solid = np.full_like(box, 255)
+        assert _jimeng_score(solid, nominal_base) < _JIMENG_GATE
+
+    def test_alpha_template_loads(self):
+        at = _jimeng_alpha()
+        assert at is not None
+        assert at.dtype.kind == "f"
+        assert float(at.min()) >= 0.0 and float(at.max()) <= 1.0
+
+    def test_synthetic_mark_detected_at_calibrated_gate(self):
+        eng = JimengEngine()
+        wm, _ = _compose_mark(
+            "jimeng_label_alpha.png", 2048, 2048, width_frac=0.2021, aspect=128 / 353
+        )
+        det = eng.detect(wm)
+        assert det.detected
+        assert det.confidence >= _JIMENG_GATE
+
+    def test_small_image_guarded_from_false_positive(self):
+        """Below the minimum short side a tiny shape can spuriously NCC-match a CJK
+        silhouette; the size guard suppresses detection. Bracket it: detected native,
+        suppressed downscaled."""
+        eng = JimengEngine()
+        wm, _ = _compose_mark(
+            "jimeng_label_alpha.png", 2048, 2048, width_frac=0.2021, aspect=128 / 353
+        )
+        assert eng.detect(wm).detected
+        assert not eng.detect(cv2.resize(wm, (150, 150))).detected
+
+    def test_footprint_mask_in_bottom_right(self):
+        eng = JimengEngine()
+        wm, _ = _compose_mark(
+            "jimeng_label_alpha.png", 2048, 2048, width_frac=0.2021, aspect=128 / 353
+        )
+        mask = eng.footprint_mask(wm)
+        assert mask is not None
+        assert mask.shape == wm.shape[:2]
+        ys, xs = np.where(mask > 0)
+        assert ys.mean() > wm.shape[0] / 2
+        assert xs.mean() > wm.shape[1] / 2
+
+    def test_fill_clears_and_leaves_far_region_exact(self):
+        """localize -> shared cv2 fill: re-detect goes quiet, the far quadrant is
+        byte-identical (the fill never leaks outside the mask)."""
+        eng = JimengEngine()
+        wm, _ = _compose_mark(
+            "jimeng_label_alpha.png", 1440, 2560, width_frac=0.2021, aspect=128 / 353
+        )
+        before = eng.detect(wm)
+        assert before.detected
+        out = _fill(eng, wm, detection=before)
+        assert eng.detect(out).confidence < before.confidence
+        h, w = wm.shape[:2]
+        assert np.array_equal(out[: h // 2, : w // 2], wm[: h // 2, : w // 2])
+
+    @pytest.mark.parametrize(("w", "h"), [(2048, 1), (1, 2048), (2048, 8)])
+    def test_wide_short_does_not_raise(self, w: int, h: int):
+        eng = JimengEngine()
+        img = np.zeros((h, w, 3), np.uint8)
+        mask = eng.footprint_mask(img, force=True)
+        assert mask is None or mask.shape == (h, w)
+
+    def test_grayscale_2d_does_not_raise(self):
+        eng = JimengEngine()
+        gray = np.zeros((2048, 2048), np.uint8)
+        mask = eng.footprint_mask(gray, force=True)
+        assert mask is None or mask.shape == (2048, 2048)
+
+    def test_bgra_4channel_does_not_raise(self):
+        eng = JimengEngine()
+        bgra = np.zeros((2048, 2048, 4), np.uint8)
+        mask = eng.footprint_mask(bgra, force=True)
+        assert mask is None or mask.shape == (2048, 2048)
+
+    def test_rival_margin_carries_the_doubao_template(self):
+        """The two ByteDance marks share the corner and a script; Jimeng's detector is
+        competitive against the shipped Doubao outline silhouette (upstream rival,
+        adapted to this tree's synthetic asset name)."""
+        assert "doubao_outline_alpha.png" in JimengEngine().config.rivals
+
+
+class TestBaiduEngine:
+    """Vectors adapted from upstream test_baidu_engine.py."""
+
+    def _compose(self, w: int = 1024, h: int = 1024, bg: float = 100.0):
+        """The 百度 text run at its measured layout plus the solid white tag between
+        the text and the corner (upstream's compose, at this tree's asset)."""
+        short = min(w, h)
+        wm, (ax, ay, gw, gh) = _compose_mark(
+            "baidu_alpha.png",
+            w,
+            h,
+            width_frac=0.090,
+            aspect=187 / 366,
+            bg=bg,
+            margin_right=0.099,
+            margin_bottom=0.006,
+        )
+        # the white rounded tag between the text run and the corner
+        tx0 = w - int(0.015 * short) - int(0.075 * short)
+        wm[ay - gh // 8 : ay + gh + gh // 8, tx0 : w - int(0.015 * short)] = 255
+        return wm, (ax, ay, gw, gh, tx0)
+
+    def test_locate_anchored_bottom_right(self):
+        eng = BaiduEngine()
+        img = np.zeros((2048, 2048, 3), np.uint8)
+        loc = eng.locate(img)
+        assert 2048 - (loc.x + loc.w) < 40
+        assert 2048 - (loc.y + loc.h) < 40
+
+    def test_locate_scales_with_short_side_not_width(self):
+        eng = BaiduEngine()
+        landscape = eng.locate(np.zeros((640, 1280, 3), np.uint8))
+        wider = eng.locate(np.zeros((640, 2560, 3), np.uint8))
+        assert wider.w == landscape.w
+
+    def test_config_pins(self):
+        eng = BaiduEngine()
+        assert eng.config.detect_frontend == "tophat"
+        assert eng.config.scale_basis == "short"
+        assert eng.config.provenance_ncc_factor == 1.0  # strict only, unmeasured band
+        assert eng.config.detect_ncc_threshold >= 0.48
+        assert "doubao_outline_alpha.png" in eng.config.rivals
+        assert "qwen_alpha.png" in eng.config.rivals
+
+    def test_detects_composed_mark(self):
+        eng = BaiduEngine()
+        wm, _ = self._compose()
+        det = eng.detect(wm)
+        assert det.detected, f"composed mark missed (conf={det.confidence:.3f})"
+
+    def test_clean_frame_stays_quiet(self):
+        eng = BaiduEngine()
+        assert not eng.detect(np.full((1024, 1024, 3), 100, np.uint8)).detected
+
+    def test_mask_extends_to_the_corner_tag(self):
+        """Regression (upstream 2026-07-22): the tag's flat white interior gives no
+        top-hat response, so a blob-bbox mask ends at the text run and the fill
+        leaves the tag as a ghost. The footprint must extend right to the corner."""
+        eng = BaiduEngine()
+        wm, (ax, _ay, gw, _gh, tx0) = self._compose()
+        mask = eng.footprint_mask(wm)
+        assert mask is not None
+        _ys, xs = np.where(mask > 0)
+        assert xs.min() <= ax + int(0.1 * gw)
+        assert xs.max() >= tx0 + 10
+
+    def test_no_mask_on_clean_frame(self):
+        eng = BaiduEngine()
+        assert eng.footprint_mask(np.full((1024, 1024, 3), 100, np.uint8)) is None
+
+    def test_force_masks_the_whole_locate_box_on_a_clean_frame(self):
+        """``force`` takes priority over detection for this mark, unlike the base
+        policy: a --no-detect caller named the mark, so the honest footprint is the
+        whole geometry box."""
+        eng = BaiduEngine()
+        img = np.full((1024, 1024, 3), 100, np.uint8)
+        mask = eng.footprint_mask(img, force=True)
+        assert mask is not None
+        bx, by, bw, bh = eng.locate(img).bbox
+        ys, xs = np.where(mask > 0)
+        assert xs.min() <= bx
+        assert xs.max() >= bx + bw - 1
+        assert ys.min() <= by
+        assert ys.max() >= by + bh - 1
+
+    def test_fill_clears_and_leaves_far_region_exact(self):
+        eng = BaiduEngine()
+        wm, _ = self._compose(1024, 1024)
+        before = eng.detect(wm)
+        assert before.detected
+        out = _fill(eng, wm, detection=before)
+        assert not eng.detect(out).detected
+        h, w = wm.shape[:2]
+        assert np.array_equal(out[: h // 2, : w // 2], wm[: h // 2, : w // 2])
+
+
+class TestYuanbaoEngine:
+    """Vectors adapted from upstream test_yuanbao_engine.py."""
+
+    def _compose(self, w: int, h: int, *, bg: float, foreground: float):
+        return _compose_mark(
+            "yuanbao_alpha.png",
+            w,
+            h,
+            width_frac=0.08,
+            aspect=0.0446 / 0.08,
+            bg=bg,
+            foreground=foreground,
+            margin_right=0.028,
+            margin_bottom=0.031,
+        )
+
+    def test_config_pins(self):
+        eng = YuanbaoEngine()
+        assert eng.config.detect_frontend == "contrast"  # two-polarity mark
+        assert eng.config.provenance_ncc_factor == 1.0  # strict only
+
+    def test_detects_light_mark_on_dark_background(self):
+        watermark, _ = self._compose(1024, 1024, bg=60, foreground=230)
+        detection = YuanbaoEngine().detect(watermark)
+        assert detection.detected
+        assert detection.confidence >= 0.80
+
+    def test_detects_dark_mark_on_light_background(self):
+        """Yuanbao switches mark polarity with the background; a white top-hat alone
+        misses the dark-gray stamp used on pale scenes."""
+        watermark, _ = self._compose(1024, 1024, bg=230, foreground=110)
+        detection = YuanbaoEngine().detect(watermark)
+        assert detection.detected
+        assert detection.confidence >= 0.80
+
+    def test_clean_gradient_stays_quiet(self):
+        ramp = np.tile(np.linspace(40, 220, 1024, dtype=np.uint8), (1024, 1))
+        image = cv2.cvtColor(ramp, cv2.COLOR_GRAY2BGR)
+        assert not YuanbaoEngine().detect(image).detected
+
+    def test_match_must_hug_bottom_right_anchor(self):
+        """Shift the mark 60 px in from the corner: still inside the locate window, so
+        the sweep finds it, but beyond the 0.04 anchor margin, so only the anchor gate
+        can demote it. A far shift would fall outside the window and pass regardless."""
+
+        class Ungated(YuanbaoEngine):
+            def _post_gate(self, det, scan):  # type: ignore[no-untyped-def]
+                return det
+
+        watermark, (ax, ay, gw, gh) = self._compose(1024, 1024, bg=60, foreground=230)
+        assert YuanbaoEngine().detect(watermark).detected
+        shifted = np.full_like(watermark, 60)
+        shifted[ay - 60 : ay - 60 + gh, ax - 60 : ax - 60 + gw] = watermark[
+            ay : ay + gh, ax : ax + gw
+        ]
+        assert Ungated().detect(shifted).detected
+        assert not YuanbaoEngine().detect(shifted).detected
+
+    def test_mask_uses_detector_box_for_dark_mark(self):
+        watermark, (ax, ay, gw, gh) = self._compose(1024, 1024, bg=230, foreground=110)
+        mask = YuanbaoEngine().footprint_mask(watermark)
+        assert mask is not None
+        ys, xs = np.where(mask > 0)
+        assert xs.min() <= ax + int(0.05 * gw)
+        assert xs.max() >= ax + gw - int(0.05 * gw)
+        assert ys.min() <= ay + gh // 2 <= ys.max()
+
+    def test_fill_clears_detector(self):
+        watermark, _ = self._compose(1024, 1024, bg=60, foreground=230)
+        eng = YuanbaoEngine()
+        out = _fill(eng, watermark)
+        assert not eng.detect(out).detected
+
+
+class TestDoubaoEngine:
+    """Vectors adapted from upstream test_doubao_engine.py.
+
+    Deviations from upstream: the capture-solved solid-strip silhouette is
+    forbidden in this tree, so the primary arm carries the shipped
+    renderer-synthetic ``doubao_outline_alpha.png``; the outlined-variant arm is
+    not ported (upstream's variant routing keys on a distinct second silhouette
+    asset, and this tree ships exactly one Doubao silhouette — a shared asset
+    name mis-routes the base detection into the variant's solid-box footprint).
+    The tinted arm is upstream's.
+    """
+
+    def _compose(
+        self,
+        w: int,
+        h: int,
+        bg: float | tuple[float, float, float] = 100.0,
+        *,
+        alpha: float = 1.0,
+    ):
+        return _compose_mark(
+            "doubao_outline_alpha.png",
+            w,
+            h,
+            width_frac=0.1636,
+            aspect=77 / 346,
+            bg=bg,
+            alpha=alpha,
+        )
+
+    def test_locate_anchored_bottom_right(self):
+        eng = DoubaoEngine()
+        img = np.zeros((2048, 2048, 3), np.uint8)
+        loc = eng.locate(img)
+        assert 2048 - (loc.x + loc.w) < int(2048 * 0.03)
+        assert 2048 - (loc.y + loc.h) < int(2048 * 0.03)
+
+    def test_locate_scales_with_width(self):
+        eng = DoubaoEngine()
+        small = eng.locate(np.zeros((1024, 1024, 3), np.uint8))
+        large = eng.locate(np.zeros((2048, 2048, 3), np.uint8))
+        assert large.w == pytest.approx(small.w * 2, rel=0.1)
+
+    def test_tinted_glyph_on_saturated_background(self):
+        """A translucent white glyph stays recognizable after a yellow background
+        tints it: the tinted arm (wider saturation filter) recovers it."""
+        # a translucent glyph lets the saturated background tint it (alpha < 1)
+        wm, _mark = self._compose(2048, 2048, bg=(20, 190, 240), alpha=0.75)
+        eng = DoubaoEngine()
+        clean = np.empty_like(wm)
+        clean[:] = (20, 190, 240)
+        assert not eng.detect(clean).detected
+        assert eng.detect(wm).detected
+        out = _fill(eng, wm)
+        assert not eng.detect(out).detected
+        h, w = wm.shape[:2]
+        assert np.array_equal(wm[: h // 2, : w // 2], out[: h // 2, : w // 2])
+
+    def test_clean_gradient_not_detected(self):
+        eng = DoubaoEngine()
+        ramp = np.tile(np.linspace(0, 255, 1024, dtype=np.uint8), (1024, 1))
+        img = cv2.cvtColor(ramp, cv2.COLOR_GRAY2BGR)
+        assert not eng.detect(img).detected
+
+    def test_solid_blob_corner_not_detected(self):
+        """A bright blob is not the glyph shape -> low correlation, not detected."""
+        eng = DoubaoEngine()
+        img = np.zeros((1024, 1024, 3), np.uint8)
+        x, y, bw, bh = eng.locate(img).bbox
+        img[y + bh // 4 : y + bh * 3 // 4, x : x + bw // 2] = 200
+        assert not eng.detect(img).detected
+
+    def test_small_image_guarded_from_false_positive(self):
+        eng = DoubaoEngine()
+        wm, _mark = self._compose(2048, 2048)
+        assert eng.detect(wm).detected
+        assert not eng.detect(cv2.resize(wm, (150, 150))).detected
+
+    def test_footprint_stays_on_glyphs_and_off_frame_edges(self):
+        """The removal footprint follows the aligned glyph, not the background
+        response: it must not touch the frame edges and must stay sparse inside its
+        own bounding rectangle (a solid edge-to-edge mask turns textured content
+        behind the mark into triangular inpaint artifacts)."""
+        eng = DoubaoEngine()
+        wm, _mark = self._compose(2048, 2048)
+        mask = eng.footprint_mask(wm)
+        assert mask is not None
+        assert not mask[-1].any()
+        assert not mask[:, -1].any()
+        ys, xs = np.where(mask > 0)
+        bounding_area = (int(xs.max()) - int(xs.min()) + 1) * (int(ys.max()) - int(ys.min()) + 1)
+        assert np.count_nonzero(mask) < 0.65 * bounding_area
+
+    def test_footprint_mask_in_bottom_right(self):
+        eng = DoubaoEngine()
+        wm, _mark = self._compose(2048, 2048)
+        mask = eng.footprint_mask(wm)
+        assert mask is not None
+        ys, xs = np.where(mask > 0)
+        assert ys.mean() > wm.shape[0] / 2
+        assert xs.mean() > wm.shape[1] / 2
+
+    def test_fill_clears_and_leaves_far_region_exact(self):
+        eng = DoubaoEngine()
+        wm, _mark = self._compose(1773, 2364)
+        before = eng.detect(wm)
+        assert before.detected
+        out = _fill(eng, wm, detection=before)
+        assert eng.detect(out).confidence < before.confidence
+        h, w = wm.shape[:2]
+        assert np.array_equal(out[: h // 2, : w // 2], wm[: h // 2, : w // 2])
+
+    @pytest.mark.parametrize(("w", "h"), [(2048, 1), (1, 2048), (2048, 8)])
+    def test_wide_short_does_not_raise(self, w: int, h: int):
+        eng = DoubaoEngine()
+        img = np.zeros((h, w, 3), np.uint8)
+        mask = eng.footprint_mask(img, force=True)
+        assert mask is None or mask.shape == (h, w)
+
+    def test_grayscale_2d_does_not_raise(self):
+        eng = DoubaoEngine()
+        gray = np.zeros((2048, 2048), np.uint8)
+        mask = eng.footprint_mask(gray, force=True)
+        assert mask is None or mask.shape == (2048, 2048)
+
+    def test_bgra_4channel_does_not_raise(self):
+        eng = DoubaoEngine()
+        bgra = np.zeros((2048, 2048, 4), np.uint8)
+        mask = eng.footprint_mask(bgra, force=True)
+        assert mask is None or mask.shape == (2048, 2048)
+
+    def test_template_match_score_guards_return_zero(self):
+        # Guards return 0.0 (never a false positive) for a mask that cannot hold a
+        # glyph: empty, narrower than min_gw, or shorter than the 4-px floor.
+        assert _doubao_score(np.zeros((0, 5), np.uint8), 1000) == 0.0
+        assert _doubao_score(np.zeros((10, 3), np.uint8), 1000) == 0.0  # width-1 < min_gw
+        assert _doubao_score(np.zeros((3, 200), np.uint8), 1000) == 0.0  # height-1 < 4
+
+
+class TestKlingEngine:
+    """Vectors adapted from upstream test_kling_engine.py."""
+
+    def _compose(self, w: int, h: int, bg: float = 100.0):
+        return _compose_mark(
+            "kling_alpha.png",
+            w,
+            h,
+            width_frac=0.12,
+            aspect=0.0287 / 0.12,
+            bg=bg,
+            margin_right=0.03,
+            margin_bottom=0.023,
+        )
+
+    def test_locate_anchored_bottom_right(self):
+        eng = KlingEngine()
+        img = np.zeros((2048, 2048, 3), np.uint8)
+        loc = eng.locate(img)
+        assert 2048 - (loc.x + loc.w) == pytest.approx(2048 * 0.03, rel=0.15)
+        assert 2048 - (loc.y + loc.h) == pytest.approx(2048 * 0.023, rel=0.15)
+
+    def test_locate_scales_with_short_side_not_width(self):
+        eng = KlingEngine()
+        landscape = eng.locate(np.zeros((640, 1280, 3), np.uint8))
+        wider = eng.locate(np.zeros((640, 2560, 3), np.uint8))
+        assert wider.w == landscape.w  # same short side -> same box
+        bigger = eng.locate(np.zeros((1280, 1920, 3), np.uint8))  # 2x the short side
+        assert bigger.w == pytest.approx(landscape.w * 2, rel=0.05)
+
+    def test_config_pins(self):
+        # The CJK mark is unimodal at 0.12 of the short side, so Kling keeps the
+        # shared 3-rung ladder (Qwen's per-mark ladder is the measured exception).
+        # The sub-gate band overlaps the clean arm's top, so relaxation is disabled.
+        eng = KlingEngine()
+        assert eng.config.ladder == (0.8, 1.0, 1.25)
+        assert eng.config.provenance_ncc_factor == 1.0
+        assert eng.config.detect_ncc_threshold > 0.32
+        # The Latin IMAGE 3.0 variant keeps its own measured narrow ladder + gate.
+        assert _LATIN_CONFIG.asset_name == "kling_latin_alpha.png"
+        assert _LATIN_CONFIG.ladder == (0.9, 1.0, 1.1)
+        assert _LATIN_CONFIG.detect_ncc_threshold == 0.40
+
+    def test_clean_gradient_not_detected(self):
+        eng = KlingEngine()
+        ramp = np.tile(np.linspace(0, 255, 1024, dtype=np.uint8), (1024, 1))
+        img = cv2.cvtColor(ramp, cv2.COLOR_GRAY2BGR)
+        assert not eng.detect(img).detected
+
+    def test_solid_blob_corner_not_detected(self):
+        eng = KlingEngine()
+        img = np.zeros((1024, 1024, 3), np.uint8)
+        x, y, bw, bh = eng.locate(img).bbox
+        img[y + bh // 4 : y + bh * 3 // 4, x : x + bw // 2] = 200
+        assert not eng.detect(img).detected
+
+    def test_silhouette_loads_binary(self):
+        sil = _kling_silhouette()
+        assert sil is not None
+        assert set(np.unique(sil)).issubset({0, 255})
+
+    def test_composed_mark_detected(self):
+        # The registration's core claim: a mark at the measured size scores over the
+        # gate. The floor is deliberately far above the gate: the synthetic mark is
+        # clean, so it scores high when the geometry is right.
+        wm, _ = self._compose(853, 640)
+        det = KlingEngine().detect(wm)
+        assert det.detected
+        assert det.confidence >= 0.80
+
+    def test_latin_variant_detected(self):
+        """The Latin IMAGE 3.0 arm catches its own layout (measured narrow ladder).
+
+        Composed at the 2048-class frame the gate was calibrated on (upstream's
+        evidence is the provider-native export): the thin latin strokes degrade
+        under the fixed background-model blur on sub-native frames, so the
+        synthetic vector pins the native-resolution class only.
+        """
+        wm, _ = _compose_mark(
+            "kling_latin_alpha.png",
+            2048,
+            1536,
+            width_frac=0.14,
+            aspect=0.032 / 0.14,
+            margin_right=0.002,
+            margin_bottom=0.002,
+        )
+        det = KlingEngine().detect(wm)
+        assert det.detected
+        assert det.template_asset == "kling_latin_alpha.png"
+
+    def test_small_image_guarded(self):
+        wm, _ = self._compose(853, 640)
+        eng = KlingEngine()
+        assert eng.detect(wm).detected
+        assert not eng.detect(cv2.resize(wm, (150, 112))).detected
+
+    def test_footprint_mask_in_bottom_right(self):
+        wm, _ = self._compose(853, 640)
+        mask = KlingEngine().footprint_mask(wm)
+        assert mask is not None
+        ys, xs = np.where(mask > 0)
+        assert ys.mean() > wm.shape[0] / 2
+        assert xs.mean() > wm.shape[1] / 2
+
+    def test_clean_frame_produces_no_mask(self):
+        clean = cv2.GaussianBlur(np.full((640, 853, 3), 120, np.uint8), (5, 5), 0)
+        assert KlingEngine().footprint_mask(clean, force=False) is None
+
+    def test_fill_clears_and_leaves_far_region_exact(self):
+        wm, _ = self._compose(853, 640)
+        eng = KlingEngine()
+        out = _fill(eng, wm)
+        assert not eng.detect(out).detected
+        h, w = wm.shape[:2]
+        assert np.array_equal(out[: h // 2, : w // 2], wm[: h // 2, : w // 2])
+
+
+class TestQwenEngine:
+    """Vectors adapted from upstream test_qwen_engine.py.
+
+    Deviation from upstream: the Qwen Create symbol-only arm is NOT ported — its
+    three-lobe silhouette is a fixture-residual capture solve, forbidden in this
+    tree (see assets/PROVENANCE.md), and upstream's engine constructor hard-raises
+    when that asset is missing. The calibrated text arm is unchanged.
+    """
+
+    def _compose(self, w: int, h: int, mode: float, bg: float = 100.0):
+        return _compose_mark(
+            "qwen_alpha.png",
+            w,
+            h,
+            width_frac=mode,
+            aspect=0.0416 / 0.160,
+            bg=bg,
+            margin_right=0.025,
+            margin_bottom=0.025,
+        )
+
+    def test_locate_anchored_bottom_right_off_the_corner(self):
+        # The measured right margin (~0.025 of short) is wider than Doubao's 0.004;
+        # inheriting Doubao's anchor clipped the first glyph (0.73 -> 0.26 NCC).
+        eng = QwenEngine()
+        img = np.zeros((2048, 2048, 3), np.uint8)
+        loc = eng.locate(img)
+        assert 2048 - (loc.x + loc.w) == pytest.approx(2048 * 0.0203, rel=0.15)
+        assert 2048 - (loc.y + loc.h) == pytest.approx(2048 * 0.0218, rel=0.15)
+
+    def test_locate_scales_with_short_side_not_width(self):
+        eng = QwenEngine()
+        landscape = eng.locate(np.zeros((640, 1280, 3), np.uint8))
+        wider = eng.locate(np.zeros((640, 2560, 3), np.uint8))
+        assert wider.w == landscape.w
+        bigger = eng.locate(np.zeros((1280, 1920, 3), np.uint8))
+        assert bigger.w == pytest.approx(landscape.w * 2, rel=0.05)
+
+    def test_config_pins(self):
+        # The two measured size modes need the per-mark 2-rung ladder; the shared
+        # 3-rung default covers only ~75% of marks. Strict-only: the sub-gate band
+        # is dominated by non-Qwen banners.
+        eng = QwenEngine()
+        assert eng.config.ladder == (0.78, 1.27)
+        assert eng.config.provenance_ncc_factor == 1.0
+
+    def test_clean_gradient_not_detected(self):
+        eng = QwenEngine()
+        ramp = np.tile(np.linspace(0, 255, 1024, dtype=np.uint8), (1024, 1))
+        img = cv2.cvtColor(ramp, cv2.COLOR_GRAY2BGR)
+        assert not eng.detect(img).detected
+
+    def test_solid_blob_corner_not_detected(self):
+        eng = QwenEngine()
+        img = np.zeros((1024, 1024, 3), np.uint8)
+        x, y, bw, bh = eng.locate(img).bbox
+        img[y + bh // 4 : y + bh * 3 // 4, x : x + bw // 2] = 200
+        assert not eng.detect(img).detected
+
+    def test_silhouette_loads_binary(self):
+        sil = _qwen_silhouette()
+        assert sil is not None
+        assert set(np.unique(sil)).issubset({0, 255})
+
+    @pytest.mark.parametrize("mode", [0.203, 0.124])
+    def test_both_size_modes_detected(self, mode: float):
+        # The registration's core claim: a mark at EITHER measured mode scores over
+        # the gate (a single fraction on the shared ladder lost the small mode).
+        wm, _ = self._compose(853, 640, mode)
+        det = QwenEngine().detect(wm)
+        assert det.detected
+        assert det.confidence >= 0.80
+
+    def test_small_image_guarded(self):
+        wm, _ = self._compose(853, 640, 0.203)
+        eng = QwenEngine()
+        assert eng.detect(wm).detected
+        assert not eng.detect(cv2.resize(wm, (150, 112))).detected
+
+    def test_unaccepted_candidate_cannot_hide_detected_text(self):
+        # best_detection prefers an ACCEPTED verdict: a stronger score that the
+        # gates rejected must never mask a detection that passed.
+        from _text_mark_engine import TextMarkDetection, best_detection
+
+        text_detection = TextMarkDetection(detected=True, confidence=0.45)
+        symbol_detection = TextMarkDetection(detected=False, confidence=0.46)
+        assert best_detection(text_detection, symbol_detection) is text_detection
+
+    def test_footprint_mask_in_bottom_right(self):
+        wm, _ = self._compose(853, 640, 0.203)
+        mask = QwenEngine().footprint_mask(wm)
+        assert mask is not None
+        ys, xs = np.where(mask > 0)
+        assert ys.mean() > wm.shape[0] / 2
+        assert xs.mean() > wm.shape[1] / 2
+
+    def test_clean_frame_produces_no_mask(self):
+        clean = cv2.GaussianBlur(np.full((640, 853, 3), 120, np.uint8), (5, 5), 0)
+        assert QwenEngine().footprint_mask(clean, force=False) is None
+
+    @pytest.mark.parametrize("mode", [0.203, 0.124])
+    def test_fill_clears_at_both_modes(self, mode: float):
+        wm, _ = self._compose(853, 640, mode)
+        eng = QwenEngine()
+        out = _fill(eng, wm)
+        assert not eng.detect(out).detected
+        h, w = wm.shape[:2]
+        assert np.array_equal(out[: h // 2, : w // 2], wm[: h // 2, : w // 2])
+
+
+_RIVAL_COMPOSITES = {
+    # key -> (asset, width_frac, aspect, margin_right, margin_bottom): each rival
+    # mark composed at its own engine's measured geometry (upstream built these
+    # through the registry's example stamp; the registry is a later ticket here,
+    # so the composites are built directly from the tuned geometries).
+    "doubao": ("doubao_outline_alpha.png", 0.1636, 77 / 346, 0.004, 0.004),
+    "qwen": ("qwen_alpha.png", 0.203, 0.0416 / 0.160, 0.025, 0.025),
+    "baidu": ("baidu_alpha.png", 0.090, 187 / 366, 0.099, 0.006),
+    "kling": ("kling_alpha.png", 0.12, 0.0287 / 0.12, 0.03, 0.023),
+    "yuanbao": ("yuanbao_alpha.png", 0.08, 0.0446 / 0.08, 0.028, 0.031),
+}
+
+
+class TestGenericAiLabelEngine:
+    """Vectors adapted from upstream test_generic_ai_label_engine.py."""
+
+    def _compose(self, w: int, h: int, bg: float = 100.0, alpha: float = 1.0):
+        return _compose_mark(
+            "generic_ai_label_alpha.png",
+            w,
+            h,
+            width_frac=0.1724,
+            aspect=0.0625 / 0.1724,
+            bg=bg,
+            basis="width",
+            alpha=alpha,
+        )
+
+    def test_locate_anchored_bottom_right(self):
+        eng = GenericAiLabelEngine()
+        img = np.zeros((2048, 2048, 3), np.uint8)
+        loc = eng.locate(img)
+        assert 2048 - (loc.x + loc.w) < int(2048 * 0.05)
+        assert 2048 - (loc.y + loc.h) < int(2048 * 0.05)
+
+    def test_locate_scales_with_width(self):
+        eng = GenericAiLabelEngine()
+        small = eng.locate(np.zeros((1024, 1024, 3), np.uint8))
+        large = eng.locate(np.zeros((2048, 2048, 3), np.uint8))
+        assert large.w == pytest.approx(small.w * 2, rel=0.1)
+
+    def test_config_pins(self):
+        eng = GenericAiLabelEngine()
+        assert eng.config.detect_ncc_threshold == 0.50
+        # Every rival contains "AI生成" inside its own glyphs -- without the
+        # margins this generic detector would double-fire on their marks.
+        assert set(eng.config.rivals) == {
+            "doubao_outline_alpha.png",
+            "qwen_alpha.png",
+            "baidu_alpha.png",
+            "kling_alpha.png",
+            "yuanbao_alpha.png",
+        }
+
+    def test_provenance_never_relaxes(self):
+        """factor 1.0: no producer identity can confirm a BRAND-LESS label, so the
+        relaxed gate equals the strict gate. A sub-gate mark must stay rejected
+        even when provenance is claimed; a genuine mark stays accepted."""
+        eng = GenericAiLabelEngine()
+        assert eng.config.provenance_ncc_factor == 1.0
+        # The top-hat front-end is contrast-invariant, so FAINTNESS cannot lower the
+        # score; an off-ladder-comb scale does (the measured collapse the ladder
+        # gates on, same mechanism as Qwen's off-mode rungs).
+        off_comb, _ = _compose_mark(
+            "generic_ai_label_alpha.png",
+            2048,
+            2048,
+            width_frac=0.1724 * 0.7,
+            aspect=0.0625 / 0.1724,
+            basis="width",
+        )
+        sub_gate = eng.detect(off_comb).confidence
+        assert 0.0 < sub_gate < eng.config.detect_ncc_threshold
+        assert not eng.detect(off_comb, provenance=True).detected
+        marked, _ = self._compose(2048, 2048)
+        assert eng.detect(marked, provenance=True).detected
+
+    def test_clean_gradient_not_detected(self):
+        eng = GenericAiLabelEngine()
+        ramp = np.tile(np.linspace(0, 255, 1024, dtype=np.uint8), (1024, 1))
+        img = cv2.cvtColor(ramp, cv2.COLOR_GRAY2BGR)
+        assert not eng.detect(img).detected
+
+    def test_solid_blob_corner_not_detected(self):
+        eng = GenericAiLabelEngine()
+        img = np.zeros((1024, 1024, 3), np.uint8)
+        x, y, bw, bh = eng.locate(img).bbox
+        img[y + bh // 4 : y + bh * 3 // 4, x : x + bw // 2] = 200
+        assert not eng.detect(img).detected
+
+    def test_silhouette_loads_binary(self):
+        sil = _generic_silhouette()
+        assert sil is not None
+        assert set(np.unique(sil)).issubset({0, 255})
+
+    def test_match_score_shape_sensitive(self):
+        """The rendered glyph silhouette correlates with itself, not with a filled
+        block (self at the asset's own nominal detection size)."""
+        sil = _generic_silhouette()
+        h, w = sil.shape
+        box = np.zeros((h + 8, w * 3), np.uint8)
+        box[4 : 4 + h, 4 : 4 + w] = sil
+        nominal_base = int(w / 0.1724)
+        assert _generic_score(box, nominal_base) >= _GENERIC_GATE
+        solid = np.full_like(box, 255)
+        assert _generic_score(solid, nominal_base) < _GENERIC_GATE
+
+    def test_detects_synthetic_mark(self):
+        wm, _mark = self._compose(2048, 2048)
+        det = GenericAiLabelEngine().detect(wm)
+        assert det.detected
+        assert det.confidence >= _GENERIC_GATE
+
+    def test_small_image_guarded_from_false_positive(self):
+        wm, _mark = self._compose(2048, 2048)
+        eng = GenericAiLabelEngine()
+        assert eng.detect(wm).detected
+        assert not eng.detect(cv2.resize(wm, (150, 150))).detected
+
+    @pytest.mark.parametrize("key", sorted(_RIVAL_COMPOSITES))
+    def test_does_not_fire_on_rival_brand_mark(self, key: str):
+        """The generic template must not double-fire on a mark already attributed
+        to its own tuned brand engine; every rival's glyphs contain the literal
+        substring "AI生成", which is exactly the collision the rivals guard exists
+        to prevent."""
+        asset, width_frac, aspect, mr, mb = _RIVAL_COMPOSITES[key]
+        marked, _box = _compose_mark(
+            asset,
+            1536,
+            1152,
+            width_frac=width_frac,
+            aspect=aspect,
+            margin_right=mr,
+            margin_bottom=mb,
+        )
+        rival_engine = {
+            "doubao": DoubaoEngine,
+            "qwen": QwenEngine,
+            "baidu": BaiduEngine,
+            "kling": KlingEngine,
+            "yuanbao": YuanbaoEngine,
+        }[key]()
+        assert rival_engine.detect(marked).detected, f"{key}: sanity -- its own engine should fire"
+        assert not GenericAiLabelEngine().detect(marked).detected, f"generic double-fired on {key}"
+
+    def test_alpha_asset_loads(self):
+        at = _generic_alpha()
+        assert at is not None
+        assert at.dtype.kind == "f"
+        assert float(at.min()) >= 0.0 and float(at.max()) <= 1.0
+
+    def test_footprint_mask_in_bottom_right(self):
+        wm, _mark = self._compose(2048, 2048)
+        mask = GenericAiLabelEngine().footprint_mask(wm)
+        assert mask is not None
+        assert mask.shape == wm.shape[:2]
+        ys, xs = np.where(mask > 0)
+        assert ys.mean() > wm.shape[0] / 2
+        assert xs.mean() > wm.shape[1] / 2
+
+    def test_fill_clears_and_leaves_far_region_exact(self):
+        wm, _mark = self._compose(2048, 2048)
+        eng = GenericAiLabelEngine()
+        out = _fill(eng, wm)
+        assert not eng.detect(out).detected
+        h, w = wm.shape[:2]
+        assert np.array_equal(out[: h // 2, : w // 2], wm[: h // 2, : w // 2])
+
+    @pytest.mark.parametrize(("w", "h"), [(2048, 1), (1, 2048), (2048, 8)])
+    def test_wide_short_does_not_raise(self, w: int, h: int):
+        eng = GenericAiLabelEngine()
+        img = np.zeros((h, w, 3), np.uint8)
+        mask = eng.footprint_mask(img, force=True)
+        assert mask is None or mask.shape == (h, w)
+
+    def test_grayscale_2d_does_not_raise(self):
+        eng = GenericAiLabelEngine()
+        gray = np.zeros((2048, 2048), np.uint8)
+        mask = eng.footprint_mask(gray, force=True)
+        assert mask is None or mask.shape == (2048, 2048)
+
+    def test_bgra_4channel_does_not_raise(self):
+        eng = GenericAiLabelEngine()
+        bgra = np.zeros((2048, 2048, 4), np.uint8)
+        mask = eng.footprint_mask(bgra, force=True)
+        assert mask is None or mask.shape == (2048, 2048)
+
+
+class TestPillEngine:
+    """Vectors adapted from upstream test_pill_engine.py.
+
+    The outline fixture composites the shipped synthetic pill silhouette (upstream
+    drew the pill with PIL + a system font; the shipped asset is the same pill
+    class rendered by render_pill_silhouette.py).
+    """
+
+    def _compose_pill(self, w: int = 1200, h: int = 1600, bg: int = 150, alpha: float = 0.7):
+        """Composite the shipped pill silhouette top-left at its measured geometry."""
+        # _compose_mark anchors bottom-right, so the TOP-left pill is expressed by
+        # inverting: margin_bottom = h/base - top_margin - gh/base.
+        return _compose_mark(
+            "jimeng_pill.png",
+            w,
+            h,
+            width_frac=0.161,
+            aspect=160 / 320,
+            bg=float(bg),
+            alpha=alpha,
+            basis="width",
+            margin_right=1.0 - 0.03 - 0.161,  # left margin 0.03 of width
+            margin_bottom=(h - 0.02 * w) / w - 0.161 * 0.5,  # top margin 0.02 of width
+        )
+
+    def test_detects_composited_pill(self):
+        pill, _box = self._compose_pill()
+        det = PillEngine().detect(pill)
+        assert det.detected
+        assert det.confidence >= _PILL_GATE
+
+    def test_clean_frame_does_not_fire(self):
+        clean = np.full((1600, 1200, 3), 150, np.uint8)
+        assert not PillEngine().detect(clean).detected
+
+    def test_small_image_no_fire(self):
+        assert not PillEngine().detect(np.full((40, 40, 3), 150, np.uint8)).detected
+
+    def test_detect_bgra_no_crash(self):
+        # A 4-channel BGRA array must be normalized, not crash cv2.cvtColor.
+        bgra = np.zeros((256, 256, 4), np.uint8)
+        det = PillEngine().detect(bgra)
+        assert det.detected in (True, False)
+        assert PillEngine().footprint_texture(bgra) >= 0.0
+
+    def test_footprint_mask_top_left_geometry(self):
+        mask = PillEngine().footprint_mask(np.full((1600, 1200, 3), 150, np.uint8))
+        assert mask is not None
+        assert mask.shape == (1600, 1200)
+        assert mask.any()
+        ys, xs = np.where(mask > 0)
+        # the fixed pill footprint sits top-left: mask mass in the top-left quadrant
+        assert ys.mean() < 800
+        assert xs.mean() < 600
+
+    def test_flat_frame_is_flat(self):
+        assert PillEngine().footprint_is_flat(np.full((1600, 1200, 3), 150, np.uint8))
+
+    def test_textured_frame_is_not_flat(self):
+        """The metadata-only arm removes the pill only where inpainting is safe:
+        median-Sobel texture over the footprint must read as TEXTURED."""
+        eng = PillEngine()
+        w, h = 1200, 1600
+        img = np.full((h, w, 3), 150, np.uint8)
+        fx, fy = int(0.012 * w), int(0.006 * h)
+        fw, fh = int(0.205 * w), int(0.115 * w)
+        yy, xx = np.mgrid[fy : fy + fh, fx : fx + fw]
+        checker = ((((xx // 3) + (yy // 3)) % 2) * 255).astype(np.uint8)
+        img[fy : fy + fh, fx : fx + fw] = checker[:, :, None]
+        assert not eng.footprint_is_flat(img)
+        assert eng.footprint_texture(img) > 6.0
+
+    def test_label_arm_requires_jimeng_provenance(self):
+        """The solid-label arm (contrast front-end) only scans under Jimeng
+        provenance: without it the verified-label path never fires on a bare
+        label composite; with it the label is detected and verified."""
+        label, _ = _compose_mark(
+            "jimeng_label_alpha.png",
+            2048,
+            2048,
+            width_frac=0.14,
+            aspect=128 / 353,
+            bg=170.0,
+            basis="width",
+            margin_right=1.0 - 0.012 - 0.14,  # left margin 0.012 of width
+            margin_bottom=1.0 - 0.02 - 0.14 * (128 / 353),  # top margin 0.02 of height
+        )
+        eng = PillEngine()
+        strict = eng.detect(label)
+        assert not strict.verified_label
+        relaxed = eng.detect(label, provenance=True)
+        assert relaxed.detected
+        assert relaxed.verified_label
+
+    def test_verified_label_footprint_uses_detector_box_with_pads(self):
+        label, (ax, ay, gw, gh) = _compose_mark(
+            "jimeng_label_alpha.png",
+            2048,
+            2048,
+            width_frac=0.14,
+            aspect=128 / 353,
+            bg=170.0,
+            basis="width",
+            margin_right=1.0 - 0.012 - 0.14,
+            margin_bottom=1.0 - 0.02 - 0.14 * (128 / 353),
+        )
+        eng = PillEngine()
+        det = eng.detect(label, provenance=True)
+        assert det.detected and det.verified_label
+        mask = eng.footprint_mask(label, detection=det)
+        assert mask is not None
+        ys, xs = np.where(mask > 0)
+        # the padded detector box covers the label with margin on every side
+        assert xs.min() < ax and xs.max() > ax + gw
+        assert ys.min() < ay and ys.max() > ay + gh

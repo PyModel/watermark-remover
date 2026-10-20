@@ -8,7 +8,11 @@ Hard-bound metadata stripping (what clean_image/clean_file do) does NOT defeat:
 
 This tool reports their presence so the user knows a strip may be re-linked.
 Stdlib byte-scan always runs; if the optional `c2pa` package is installed, its
-reader is tried first for authoritative manifest JSON.
+reader is tried first for authoritative manifest JSON. Without the wheel, a
+bounded stdlib CBOR/caBX scan (see c2pa_constants) surfaces claim-generator /
+issuer hints for PNGs. The CC BY 4.0 soft-binding algorithm registry is not
+ported: soft-binding algorithms resolve to a labeled-unknown, never a guessed
+name.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from c2pa_constants import scan_c2pa_hints
 from common import eprint, read_bytes_bounded
 from image_meta import C2PA_MARKERS
 
@@ -102,6 +107,63 @@ def _try_c2pa_lib(path: Path) -> dict[str, Any] | None:
     }
 
 
+def _hints_not_scanned(source: str, reason: str) -> dict[str, Any]:
+    """The stable empty `c2pa_hints` shape for when the stdlib scan did not run."""
+    return {
+        "scanned": False,
+        "source": source,
+        "reason": reason,
+        "has_cabx_chunk": None,
+        "found": False,
+        "claim_generator": None,
+        "c2pa_spec": None,
+        "timestamp": None,
+        "issuers": [],
+        "ai_tools": [],
+        "claim_generator_platforms": [],
+        "actions": [],
+        "soft_binding_algorithms": [],
+        "chunk_bytes": None,
+        "cbor": {"status": "skipped", "reason": reason},
+        "rejected_reason": None,
+    }
+
+
+def _c2pa_hints(path: Path, lib: dict[str, Any] | None) -> dict[str, Any]:
+    """C2PA hint evidence: the wheel stays authoritative; the stdlib scan is the fallback."""
+    if lib and "error" not in lib:
+        return _hints_not_scanned(
+            "c2pa-wheel-authoritative", "c2pa wheel is the authoritative reader"
+        )
+    if path.suffix.casefold() != ".png":
+        return _hints_not_scanned("stdlib-fallback", "stdlib caBX scan supports PNG only")
+    return {"scanned": True, "source": "stdlib-fallback", "reason": None, **scan_c2pa_hints(path)}
+
+
+def _trustmark_finding(path: Path) -> dict[str, Any]:
+    """Adobe TrustMark soft-binding evidence, only when the decoder is importable.
+
+    TrustMark Variant P is the in-content watermark behind Adobe Durable
+    Content Credentials: after a manifest strip it can still re-link the
+    asset, so a durable decode IS soft-binding evidence. Fail-soft: an absent
+    extra, an unreadable image, or a crashed decoder never produces a negative
+    finding -- the entry says what it could not run. Requires the optional
+    ``trustmark`` extra (weights download on first use); decoding never raises
+    out of this function.
+    """
+    entry: dict[str, Any] = {"available": False, "scheme": None}
+    try:
+        import trustmark_detector
+
+        if not trustmark_detector.is_available():
+            return entry
+        entry["available"] = True
+        entry["scheme"] = trustmark_detector.detect_trustmark(path)
+    except Exception as exc:
+        entry["error"] = repr(exc)[:300]
+    return entry
+
+
 def inspect_soft_binding(path: Path) -> dict[str, Any]:
     data = read_bytes_bounded(path, MAX_SCAN_BYTES, label="soft-binding scan file")
     scan = _scan_bytes(data)
@@ -116,7 +178,22 @@ def inspect_soft_binding(path: Path) -> dict[str, Any]:
         if lib.get("soft_binding_labels") or remote_url:
             scan["has_c2pa"] = True
 
-    found = bool(scan["has_c2pa"] and (scan["labels"] or scan["urls"]))
+    trustmark = _trustmark_finding(path)
+    tm_scheme = trustmark.get("scheme")
+    found = bool(scan["has_c2pa"] and (scan["labels"] or scan["urls"])) or bool(tm_scheme)
+    warning = (
+        "Soft binding / remote manifest detected: stripping embedded metadata "
+        "may NOT remove provenance — a verifier can re-link the remote manifest "
+        "or recover via the in-content watermark."
+        if found
+        else None
+    )
+    if tm_scheme:
+        warning = (warning + " " if warning else "") + (
+            f"{tm_scheme} decoded in-content: Adobe TrustMark can re-link Durable "
+            "Content Credentials after a strip (a provenance signal, not proof of "
+            "AI origin)."
+        )
     return {
         "path": str(path),
         "has_c2pa": scan["has_c2pa"],
@@ -125,14 +202,10 @@ def inspect_soft_binding(path: Path) -> dict[str, Any]:
             "labels": scan["labels"],
             "manifest_urls": scan["urls"],
         },
+        "trustmark": trustmark,
         "c2pa_lib": lib or {"available": False},
-        "warning": (
-            "Soft binding / remote manifest detected: stripping embedded metadata "
-            "may NOT remove provenance — a verifier can re-link the remote manifest "
-            "or recover via the in-content watermark."
-            if found
-            else None
-        ),
+        "c2pa_hints": _c2pa_hints(path, lib),
+        "warning": warning,
         "note": (
             "Detection only. This project does not remove in-content (soft-bound) "
             "watermarks; see DESIGN.md out-of-scope."
@@ -157,6 +230,13 @@ def main() -> int:
         print(f"Path: {report['path']}")
         print(f"C2PA present: {report['has_c2pa']}")
         print(f"Soft binding found: {sb['found']}")
+        tm = report["trustmark"]
+        if tm.get("scheme"):
+            print(f"  trustmark: {tm['scheme']}")
+        elif tm.get("error"):
+            print(f"  trustmark: unavailable ({tm['error']})")
+        elif not tm.get("available"):
+            print("  trustmark: not scanned (trustmark extra not installed)")
         for lbl in sb["labels"]:
             print(f"  label: {lbl}")
         for url in sb["manifest_urls"]:

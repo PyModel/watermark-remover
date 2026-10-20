@@ -25,6 +25,15 @@ def test_exit_code_values() -> None:
     assert ExitCode.SUCCESS.value == 0
     assert ExitCode.RESIDUAL_OR_ERROR.value == 1
     assert ExitCode.USAGE_ERROR.value == 2
+    # The clean path's "optional backend not installed" code. Distinct from 2 so
+    # an unsupported input stays a usage error and from 1 so a skipped stage is
+    # never read as a residual-signal result.
+    assert ExitCode.BACKEND_UNAVAILABLE.value == 3
+
+
+def test_status_to_exit_code_never_reports_a_skipped_backend() -> None:
+    """Exit 3 is not an operation status: only the stage's own skip reports it."""
+    assert {status_to_exit_code(status) for status in OperationStatus} == {0, 1, 2}
 
 
 def test_status_to_exit_code() -> None:

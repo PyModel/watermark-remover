@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePath
 
@@ -17,6 +17,83 @@ class InputItem:
 class InputSelection:
     items: tuple[InputItem, ...]
     batch: bool
+
+
+#: The cleaning stages a batch mode selects. ``metadata`` is the default and
+#: preserves today's behavior; ``visible`` runs the registry-driven visible-mark
+#: pass without the metadata stage; ``all`` runs both.
+BATCH_MODES = ("metadata", "visible", "all")
+DEFAULT_BATCH_MODE = "metadata"
+
+
+@dataclass(frozen=True, slots=True)
+class BatchModePolicy:
+    """Which stages a batch mode applies, as request-field overrides.
+
+    ``visible`` selects the registry-driven visible-mark pass and
+    ``strip_metadata`` selects the metadata stage; they are independent so
+    ``visible`` is "visible marks only" and ``all`` is "both".
+    """
+
+    mode: str
+    visible: bool
+    strip_metadata: bool
+
+    @property
+    def stages(self) -> tuple[str, ...]:
+        """The stage names this mode runs, in pipeline order."""
+        return tuple(
+            name
+            for name, enabled in (("visible", self.visible), ("metadata", self.strip_metadata))
+            if enabled
+        )
+
+
+_BATCH_MODE_POLICIES = {
+    "metadata": BatchModePolicy("metadata", visible=False, strip_metadata=True),
+    "visible": BatchModePolicy("visible", visible=True, strip_metadata=False),
+    "all": BatchModePolicy("all", visible=True, strip_metadata=True),
+}
+
+
+def resolve_batch_mode(mode: str | None) -> BatchModePolicy:
+    """The policy for *mode*; ``None`` (no flag) is the metadata default.
+
+    An unknown mode raises rather than falling back to the default: a typo must
+    never run a different stage set than the one that was asked for.
+    """
+    if mode is None:
+        return _BATCH_MODE_POLICIES[DEFAULT_BATCH_MODE]
+    try:
+        return _BATCH_MODE_POLICIES[mode]
+    except KeyError:
+        expected = ", ".join(BATCH_MODES)
+        raise ValueError(f"unknown batch mode {mode!r}; expected one of {expected}") from None
+
+
+def batch_summary(results: Sequence[dict], *, mode: str | None = None) -> dict:
+    """The batch JSON envelope: every file's outcome, the mode, and the counts.
+
+    A file whose payload carries a non-zero (or absent) ``exit_code`` is counted
+    failed and labelled so; every file is counted exactly once, so ``done`` plus
+    ``failed`` always equals ``total`` even when one file fails and the rest
+    succeed. A per-file ``status`` the pipeline already set (a dry-run) is kept
+    rather than overwritten.
+    """
+    policy = resolve_batch_mode(mode)
+    counted = {"done": 0, "failed": 0}
+    decorated: list[dict] = []
+    for result in results:
+        outcome = "failed" if result.get("exit_code", 1) != 0 else "done"
+        counted[outcome] += 1
+        decorated.append({**result, "status": result.get("status", outcome)})
+    return {
+        "total": len(decorated),
+        "mode": policy.mode,
+        "stages": list(policy.stages),
+        "counts": {**counted, "total": len(decorated)},
+        "results": decorated,
+    }
 
 
 def is_generated(path: Path) -> bool:

@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 840" width="1200" height="840" role="img" aria-labelledby="t d">
+<title id="t">watermark-remover brand sheet</title>
+<desc id="d">Mark on navy and on light, the wordmark, the color palette with roles, and the type stack.</desc>
+<rect width="1200" height="840" fill="#eef2f4"/>
+<text x="64" y="84" font-size="40" font-weight="600" letter-spacing="-1.6" fill="#0d151b" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif">watermark-remover brand</text>
+<text x="64" y="116" font-size="16" fill="#5f6a74" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif">A scrub line passes over rows of signal: what it has crossed is residue, what is ahead is still lit.</text>
+<rect x="64" y="148" width="336" height="220" rx="22" fill="#ffffff"/>
+<g transform="translate(168 194) scale(1)"><rect width="128" height="128" rx="28" fill="#0a2026"/>
+<g>
+  <g fill="#234049">
+    <rect x="26" y="33" width="40" height="8" rx="4"/>
+    <rect x="26" y="51" width="40" height="8" rx="4"/>
+    <rect x="26" y="69" width="40" height="8" rx="4"/>
+    <rect x="26" y="87" width="40" height="8" rx="4"/>
+  </g>
+  <g fill="#f05aa8">
+    <rect x="76" y="33" width="26" height="8" rx="4"/>
+    <rect x="76" y="51" width="26" height="8" rx="4"/>
+    <rect x="76" y="69" width="26" height="8" rx="4"/>
+    <rect x="76" y="87" width="10" height="8" rx="4"/>
+  </g>
+  <g fill="#ffffff">
+    <rect x="68" y="22" width="4" height="84" rx="1"/>
+    <rect x="62" y="18" width="16" height="4" rx="2"/>
+    <rect x="62" y="106" width="16" height="4" rx="2"/>
+  </g>
+</g>
+</g>
+<rect x="424" y="148" width="336" height="220" rx="22" fill="#ffffff"/>
+<g transform="translate(528 194)"><g>
+  <g fill="#cfd8de">
+    <rect x="26" y="33" width="40" height="8" rx="4"/>
+    <rect x="26" y="51" width="40" height="8" rx="4"/>
+    <rect x="26" y="69" width="40" height="8" rx="4"/>
+    <rect x="26" y="87" width="40" height="8" rx="4"/>
+  </g>
+  <g fill="#a3176f">
+    <rect x="76" y="33" width="26" height="8" rx="4"/>
+    <rect x="76" y="51" width="26" height="8" rx="4"/>
+    <rect x="76" y="69" width="26" height="8" rx="4"/>
+    <rect x="76" y="87" width="10" height="8" rx="4"/>
+  </g>
+  <g fill="#0a2026">
+    <rect x="68" y="22" width="4" height="84" rx="1"/>
+    <rect x="62" y="18" width="16" height="4" rx="2"/>
+    <rect x="62" y="106" width="16" height="4" rx="2"/>
+  </g>
+</g>
+</g>
+<rect x="784" y="148" width="352" height="220" rx="22" fill="#0a2026"/>
+<g transform="translate(816 226) scale(0.5)"><rect width="128" height="128" rx="28" fill="#0a2026"/>
+<g>
+  <g fill="#234049">
+    <rect x="26" y="33" width="40" height="8" rx="4"/>
+    <rect x="26" y="51" width="40" height="8" rx="4"/>
+    <rect x="26" y="69" width="40" height="8" rx="4"/>
+    <rect x="26" y="87" width="40" height="8" rx="4"/>
+  </g>
+  <g fill="#f05aa8">
+    <rect x="76" y="33" width="26" height="8" rx="4"/>
+    <rect x="76" y="51" width="26" height="8" rx="4"/>
+    <rect x="76" y="69" width="26" height="8" rx="4"/>
+    <rect x="76" y="87" width="10" height="8" rx="4"/>
+  </g>
+  <g fill="#ffffff">
+    <rect x="68" y="22" width="4" height="84" rx="1"/>
+    <rect x="62" y="18" width="16" height="4" rx="2"/>
+    <rect x="62" y="106" width="16" height="4" rx="2"/>
+  </g>
+</g>
+</g>
+<text x="896" y="269" font-size="30" font-weight="700" letter-spacing="-1.3" textLength="210" lengthAdjust="spacingAndGlyphs" fill="#ffffff" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif">watermark-remover</text>
+<text x="64" y="398" font-size="13" fill="#5f6a74" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif">Tile mark (app icon, favicon)</text>
+<text x="424" y="398" font-size="13" fill="#5f6a74" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif">Flat mark on light</text>
+<text x="784" y="398" font-size="13" fill="#5f6a74" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif">Lockup on navy</text>
+<rect x="64" y="420" width="336" height="112" rx="18" fill="#0a2026" stroke="#0d151b" stroke-opacity=".08"/><text x="84" y="458" font-size="18" font-weight="600" fill="#ffffff" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif">Navy</text><text x="84" y="484" font-size="15" fill="#ffffff" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">#0a2026</text><text x="84" y="512" font-size="13" fill="#ffffff" fill-opacity=".85" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif">Brand tile, primary buttons, active state</text><rect x="424" y="420" width="336" height="112" rx="18" fill="#0d151b" stroke="#0d151b" stroke-opacity=".08"/><text x="444" y="458" font-size="18" font-weight="600" fill="#ffffff" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif">Ink</text><text x="444" y="484" font-size="15" fill="#ffffff" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">#0d151b</text><text x="444" y="512" font-size="13" fill="#ffffff" fill-opacity=".85" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif">Headings and body text</text><rect x="784" y="420" width="336" height="112" rx="18" fill="#5f6a74" stroke="#0d151b" stroke-opacity=".08"/><text x="804" y="458" font-size="18" font-weight="600" fill="#ffffff" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif">Muted</text><text x="804" y="484" font-size="15" fill="#ffffff" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">#5f6a74</text><text x="804" y="512" font-size="13" fill="#ffffff" fill-opacity=".85" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif">Secondary text (4.5:1 on the shell)</text><rect x="64" y="552" width="336" height="112" rx="18" fill="#eef2f4" stroke="#0d151b" stroke-opacity=".08"/><text x="84" y="590" font-size="18" font-weight="600" fill="#0d151b" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif">Shell</text><text x="84" y="616" font-size="15" fill="#0d151b" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">#eef2f4</text><text x="84" y="644" font-size="13" fill="#0d151b" fill-opacity=".85" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif">Page background</text><rect x="424" y="552" width="336" height="112" rx="18" fill="#a3176f" stroke="#0d151b" stroke-opacity=".08"/><text x="444" y="590" font-size="18" font-weight="600" fill="#ffffff" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif">Mark</text><text x="444" y="616" font-size="15" fill="#ffffff" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">#a3176f</text><text x="444" y="644" font-size="13" fill="#ffffff" fill-opacity=".85" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif">Hidden marks on light surfaces only</text><rect x="784" y="552" width="336" height="112" rx="18" fill="#f05aa8" stroke="#0d151b" stroke-opacity=".08"/><text x="804" y="590" font-size="18" font-weight="600" fill="#0a2026" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif">Mark lit</text><text x="804" y="616" font-size="15" fill="#0a2026" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">#f05aa8</text><text x="804" y="644" font-size="13" fill="#0a2026" fill-opacity=".85" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif">Live marks on navy</text><rect x="64" y="684" width="336" height="112" rx="18" fill="#234049" stroke="#0d151b" stroke-opacity=".08"/><text x="84" y="722" font-size="18" font-weight="600" fill="#ffffff" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif">Residue</text><text x="84" y="748" font-size="15" fill="#ffffff" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">#234049</text><text x="84" y="776" font-size="13" fill="#ffffff" fill-opacity=".85" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif">Cleaned residue on navy</text><rect x="424" y="684" width="336" height="112" rx="18" fill="#2589ff" stroke="#0d151b" stroke-opacity=".08"/><text x="444" y="722" font-size="18" font-weight="600" fill="#ffffff" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif">Blue</text><text x="444" y="748" font-size="15" fill="#ffffff" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">#2589ff</text><text x="444" y="776" font-size="13" fill="#ffffff" fill-opacity=".85" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif">Progress bars and focus</text><rect x="784" y="684" width="336" height="112" rx="18" fill="#2ab46c" stroke="#0d151b" stroke-opacity=".08"/><text x="804" y="722" font-size="18" font-weight="600" fill="#0a2026" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif">Green</text><text x="804" y="748" font-size="15" fill="#0a2026" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">#2ab46c</text><text x="804" y="776" font-size="13" fill="#0a2026" fill-opacity=".85" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif">Removed, ready, verifiable</text>
+<text x="64" y="818" font-size="14" fill="#5f6a74" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif">Type: system UI sans (SF Pro, Segoe UI, Roboto), weights 520–700, tight tracking. Monospace only for file content and code points.</text>
+</svg>

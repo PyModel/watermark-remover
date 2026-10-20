@@ -25,13 +25,13 @@ ZWSP = "a​b"
 
 def _parse(argv: list[str]) -> CleanRequest:
     args = clean_file._build_parser().parse_args(argv)
-    return CleanRequest.from_args(args)
+    return clean_file.request_from_cli(args)
 
 
 # --- the argparse adapter must stay mechanical -------------------------------
 
 
-def test_from_args_covers_every_parser_destination():
+def test_request_from_cli_covers_every_parser_destination():
     """Any flag added to the parser must be carried on CleanRequest.
 
     Without this, a new flag silently reaches the CLI and never the TUI — the
@@ -139,6 +139,26 @@ def test_dropping_is_a_note_not_a_failure(monkeypatch):
     monkeypatch.delenv("WATERMARKS_REWRITE_BACKEND", raising=False)
     plan = build_clean_plan(CleanRequest(rewrite="humanize"), Path("out.png"), "image")
     assert plan.text.rewrite_plan is None
+
+
+def test_image_plan_composes_pixel_policy_fields() -> None:
+    request = CleanRequest(
+        visible_box=(1, 2, 3, 4),
+        visible_backend="simple",
+        degrade="jpeg",
+        remove_synthid=True,
+        synthid_strength=0.75,
+        wmct_marker=True,
+    )
+
+    plan = build_clean_plan(request, Path("output.png"), "image")
+
+    assert plan.pixel is not None
+    assert plan.pixel.visible is plan.visible
+    assert plan.pixel.degrade is plan.degrade
+    assert plan.pixel.remove_synthid is True
+    assert plan.pixel.synthid_strength == 0.75
+    assert plan.pixel.wmct_marker is True
 
 
 def test_markdown_run_reports_the_skipped_rewrite(tmp_path: Path):

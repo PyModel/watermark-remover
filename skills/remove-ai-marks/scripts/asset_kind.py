@@ -8,11 +8,16 @@ from typing import Literal, cast
 from container_meta import detect_container_format
 from image_meta import detect_format as detect_image_format
 
-AssetKind = Literal["text", "image", "container", "unknown"]
+AssetKind = Literal["text", "image", "container", "video", "unknown"]
 
 _IMAGE_EXTENSIONS = frozenset(
     {".png", ".jpg", ".jpeg", ".webp", ".avif", ".heic", ".heif", ".bmp", ".gif", ".tiff", ".tif"}
 )
+#: Video is its own processing family. It is deliberately absent from
+#: SUPPORTED_EXTENSIONS (the batch allow-list): a recursive run keeps selecting
+#: exactly what it selects today, and the video path joins that list with its
+#: own routing ticket.
+_VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".flv"})
 _CONTAINER_EXTENSIONS = frozenset(
     {
         ".svg",
@@ -47,8 +52,15 @@ _TEXT_EXTENSIONS = frozenset(
 )
 SUPPORTED_EXTENSIONS = _IMAGE_EXTENSIONS | _CONTAINER_EXTENSIONS | _TEXT_EXTENSIONS
 
+#: Kinds a caller may force (``forced_kind`` / ``--as``). Video is excluded
+#: until its plan exists: ``CleanPlan`` refuses a forced video too, so allowing it
+#: here would only route video bytes into the container cleaner by override.
 _ASSET_KINDS: tuple[AssetKind, ...] = ("text", "image", "container", "unknown")
 _SNIFF_BYTES = 4096  # HEIF brand detection scans at most the first 4 KiB.
+
+#: The EBML header that opens every Matroska and WebM file. Four bytes is the
+#: whole marker, so the video sniff adds no read beyond the bounded header.
+_MATROSKA_MAGIC = b"\x1a\x45\xdf\xa3"
 
 #: image_meta.detect_format values that route to the image pipeline. The
 #: HEIF/HEIC family is reported as "heif" (see heif_meta.detect_heif), never
@@ -67,12 +79,16 @@ def classify_bytes(data: bytes, suffix: str | None = None) -> AssetKind:
     ext = (suffix or "").lower()
     if ext in _IMAGE_EXTENSIONS:
         return "image"
+    if ext in _VIDEO_EXTENSIONS:
+        return "video"
     if ext in _CONTAINER_EXTENSIONS:
         return "container"
     if ext in _TEXT_EXTENSIONS:
         return "text"
     if detect_image_format(data) in _IMAGE_FORMAT_NAMES:
         return "image"
+    if data.startswith(_MATROSKA_MAGIC):
+        return "video"
     if data:
         sniff_path = Path("input") if not ext else Path(f"input{ext}")
         if detect_container_format(sniff_path, data) != "unknown":
@@ -85,6 +101,8 @@ def classify(path: Path) -> AssetKind:
     ext = path.suffix.lower()
     if ext in _IMAGE_EXTENSIONS:
         return "image"
+    if ext in _VIDEO_EXTENSIONS:
+        return "video"
     if ext in _CONTAINER_EXTENSIONS:
         return "container"
     if ext in _TEXT_EXTENSIONS:
@@ -93,6 +111,8 @@ def classify(path: Path) -> AssetKind:
         head = fh.read(CLASSIFY_HEADER_BYTES)
     if detect_image_format(head) in _IMAGE_FORMAT_NAMES:
         return "image"
+    if head.startswith(_MATROSKA_MAGIC):
+        return "video"
     if head:
         data = path.read_bytes() if head[:4] == b"PK" else head
         sniff_path = Path("input") if not ext else Path(f"input{ext}")
@@ -116,6 +136,8 @@ def classify_asset(path: Path, *, forced_kind: str = "auto") -> AssetKind:
     extension = path.suffix.lower()
     if extension in _IMAGE_EXTENSIONS:
         return "image"
+    if extension in _VIDEO_EXTENSIONS:
+        return "video"
     if extension in _CONTAINER_EXTENSIONS:
         return "container"
     if extension in _TEXT_EXTENSIONS:
@@ -125,6 +147,8 @@ def classify_asset(path: Path, *, forced_kind: str = "auto") -> AssetKind:
         prefix = source.read(_SNIFF_BYTES)
     if detect_image_format(prefix) in _IMAGE_FORMAT_NAMES:
         return "image"
+    if prefix.startswith(_MATROSKA_MAGIC):
+        return "video"
     if detect_container_format(path, prefix) != "unknown":
         return "container"
     # No extension names a known format and no magic matched: refuse unless

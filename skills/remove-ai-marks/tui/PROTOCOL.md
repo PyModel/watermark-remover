@@ -2,7 +2,7 @@
 
 `wm-tui` is two processes:
 
-- **The frontend** is TypeScript on Bun with OpenTUI and Solid, in this
+- **The frontend** is TypeScript on Bun with `@earendil-works/pi-tui`, in this
   directory. It owns the terminal.
 - **The bridge** is Python, in `scripts/tui_bridge.py`. It owns every decision
   about a clean.
@@ -12,7 +12,7 @@ stdin and stdout. The bridge is the only place a `CleanRequest` is built.
 Everything else in the frontend is presentation.
 
 ```
-wm-tui (python, scripts/tui.py)  ── validates argv, finds bun, execs ──▶  bun src/index.tsx
+wm-tui (python, scripts/tui.py)  ── validates argv, finds bun, execs ──▶  bun src/index.ts
                                                                             │ spawn
                                                                             ▼
                                         $WM_TUI_PYTHON $WM_TUI_BRIDGE  (scripts/tui_bridge.py)
@@ -62,11 +62,22 @@ CLI flag is valid here and the command preview is exact.
 ```json
 {
   "paths": ["drafts/", "notes.md"],
+  "clean_path": null,
   "preset": "hidden",
   "flags": ["--recursive", "--glob", "*.md"],
   "endpoint": {"backend": "ollama", "base_url": "http://127.0.0.1:11434", "model": "qwen3:14b"}
 }
 ```
+
+The TUI always sends `clean_path`: null means no file is marked; a string is
+one absolute path returned in `plan.files`. Space toggles/replaces the mark
+independently of the focused row. The bridge refuses a clean without a mark,
+with a malformed mark, or with a mark no longer in the discovered regular files.
+A marked plan keeps the discovery list, but its command, preflight, warnings,
+layer and confirmation gates describe only the marked file. `clean` runs only
+that file; `inspect` remains read-only inspection of discovery. Confirmation
+retries use the original immutable run state, not new selection/options.
+Clients that **omit** `clean_path` retain batch behavior; the TUI never omits it.
 
 `endpoint` has the same three keys everywhere: in `state`, in `hello.settings`,
 and in `save_settings`. Reasoning effort is set with
@@ -149,7 +160,7 @@ Returns:
 - **`warnings`.** Non-fatal problems with the options, such as a base URL that
   is malformed or not http(s).
 - **`preflight_error`.** What `clean_request.plan_work` would refuse for the
-  whole selection, such as an output collision or a binary file forced to
+  clean target (or legacy batch selection), such as an output collision or a binary file forced to
   text.
 - **`layer` and `result_class`.** The weakest layer the selected files will
   actually get: B if a text file is rewritten, else V if pixels change or text
@@ -193,11 +204,13 @@ one per affected line, and is empty for anything that is not read as text:
             "marks": [[5, 6, "ZWSP"], [21, 22, "RLO"]]}]
 ```
 
-- In `text`, each invisible or format codepoint is replaced by `◆`, which takes
-  one column. An excerpt is at most 100 columns and is centred on its first
-  mark. `…` marks the edge where it was cut.
-- Each entry in `marks` is `[start, end, short_name]`. The columns count into
-  `text`, and `end` is exclusive.
+- In `text`, each invisible or format code point is replaced by `◆`, which is
+  one code point (and one terminal column). An excerpt is at most 100 code
+  points and is centred on its first mark. `…` marks the edge where it was cut.
+- Each entry in `marks` is `[start, end, short_name]`, and `end` is exclusive.
+  Offsets are Unicode code-point indices into the emitted `text` (not UTF-16
+  code units, not bytes, and not terminal columns); a non-BMP character such
+  as U+1F600 counts as one.
 - Offsets come from `inspect_asset`'s `layer_a_hits[*].sample_offsets`.
 - `suspicious` is true when the raw report says so, or when
   `counts.hidden > 0`.
@@ -245,6 +258,10 @@ The candidates are the `WATERMARKS_REWRITE_*` endpoint first, then Ollama
 probes run in parallel through `layer_b_discovery.probe_backend` with
 `allow_remote=False`, so detection is loopback only.
 
+The picker also allows a manually entered loopback server URL and model ID,
+using Ollama or OpenAI-compatible. These values are saved per user; there is
+no fixed model, Pi authentication or cloud-model catalog. Probes send no document.
+
 ### `checks` `{}`
 
 Returns `{"checks": [{"name": "Python", "state": "OK", "good": true, "detail": "...", "fix": "", "optional": false}]}`. `state` is display text; `good` is what to test.
@@ -285,3 +302,11 @@ in-flight requests to answer first.
 - No API key in any output frame, including under a hostile
   `WATERMARKS_REWRITE_API_KEY`.
 - Results are labelled by layer, never by outcome.
+
+## Frontend operability notes
+
+`PI_TUI_WRITE_LOG` captures the raw ANSI stream the frontend terminal writes
+to stdout. Set it to a file path, or to an existing directory (a timestamped
+`tui-<date>-<pid>.log` is created there). Use it when a rendering bug needs
+the exact bytes the terminal received. It is not `WM_TUI_LOG`, which is the
+bridge stderr log named on the fatal screen.

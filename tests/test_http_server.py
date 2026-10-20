@@ -105,6 +105,8 @@ def test_openapi_spec_covers_all_endpoints(conn):
         "/inspect": {"post"},
         "/clean": {"post"},
         "/detect": {"post"},
+        "/rewrite": {"post"},
+        "/visible": {"post"},
     }
     for path, methods in expected.items():
         assert path in body["paths"]
@@ -336,6 +338,145 @@ def test_oversized_body_413(conn, monkeypatch):
     assert status == 413
 
 
+def test_executor_failure_is_a_sanitized_500(conn, monkeypatch):
+    """An executor error payload is internal, not a client-visible 400.
+
+    Only planner/preflight refusals (ValueError out of plan_work) are client
+    errors; an error payload from execute must map back to the sanitized 500.
+    """
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        from pathlib import Path
+
+        from clean_pipeline import ItemResult, RunResult
+
+        payload = {
+            "kind": "unknown",
+            "error": "s3cr3t internal detail: /tmp/wm-clean-xyz/path.py:1",
+            "exit_code": 1,
+        }
+        return RunResult(
+            (ItemResult(path=Path("note.txt"), output=Path("out.txt"), payload=payload),),
+            False,
+        )
+
+    monkeypatch.setattr(server, "execute", _boom)
+    status, body = _post(
+        conn, "/clean", {"file": _b64("Hello\u200bWorld!".encode()), "name": "note.txt"}
+    )
+    assert status == 500
+    assert body == {"ok": False, "error": "internal error"}
+    assert "s3cr3t" not in json.dumps(body)
+
+
+def test_clean_refuses_oversized_input_like_the_cli(conn, monkeypatch):
+    """The plan path's input cap gates /clean exactly as it gates the CLI.
+
+    A body under the HTTP cap can still decode to a file the planner refuses;
+    the direct-cleaning path this endpoint used to run had no size check, so a
+    request like this cleaned fine where ``wm`` would have refused.
+    """
+    import clean_request
+
+    monkeypatch.setattr(clean_request, "MAX_INPUT_BYTES", 64)
+    data = b"x" * 200
+    status, body = _post(conn, "/clean", {"file": _b64(data), "name": "x.txt"})
+    assert status == 400
+    assert "refusing input larger than 64 bytes" in body["error"]
+
+
+def test_clean_refuses_oversized_input_with_layer_a_skipped(conn, monkeypatch):
+    """The also_layer_a_text=False container branch inherits the shared preflight.
+
+    It used to call clean_container directly, skipping plan_work: a body under
+    the HTTP cap that decodes over the input cap cleaned with 200 where every
+    other branch returns the planner's refusal.
+    """
+    import clean_request
+
+    monkeypatch.setattr(clean_request, "MAX_INPUT_BYTES", 64)
+    data = (ROOT / "tests" / "fixtures" / "sample_ai.md").read_bytes()
+    assert len(data) > 64
+    status, body = _post(
+        conn,
+        "/clean",
+        {"file": _b64(data), "name": "note.md", "options": {"also_layer_a_text": False}},
+    )
+    assert status == 400
+    assert "refusing input larger than 64 bytes" in body["error"]
+
+
+def test_clean_container_layer_a_skip_still_honored_after_preflight(conn):
+    """Under the cap, also_layer_a_text=False keeps skipping the Layer-A scrub.
+
+    The branch now clears plan_work before cleaning; the option must keep its
+    meaning — the hidden text survives — where the default branch still scrubs
+    it. This pins the executor gap the direct clean_container call exists for:
+    the canonical plan cannot express the skip, so folding this branch's
+    execution into run_clean_item would silently run the scrub.
+    """
+    data = "---\ngenerator: Claude\n---\n\nhidden\u200bmark\n".encode("utf-8")
+    status, skipped = _post(
+        conn,
+        "/clean",
+        {"file": _b64(data), "name": "note.md", "options": {"also_layer_a_text": False}},
+    )
+    assert status == 200
+    assert skipped["kind"] == "container"
+    cleaned = base64.b64decode(skipped["cleaned"]).decode("utf-8")
+    assert "\u200b" in cleaned  # Layer-A text scrub skipped
+    assert "generator: Claude" not in cleaned  # metadata layer still ran
+    status, default = _post(conn, "/clean", {"file": _b64(data), "name": "note.md"})
+    assert status == 200
+    assert "\u200b" not in base64.b64decode(default["cleaned"]).decode("utf-8")
+
+
+def test_clean_text_report_key_order(conn):
+    status, body = _post(
+        conn, "/clean", {"file": _b64("Hello\u200bWorld\u00ad!".encode()), "name": "note.txt"}
+    )
+    assert status == 200
+    assert list(body["report"]) == ["kind", "stats", "length"]
+
+
+def test_clean_image_report_key_order(conn):
+    status, body = _post(conn, "/clean", {"file": _b64(_watermarked_png()), "name": "shot.png"})
+    assert status == 200
+    assert list(body["report"]) == [
+        "kind",
+        "format",
+        "actions",
+        "action_details",
+        "bytes_in",
+        "bytes_out",
+        "still_has_c2pa",
+        "still_has_ai_metadata",
+        "post_findings",
+        "synthid_before",
+        "synthid_after",
+        "synthid_removal",
+        "wmct_marker",
+    ]
+
+
+def test_clean_container_report_key_order(conn):
+    data = (ROOT / "tests" / "fixtures" / "sample_ai.md").read_bytes()
+    status, body = _post(conn, "/clean", {"file": _b64(data), "name": "note.md"})
+    assert status == 200
+    assert list(body["report"]) == [
+        "kind",
+        "format",
+        "actions",
+        "action_details",
+        "bytes_in",
+        "bytes_out",
+        "still_has_c2pa",
+        "still_has_ai_metadata",
+        "post_findings",
+        "meta",
+    ]
+
+
 def test_auth_required(conn, monkeypatch):
     monkeypatch.setattr(server, "API_KEY", "sekret")
     status, _ = _post(conn, "/health", {"anything": 1})
@@ -366,3 +507,290 @@ def test_capabilities_survives_an_unparseable_remote_opt_in(monkeypatch):
     report = server.capabilities()
     assert report["layer_b"]["endpoint_allowed"] is False
     assert report["layer_b"]["loopback"] is False
+
+
+@pytest.fixture
+def web_root(tmp_path, monkeypatch):
+    (tmp_path / "index.html").write_text("<!doctype html><title>wm</title>", encoding="utf-8")
+    (tmp_path / "index-abc.js").write_text("console.log(1)", encoding="utf-8")
+    (tmp_path / "secret.py").write_text("x = 1", encoding="utf-8")
+    monkeypatch.setattr(server, "WEB_ROOT", tmp_path)
+    return tmp_path
+
+
+def _get_raw(conn, path, headers=None):
+    conn.request("GET", path, headers=headers or {})
+    resp = conn.getresponse()
+    return resp.status, dict(resp.getheaders()), resp.read()
+
+
+def test_web_ui_is_served_with_a_self_only_csp(conn, web_root):
+    status, headers, body = _get_raw(conn, "/")
+    assert status == 200
+    assert headers["Content-Type"] == "text/html; charset=utf-8"
+    assert "connect-src 'self'" in headers["Content-Security-Policy"]
+    assert headers["X-Content-Type-Options"] == "nosniff"
+    assert body.startswith(b"<!doctype html>")
+    status, headers, _ = _get_raw(conn, "/index-abc.js")
+    assert status == 200
+    assert headers["Content-Type"].startswith("text/javascript")
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/../scripts/server.py",
+        "/a/../index.html",
+        "/.env",
+        "/secret.py",
+        "/missing.js",
+        "/..\\x.js",
+        "/C:index.html",
+        "",
+    ],
+)
+def test_static_file_never_leaves_the_build(web_root, path):
+    assert server.static_file(path) is None
+
+
+def test_web_ui_skips_auth_but_the_api_does_not(conn, web_root, monkeypatch):
+    monkeypatch.setattr(server, "API_KEY", "k" * 16)
+    status, _, _ = _get_raw(conn, "/")
+    assert status == 200
+    status, _, _ = _get_raw(conn, "/capabilities")
+    assert status == 401
+
+
+def test_unbuilt_web_ui_says_how_to_build_it(conn, tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "WEB_ROOT", tmp_path / "dist")
+    status, body = _get(conn, "/")
+    assert status == 404
+    assert "bun run build" in body["error"]
+
+
+def _striped_png(width=64, height=64):
+    """A gray image with a white block in the middle: something to inpaint."""
+    rows = b""
+    for y in range(height):
+        row = bytearray(b"\x00")
+        for x in range(width):
+            value = 255 if 8 <= x < 16 and 8 <= y < 16 else 90 + (x * 3 + y) % 20
+            row += bytes((value, value, value))
+        rows += bytes(row)
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", ihdr)
+        + _png_chunk(b"IDAT", zlib.compress(rows))
+        + _png_chunk(b"IEND", b"")
+    )
+
+
+def test_rewrite_unconfigured_names_the_setting(conn, monkeypatch):
+    monkeypatch.delenv("WATERMARKS_REWRITE_BACKEND", raising=False)
+    status, body = _post(
+        conn, "/rewrite", {"file": _b64(b"Hello there."), "name": "a.txt", "strength": "paraphrase"}
+    )
+    assert status == 400
+    assert "WATERMARKS_REWRITE_BACKEND" in body["error"]
+
+
+@pytest.mark.parametrize("field", ["base_url", "model", "api_key", "allow_remote", "backend"])
+def test_rewrite_refuses_caller_chosen_endpoint(conn, field):
+    status, body = _post(
+        conn,
+        "/rewrite",
+        {"file": _b64(b"Hi."), "name": "a.txt", "strength": "paraphrase", field: "x"},
+    )
+    assert status == 400
+    assert field in body["error"]
+
+
+def test_rewrite_rejects_unknown_strength(conn):
+    status, _ = _post(conn, "/rewrite", {"file": _b64(b"Hi."), "name": "a.txt", "strength": "nope"})
+    assert status == 400
+
+
+def test_visible_inpaints_inside_the_box(conn):
+    data = _striped_png()
+    status, body = _post(
+        conn, "/visible", {"file": _b64(data), "name": "a.png", "box": [8, 8, 8, 8]}
+    )
+    assert status == 200, body
+    out = base64.b64decode(body["cleaned"])
+    assert out.startswith(b"\x89PNG")
+    assert out != data
+    assert body["report"]["status"] == "completed"
+    assert "mask" not in body["report"] and "output" not in body["report"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"box": [0, 0, 0, 4]},
+        {"box": [0, 0, 4]},
+        {"box": [0, 0, 4, True]},
+        {"box": [0, 0, 4, 4], "backend": "external"},
+        {"box": [0, 0, 4, 4], "command": "rm -rf /"},
+    ],
+)
+def test_visible_rejects_bad_requests(conn, payload):
+    status, _ = _post(conn, "/visible", {"file": _b64(_striped_png()), "name": "a.png", **payload})
+    assert status == 400
+
+
+def test_visible_rejects_non_images(conn):
+    status, _ = _post(
+        conn, "/visible", {"file": _b64(b"text"), "name": "a.txt", "box": [0, 0, 1, 1]}
+    )
+    assert status == 400
+
+
+@pytest.mark.parametrize("name", ["cleaned.png", "out.png", "out", "input"])
+def test_visible_output_never_aliases_the_upload_name(conn, name):
+    status, body = _post(
+        conn, "/visible", {"file": _b64(_striped_png()), "name": name, "box": [8, 8, 8, 8]}
+    )
+    assert status == 200, body
+
+
+# ---------- deployment guards (DNS rebinding, CSRF, rate, jobs, public mode) ----------
+
+
+def _post_with(conn, path, payload, headers):
+    conn.request(
+        "POST",
+        path,
+        body=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", **headers},
+    )
+    resp = conn.getresponse()
+    data = resp.read()
+    return resp.status, json.loads(data) if data else {}, dict(resp.getheaders())
+
+
+TEXT = {"file": _b64(b"Hi\xe2\x80\x8b there"), "name": "a.txt"}
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        ("127.0.0.1:8765", "127.0.0.1"),
+        ("LocalHost", "localhost"),
+        ("[::1]:8765", "::1"),
+        ("::1", "::1"),
+        (None, ""),
+    ],
+)
+def test_host_name(header, expected):
+    assert server.host_name(header) == expected
+
+
+def test_unknown_host_is_refused(conn, monkeypatch):
+    # A DNS-rebinding page reaches a loopback server under its own hostname.
+    monkeypatch.setattr(server, "ALLOWED_HOSTS", frozenset({"wm.example"}))
+    status, _, _ = _post_with(conn, "/inspect", TEXT, {"Host": "evil.example"})
+    assert status == 421
+    status, _, _ = _post_with(conn, "/inspect", TEXT, {"Host": "wm.example"})
+    assert status == 200
+
+
+def test_cross_origin_post_is_refused(conn):
+    host = f"127.0.0.1:{conn.port}"
+    status, body, _ = _post_with(conn, "/clean", TEXT, {"Origin": "https://evil.example"})
+    assert status == 403 and "cross-origin" in body["error"]
+    status, _, _ = _post_with(conn, "/clean", TEXT, {"Origin": f"http://{host}"})
+    assert status == 200
+
+
+def test_rate_limiter_refills_over_time():
+    limiter = server.RateLimiter(2)
+    assert limiter.allow("a", now=0) and limiter.allow("a", now=0)
+    assert not limiter.allow("a", now=0)
+    assert limiter.allow("b", now=0)  # per client
+    assert limiter.allow("a", now=30)  # one token back after half a minute
+
+
+def test_rate_limit_answers_429_with_retry_after(conn, monkeypatch):
+    monkeypatch.setattr(server, "RATE_LIMITER", server.RateLimiter(1))
+    assert _post_with(conn, "/inspect", TEXT, {})[0] == 200
+    status, _, headers = _post_with(conn, "/inspect", TEXT, {})
+    assert status == 429 and headers["Retry-After"] == "60"
+
+
+def test_busy_server_answers_503(conn, monkeypatch):
+    monkeypatch.setattr(server, "JOBS", threading.BoundedSemaphore(1))
+    assert server.JOBS.acquire(blocking=False)  # one job already running
+    status, _, headers = _post_with(conn, "/inspect", TEXT, {})
+    assert status == 503 and headers["Retry-After"] == "5"
+    server.JOBS.release()
+    assert _post_with(conn, "/inspect", TEXT, {})[0] == 200
+
+
+def test_trusted_proxy_uses_the_last_forwarded_hop(monkeypatch):
+    monkeypatch.setattr(server, "TRUST_PROXY", True)
+    handler = server.Handler.__new__(server.Handler)
+    handler.client_address = ("10.0.0.1", 1)
+    handler.headers = {"X-Forwarded-For": "6.6.6.6, 203.0.113.9"}
+    assert handler._client() == "203.0.113.9"
+    monkeypatch.setattr(server, "TRUST_PROXY", False)
+    assert handler._client() == "10.0.0.1"
+
+
+def test_public_mode_turns_off_paid_endpoints(conn, monkeypatch):
+    monkeypatch.setattr(server, "PUBLIC", True)
+    for path in ("/rewrite", "/detect"):
+        status, body, _ = _post_with(conn, path, {**TEXT, "strength": "paraphrase"}, {})
+        assert status == 403 and "turned off" in body["error"]
+    status, body, _ = _post_with(conn, "/inspect", {**TEXT, "detect": True}, {})
+    assert status == 400 and "turned off" in body["error"]
+    status, body, _ = _post_with(conn, "/clean", {**TEXT, "options": {"detect_after": True}}, {})
+    assert status == 400 and "turned off" in body["error"]
+    assert _post_with(conn, "/clean", TEXT, {})[0] == 200
+    status, caps = _get(conn, "/capabilities")
+    assert caps["public"] is True and caps["disabled"] == ["rewrite", "detect"]
+    assert caps["max_input_bytes"] == server.MAX_INPUT_BYTES
+
+
+def test_api_key_comparison_rejects_near_misses(conn, monkeypatch):
+    monkeypatch.setattr(server, "API_KEY", "sekret")
+    for value in ("Bearer sekre", "Bearer sekrett", "bearer sekret", ""):
+        assert _post_with(conn, "/inspect", TEXT, {"Authorization": value})[0] == 401
+    assert _post_with(conn, "/inspect", TEXT, {"Authorization": "Bearer sekret"})[0] == 200
+
+
+@pytest.fixture
+def policy(monkeypatch):
+    for name in ("PUBLIC", "ALLOWED_HOSTS", "RATE_LIMITER", "TRUST_PROXY"):
+        monkeypatch.setattr(server, name, getattr(server, name))
+    for var in (
+        "WATERMARKS_SERVER_PUBLIC",
+        "WATERMARKS_SERVER_ALLOWED_HOSTS",
+        "WATERMARKS_SERVER_RATE_LIMIT",
+        "WATERMARKS_SERVER_TRUST_PROXY",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    return monkeypatch
+
+
+def test_loopback_bind_answers_only_to_loopback_names(policy):
+    server.configure_policy("127.0.0.1")
+    assert {"127.0.0.1", "localhost", "::1"} == server.ALLOWED_HOSTS
+    assert not server.PUBLIC and server.RATE_LIMITER.per_minute == 0
+
+
+def test_open_bind_answers_any_host_unless_configured(policy):
+    server.configure_policy("192.0.2.10")
+    assert frozenset() == server.ALLOWED_HOSTS
+    policy.setenv("WATERMARKS_SERVER_ALLOWED_HOSTS", "WM.example.com, healthcheck.railway.app")
+    server.configure_policy("192.0.2.10")
+    assert {"wm.example.com", "healthcheck.railway.app"} == server.ALLOWED_HOSTS
+
+
+def test_public_policy_defaults(policy):
+    policy.setenv("WATERMARKS_SERVER_PUBLIC", "1")
+    server.configure_policy("192.0.2.10")
+    assert server.PUBLIC and server.TRUST_PROXY and server.RATE_LIMITER.per_minute == 30
+    policy.setenv("WATERMARKS_SERVER_RATE_LIMIT", "5")
+    server.configure_policy("192.0.2.10")
+    assert server.RATE_LIMITER.per_minute == 5

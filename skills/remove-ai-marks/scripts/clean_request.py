@@ -33,10 +33,18 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from asset_kind import SUPPORTED_EXTENSIONS, AssetKind, classify_asset
-from batch_inputs import InputItem, InputSelection, safe_output_path, select_inputs
+from batch_inputs import (
+    BATCH_MODES,
+    InputItem,
+    InputSelection,
+    safe_output_path,
+    select_inputs,
+)
 from clean_asset import (
     CleanPlan,
     ImageDegradePlan,
+    ImagePixelPlan,
+    InvisiblePlan,
     TextCleanPlan,
 )
 from common import (
@@ -51,6 +59,7 @@ from common import (
 from morphomod import DEFAULT_DILATION_RADIUS, VisiblePlan
 from perturb_text import MODES as PERTURB_MODES
 from rewrite_text import REWRITE_STRENGTHS, RewritePlan
+from video import VISIBLE_VIDEO_MARKS, VideoPlan, video_runtime, video_runtime_hint
 
 #: Layer B strengths that ``--rewrite`` accepts.  ``tsapa`` is included so
 #: ``--rewrite tsapa`` and the older ``--tsapa`` flag mean the same thing.
@@ -91,6 +100,10 @@ class CleanRequest:
     recursive: bool = False
     glob: str = "*"
     extensions: str | None = None
+    # The batch ``--mode`` as given; ``clean_file.request_from_cli`` has
+    # already translated it into the stage fields below, so it is carried for
+    # ``command_line`` and the batch summary only.
+    mode: str | None = None
 
     # --- routing ---------------------------------------------------------
     force_type: str = "auto"
@@ -103,6 +116,9 @@ class CleanRequest:
 
     # --- Layer M: metadata ----------------------------------------------
     keep_non_ai_metadata: bool = False
+    also_layer_a_text: bool = True
+    detect_before: bool = False
+    detect_after: bool = False
     soft_binding: bool = False
 
     # --- Layer B: LLM rewrite -------------------------------------------
@@ -135,6 +151,11 @@ class CleanRequest:
     visible_mask: Path | None = None
     visible_box: tuple[int, int, int, int] | None = None
     detect_command: str | None = None
+    #: Registry-driven localization: "auto" or a single mark key. None keeps the
+    #: explicit-mask behavior byte-for-byte.
+    mark: str | None = None
+    #: Trust policy for the registry pass; only consulted when ``mark`` is set.
+    sensitivity: str = "auto"
     dilate: int | None = None
     visible_backend: str = "texture"
     inpaint_command: str | None = None
@@ -154,6 +175,9 @@ class CleanRequest:
     synthid_strength: float = 0.6
     wmct_marker: bool = False
 
+    # --- humanize post-stage ---------------------------------------------
+    humanize: bool = False
+
     # --- reporting -------------------------------------------------------
     keep_artifacts: bool = False
     quiet: bool = False
@@ -169,6 +193,18 @@ class CleanRequest:
             raise ValueError(f"unknown rewrite strength: {self.rewrite}")
         if self.char_mode not in PERTURB_MODES:
             raise ValueError(f"unknown perturb mode: {self.char_mode}")
+        if self.mode is not None and self.mode not in BATCH_MODES:
+            raise ValueError(f"unknown batch mode: {self.mode}")
+        if self.mark is not None:
+            from watermark_registry import mark_keys, validate_sensitivity
+
+            validate_sensitivity(self.sensitivity)
+            # A video-only mark (sora, veo, ...) is checked against the video
+            # engine's own list.
+            if self.mark not in ("auto", *mark_keys(), *VISIBLE_VIDEO_MARKS):
+                raise ValueError(
+                    f"unknown mark {self.mark!r}; expected 'auto', a registry key, or a video mark"
+                )
         if (
             isinstance(self.timeout, bool)
             or not isinstance(self.timeout, (int, float))
@@ -189,66 +225,6 @@ class CleanRequest:
         if self.rewrite is not None:
             return self.rewrite
         return "tsapa" if self.tsapa else None
-
-    @classmethod
-    def from_args(cls, args) -> CleanRequest:
-        """Adapt an argparse ``Namespace`` from ``clean_file._build_parser``."""
-        paths = tuple(getattr(args, "path", ()) or ())
-        return cls(
-            paths=paths,
-            output=args.output,
-            in_place=args.in_place,
-            recursive=args.recursive,
-            glob=args.glob,
-            extensions=args.extensions,
-            force_type=args.force_type,
-            force_text=args.force_text,
-            nfkc=args.nfkc,
-            aggressive_homoglyphs=args.aggressive_homoglyphs,
-            strip_semantic_format=args.strip_semantic_format,
-            keep_non_ai_metadata=args.keep_non_ai_metadata,
-            soft_binding=args.soft_binding,
-            rewrite=args.rewrite,
-            rewrite_backend=args.rewrite_backend,
-            rewrite_model=args.rewrite_model,
-            rewrite_base_url=args.rewrite_base_url,
-            rewrite_lang=args.rewrite_lang,
-            rewrite_original_lang=args.rewrite_original_lang,
-            rewrite_timeout=args.rewrite_timeout,
-            rewrite_temperature=args.rewrite_temperature,
-            rewrite_candidates=args.rewrite_candidates,
-            rewrite_reasoning_effort=args.rewrite_reasoning_effort,
-            rewrite_disable_thinking=args.rewrite_disable_thinking,
-            rewrite_allow_remote=args.rewrite_allow_remote,
-            tsapa=args.tsapa,
-            tsapa_generations=args.tsapa_generations,
-            tsapa_population=args.tsapa_population,
-            char_perturb=args.char_perturb,
-            char_mode=args.char_mode,
-            char_strength=args.char_strength,
-            seed=args.seed,
-            visible_mask=args.visible_mask,
-            visible_box=args.visible_box,
-            detect_command=args.detect_command,
-            dilate=args.dilate,
-            visible_backend=args.visible_backend,
-            inpaint_command=args.inpaint_command,
-            visible_prompt=args.visible_prompt,
-            quality=args.quality,
-            dry_run=args.dry_run,
-            timeout=args.timeout,
-            degrade=args.degrade,
-            morpho=args.morpho,
-            degrade_strength=args.degrade_strength,
-            degrade_seed=args.degrade_seed,
-            remove_synthid=args.remove_synthid,
-            synthid_strength=args.synthid_strength,
-            wmct_marker=args.wmct_marker,
-            keep_artifacts=args.keep_artifacts,
-            quiet=args.quiet,
-            json=args.json,
-            audit=args.audit,
-        )
 
     def with_paths(self, paths: Sequence[Path]) -> CleanRequest:
         return replace(self, paths=tuple(paths))
@@ -271,6 +247,7 @@ class CleanRequest:
                 self.visible_mask,
                 self.visible_box,
                 self.detect_command,
+                self.mark is not None,
                 self.dilate is not None,
                 self.inpaint_command,
                 self.visible_backend != "texture",
@@ -309,6 +286,7 @@ class CleanRequest:
             ("--char-perturb", self.char_perturb),
             ("--remove-synthid", self.remove_synthid),
             ("--wmct-marker", self.wmct_marker),
+            ("--humanize", self.humanize),
             ("--keep-artifacts", self.keep_artifacts),
             ("--quiet", self.quiet),
             ("--dry-run", self.dry_run),
@@ -319,6 +297,8 @@ class CleanRequest:
             argv += ["--glob", self.glob]
         if self.extensions:
             argv += ["--extensions", self.extensions]
+        if self.mode is not None:
+            argv += ["--mode", self.mode]
         if self.force_type != "auto":
             argv += ["--as", self.force_type]
         if self.force_text:
@@ -365,6 +345,10 @@ class CleanRequest:
             argv += ["--visible-box", ",".join(str(v) for v in self.visible_box)]
         if self.detect_command:
             argv += ["--detect-command", self.detect_command]
+        if self.mark is not None:
+            argv += ["--mark", self.mark]
+            if self.sensitivity != "auto":
+                argv += ["--sensitivity", self.sensitivity]
         if self.dilate is not None:
             argv += ["--dilate", str(self.dilate)]
         if self.visible_backend != "texture":
@@ -463,16 +447,76 @@ def describe_dropped_text_transforms(
     )
 
 
+#: The video runtime a video asset needs before it can be planned. The
+#: canonical check lives in ``video.py`` beside the module that consumes it;
+#: this name is kept because the demo and the planning step import it here.
+
+
+def missing_video_runtime() -> tuple[str, ...]:
+    """The absent video-runtime pieces, executables first, in a stable order."""
+    return video_runtime()
+
+
+def _video_visible_plan(request: CleanRequest):
+    """The visible-video pass *request* asks for, or None.
+
+    Only an explicit localization source is a visible request on a video: a
+    detection-driven ``--mark``, or a region the operator named as
+    ``--visible-mask`` or ``--visible-box``. The image-only visible knobs
+    (``--dilate``/``--inpaint-command``) do not on their own name a region, so
+    they are refused rather than silently doing nothing. Returns the
+    ``VisibleVideoPlan`` type only through a deferred import: the visible engine
+    needs OpenCV, and a metadata-only clean must not pull it in.
+    """
+    from video_visible import VISIBLE_FILL_BACKENDS, VisibleVideoPlan
+
+    if request.mark is None and request.visible_mask is None and request.visible_box is None:
+        if request.visible_requested():
+            raise ValueError(
+                "visible cleaning needs --mark, --visible-mask, or --visible-box on a "
+                "video; --dilate/--inpaint-command/--visible-backend alone name no region"
+            )
+        return None
+    if request.visible_backend in VISIBLE_FILL_BACKENDS:
+        backend = request.visible_backend
+    elif request.visible_backend in ("texture", "simple"):
+        # The image vocabulary's texture/simple passes have no video equivalent;
+        # cv2 is the same classical floor the video plan defaults to.
+        backend = "cv2"
+    else:
+        raise ValueError(
+            f"--visible-backend {request.visible_backend!r} has no video equivalent; "
+            f"use one of {', '.join(VISIBLE_FILL_BACKENDS)}"
+        )
+    return VisibleVideoPlan(
+        mark=request.mark,
+        mask_path=request.visible_mask,
+        box=request.visible_box,
+        backend=backend,
+    )
+
+
 def build_clean_plan(request: CleanRequest, dest: Path, kind: AssetKind) -> CleanPlan:
     """Compose the immutable ``CleanPlan`` for one asset."""
+    if kind == "video":
+        # This ticket's half of the video routing contract: no video asset
+        # reaches a write without its runtime. The plan section itself is built
+        # behind the same gate, metadata-only by default.
+        missing = missing_video_runtime()
+        if missing:
+            raise ValueError(video_runtime_hint(missing))
     if (request.degrade or request.morpho) and kind != "image":
         raise ValueError("--degrade/--morpho are only valid for image assets")
+    if request.humanize and kind != "image":
+        raise ValueError("--humanize is only valid for image assets")
     if request.dry_run:
         if kind != "image":
             raise ValueError("--dry-run is only valid for image assets")
-        if not any((request.visible_mask, request.visible_box, request.detect_command)):
+        if not any(
+            (request.visible_mask, request.visible_box, request.detect_command, request.mark)
+        ):
             raise ValueError(
-                "--dry-run requires --visible-mask, --visible-box, or --detect-command"
+                "--dry-run requires --visible-mask, --visible-box, --detect-command, or --mark"
             )
 
     text_plan = TextCleanPlan()
@@ -499,6 +543,8 @@ def build_clean_plan(request: CleanRequest, dest: Path, kind: AssetKind) -> Clea
             mask_path=request.visible_mask,
             box=request.visible_box,
             detect_command=request.detect_command,
+            mark=request.mark,
+            sensitivity=request.sensitivity,
             backend=backend,
             command=request.inpaint_command,
             dilation_radius=(
@@ -523,17 +569,43 @@ def build_clean_plan(request: CleanRequest, dest: Path, kind: AssetKind) -> Clea
                 seed=request.degrade_seed,
             )
 
+    pixel_plan = None
+    if kind == "image":
+        pixel_plan = ImagePixelPlan(
+            visible=visible_plan,
+            degrade=degrade_plan,
+            remove_synthid=request.remove_synthid,
+            synthid_strength=request.synthid_strength,
+            wmct_marker=request.wmct_marker,
+            external_backend=None,
+        )
+
+    video_plan = None
+    if kind == "video":
+        video_plan = VideoPlan(visible=_video_visible_plan(request))
+
+    # The invisible-watermark stage is available on every image clean and is
+    # gated at execution time by whether the file actually carries a target, so
+    # nothing here has to open the pixels.
+    invisible_plan = InvisiblePlan() if kind == "image" else None
+
     return CleanPlan(
         forced_kind=kind,
         in_place=request.in_place,
         text=text_plan,
         strip_all_metadata=not request.keep_non_ai_metadata,
+        pixel=pixel_plan,
         visible=visible_plan,
         inspect_soft_binding=request.soft_binding,
         degrade=degrade_plan,
         remove_synthid=request.remove_synthid,
         synthid_strength=request.synthid_strength,
         wmct_marker=request.wmct_marker,
+        humanize=request.humanize,
+        humanize_seed=request.seed,
+        also_layer_a_text=request.also_layer_a_text,
+        video=video_plan,
+        invisible=invisible_plan,
     )
 
 

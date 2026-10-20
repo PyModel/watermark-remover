@@ -191,6 +191,50 @@ def print_human_report(
 
 def format_sarif(report: dict[str, Any]) -> dict[str, Any]:
     """Convert an aggregate audit report into OASIS SARIF 2.1.0 format."""
+    vendor_rules = (
+        # One rule per vendor/finding class so dashboards can triage them
+        # independently; keyed on distinctive lowercase finding text.
+        (
+            "tc260",
+            "AI-WATERMARK-TC260",
+            "Tc260AigcLabelDetected",
+            "China TC260 AIGC label detected",
+            "A China TC260 AIGC label (mandatory AI-content labeling) was detected in the asset metadata.",
+            ("provenance", "tc260", "aigc"),
+        ),
+        (
+            "samsung galaxy",
+            "AI-WATERMARK-SAMSUNG",
+            "SamsungGalaxyAiMarkerDetected",
+            "Samsung Galaxy AI edit marker detected",
+            "A Samsung Galaxy AI re-edit marker (PhotoEditor_Re_Edit_Data / genAIType) was detected.",
+            ("provenance", "samsung", "galaxy-ai"),
+        ),
+        (
+            "xai/grok",
+            "AI-WATERMARK-XAI",
+            "XaiSignaturePairDetected",
+            "xAI/Grok signature pair detected",
+            "The xAI/Grok provenance signature+UUID pair was detected in the asset metadata.",
+            ("provenance", "xai", "grok"),
+        ),
+        (
+            "iptc digital-source",
+            "AI-WATERMARK-IPTC",
+            "IptcDigitalSourceDetected",
+            "IPTC AI digital-source value detected",
+            "An IPTC digitalSourceType value that asserts AI generation or AI compositing was detected.",
+            ("provenance", "iptc", "digital-source"),
+        ),
+        (
+            "hf-job-id",
+            "AI-WATERMARK-HF-JOB",
+            "HiggsfieldJobHintDetected",
+            "Higgsfield hosting-job hint detected",
+            "An hf-job-id hosting-job UUID hint was detected in the asset metadata.",
+            ("provenance", "higgsfield", "job-hint"),
+        ),
+    )
     rules = [
         {
             "id": "AI-WATERMARK-C2PA",
@@ -237,6 +281,17 @@ def format_sarif(report: dict[str, Any]) -> dict[str, Any]:
             "properties": {"tags": ["stylometry", "ai-text"]},
         },
     ]
+    for _needle, id_, name, short, full, tags in vendor_rules:
+        rules.append(
+            {
+                "id": id_,
+                "name": name,
+                "shortDescription": {"text": short},
+                "fullDescription": {"text": full},
+                "defaultConfiguration": {"level": "warning"},
+                "properties": {"tags": list(tags)},
+            }
+        )
 
     results = []
     root_str = report.get("root", "")
@@ -261,16 +316,30 @@ def format_sarif(report: dict[str, Any]) -> dict[str, Any]:
             if "c2pa" in msg.lower() or "jumbf" in msg.lower() or item.get("has_c2pa"):
                 rule_id = "AI-WATERMARK-C2PA"
                 level = "error"
-            elif "layer-a" in msg.lower():
-                rule_id = "AI-WATERMARK-UNICODE-LAYER-A"
-                level = "warning" if conf in ("confirmed", "probable") else "note"
-            elif "stylometry" in msg.lower():
-                rule_id = "AI-STYLES-HIGH-PROBABILITY"
-                level = "note"
-            elif conf == "confirmed":
-                level = "error"
-            elif conf == "informational":
-                level = "note"
+            else:
+                lowered = msg.lower()
+                for needle, id_, _name, _short, _full, _tags in vendor_rules:
+                    if needle in lowered:
+                        rule_id = id_
+                        level = (
+                            "error"
+                            if conf == "confirmed"
+                            else "warning"
+                            if conf == "probable"
+                            else "note"
+                        )
+                        break
+                else:
+                    if "layer-a" in lowered:
+                        rule_id = "AI-WATERMARK-UNICODE-LAYER-A"
+                        level = "warning" if conf in ("confirmed", "probable") else "note"
+                    elif "stylometry" in lowered:
+                        rule_id = "AI-STYLES-HIGH-PROBABILITY"
+                        level = "note"
+                    elif conf == "confirmed":
+                        level = "error"
+                    elif conf == "informational":
+                        level = "note"
 
             results.append(
                 {

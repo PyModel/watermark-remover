@@ -14,6 +14,8 @@
 | ODT `meta:generator` | Scrub `meta.xml` | `clean_file.py` | Loses generator tag | Yes |
 | HTML generator / JSON-LD provenance | Strip tags/attributes | `clean_file.py` | Loses matching metadata | Yes |
 | Markdown AI frontmatter keys | Drop keys + Layer A body | `clean_file.py` | Loses matching YAML keys | Yes |
+| Video container provenance (MP4/MOV/WebM/MKV/AVI/FLV) | Strip provenance markers and remux | `clean_file.py` | Re-muxed container; audio is not verified | Yes (re-inspect) |
+| Visible video marks (sora, veo, seedance, doubao, dola, hailuo, vidu, kling) | Opt-in per-frame detection, temporal arbiter, fill | `clean_file.py --mark` | Re-encoded frames; fill quality varies | Best-effort |
 | C2PA soft binding / remote manifest | Detect and warn | `inspect_soft_binding.py` | No mutation | Detection only; removal out of scope |
 | Pixel/audio/video watermarks | Optional external image score only | `score_synthid.py` | External-license/version limits | No universal verification |
 | Data-driven model backdoors | — | Out of scope | — | — |

@@ -81,6 +81,22 @@ def test_strip_png_discards_trailing_payload():
     assert cleaned.endswith(_png_chunk(b"IEND", b""))
 
 
+def test_strip_png_removes_time_chunk():
+    sig = b"\x89PNG\r\n\x1a\n"
+    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+    data = (
+        sig
+        + _png_chunk(b"IHDR", ihdr)
+        + _png_chunk(b"tIME", struct.pack(">HBBBBB", 2025, 1, 1, 0, 0, 0))
+        + _png_chunk(b"IDAT", zlib.compress(b"\x00\x00\x00"))
+        + _png_chunk(b"IEND", b"")
+    )
+    cleaned, actions = strip_png(data)
+    assert b"tIME" not in cleaned
+    assert any("tIME" in a.text for a in actions)
+    assert cleaned.endswith(_png_chunk(b"IEND", b""))
+
+
 def test_clean_image_discards_trailing_payload_at_public_entry_point(tmp_path: Path):
     payload = b"HIDDEN-PAYLOAD"
     src = tmp_path / "input.png"
@@ -179,13 +195,14 @@ def test_exiftool_nonzero_is_logged_as_failure(tmp_path: Path, monkeypatch):
         lambda *args, **kwargs: fake_command_result(7, stderr="denied"),
     )
     report = clean_image(src, dest)
-    assert any("exiftool failed (rc=7)" in action for action in report["actions"])
-    assert not any(action == "exiftool -all= pass" for action in report["actions"])
-    failure = report["action_details"][-1]
+    details = report["action_details"]
+    assert any("exiftool failed (rc=7)" in action["text"] for action in details)
+    assert not any(action["text"] == "exiftool -all= pass" for action in details)
+    failure = details[-1]
     assert failure == {
         "code": "tool_failed",
         "effect": "warning",
-        "text": report["actions"][-1],
+        "text": "exiftool failed (rc=7): denied",
         "params": {"tool": "exiftool", "returncode": 7, "detail": "denied"},
     }
 

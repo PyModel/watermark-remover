@@ -36,14 +36,16 @@ from collections.abc import Callable, Collection, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from batch_inputs import InputItem, InputSelection
 from clean_asset import CleanPlan
-from clean_file import _build_parser as _build_clean_parser
 from clean_request import (
+    DEFAULT_TIMEOUT,
+    DEFAULT_VISIBLE_PROMPT,
+    REWRITE_CLI_CHOICES,
     CleanPlanPreflightError,
     CleanRequest,
     dropped_text_transforms,
@@ -51,7 +53,9 @@ from clean_request import (
 )
 from common import atomic_write_text, looks_binary
 from layer_b_discovery import MODEL_ROUTES, EndpointPolicy, classify_endpoint, probe_backend
+from morphomod import VISIBLE_CLEAN_BACKENDS
 from optional_deps import KNOWN_EXTRAS, check_optional
+from perturb_text import MODES as PERTURB_MODES
 from pipeline_actions import ActionCode, Effect
 from rewrite_text import DEFAULT_BASE_URL, LIVE_REWRITE_BACKENDS, RewritePlan, resolve_base_url
 
@@ -232,7 +236,7 @@ PRESETS: tuple[Preset, ...] = (
         label="Deep clean (LLM rewrite)",
         description=(
             "Hidden marks, then a local model rephrases the text to break "
-            "token-level watermarks. No detector guarantee. Needs an endpoint."
+            "token-level watermarks. No detector guarantee. Pick a model first."
         ),
         layer="B",
         flags=("--rewrite", "paraphrase"),
@@ -316,27 +320,84 @@ def _read_state(state: object) -> tuple[list[str], list[str], str | None]:
     return paths, [*(preset.flags if preset else ()), *flags], key
 
 
-def _raising_parser() -> argparse.ArgumentParser:
-    """``clean_file``'s own parser, made to raise instead of printing and exiting.
+def _parse_box(value: str) -> tuple[int, int, int, int]:
+    try:
+        parts = tuple(int(part) for part in value.split(","))
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("box must be X,Y,W,H") from error
+    if len(parts) != 4:
+        raise argparse.ArgumentTypeError("box must be X,Y,W,H")
+    return parts
 
-    argparse reports a bad flag by printing usage and calling ``sys.exit``, and
-    ``--help`` (or any abbreviation of it) prints the whole help first.  In a
-    long-lived bridge the exit would kill the process and the text would land
-    in the log; the message is what the operator needs, so it is carried out
-    as ``InvalidOptions`` instead.
-    """
-    parser = _build_clean_parser()
-    parser.prog = "wm"
 
-    def refuse(message: str) -> NoReturn:
-        raise InvalidOptions(message)
-
-    def leave(status: int = 0, message: str | None = None) -> NoReturn:
-        refuse(message or "--help is not available here")
-
-    parser.error = refuse  # type: ignore[method-assign]
-    parser.exit = leave  # type: ignore[method-assign]
-    parser.print_help = lambda file=None: None  # type: ignore[method-assign]
+def _state_parser() -> argparse.ArgumentParser:
+    """Parse the bridge's typed option list without importing the CLI adapter."""
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("path", nargs="+", type=Path)
+    parser.add_argument("-o", "--output", type=Path)
+    parser.add_argument("--in-place", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--recursive", action="store_true")
+    parser.add_argument("--glob", default="*")
+    parser.add_argument("--extensions")
+    parser.add_argument("--nfkc", action="store_true")
+    parser.add_argument("--aggressive-homoglyphs", action="store_true")
+    parser.add_argument("--strip-semantic-format", action="store_true")
+    parser.add_argument("--keep-non-ai-metadata", action="store_true")
+    parser.add_argument(
+        "--as", dest="force_type", choices=("auto", "text", "image", "container"), default="auto"
+    )
+    parser.add_argument("--force-text", action="store_true")
+    parser.add_argument("--rewrite", choices=REWRITE_CLI_CHOICES)
+    parser.add_argument("--rewrite-backend", choices=LIVE_REWRITE_BACKENDS)
+    parser.add_argument("--rewrite-model")
+    parser.add_argument("--rewrite-base-url")
+    parser.add_argument("--rewrite-lang")
+    parser.add_argument("--rewrite-original-lang")
+    parser.add_argument("--rewrite-timeout", type=float)
+    parser.add_argument("--rewrite-temperature", type=float)
+    parser.add_argument("--rewrite-candidates", type=int)
+    parser.add_argument("--rewrite-reasoning-effort")
+    parser.add_argument("--rewrite-disable-thinking", action="store_true", default=None)
+    parser.add_argument("--rewrite-allow-remote", action="store_true", default=None)
+    parser.add_argument("--tsapa", action="store_true")
+    parser.add_argument("--tsapa-generations", type=int, default=5)
+    parser.add_argument("--tsapa-population", type=int, default=12)
+    parser.add_argument("--char-perturb", action="store_true")
+    parser.add_argument("--char-mode", choices=PERTURB_MODES, default="zero-width")
+    parser.add_argument("--char-strength", type=float, default=0.1)
+    parser.add_argument("--seed", type=int)
+    visible = parser.add_mutually_exclusive_group()
+    visible.add_argument("--visible-mask", type=Path)
+    visible.add_argument("--visible-box", type=_parse_box)
+    visible.add_argument("--detect-command")
+    parser.add_argument("--dilate", type=int)
+    parser.add_argument("--visible-backend", choices=VISIBLE_CLEAN_BACKENDS, default="texture")
+    parser.add_argument("--inpaint-command")
+    parser.add_argument("--visible-prompt", default=DEFAULT_VISIBLE_PROMPT)
+    parser.add_argument("--soft-binding", action="store_true")
+    parser.add_argument("--quality", choices=("fast", "balanced", "high"), default="balanced")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
+    degrade = parser.add_mutually_exclusive_group()
+    degrade.add_argument(
+        "--degrade", choices=("freq-dct", "blur", "median", "jpeg", "rotate", "two-stage")
+    )
+    degrade.add_argument("--morpho", choices=("grid", "diagonal", "noise", "quantize"))
+    parser.add_argument("--degrade-strength", type=float, default=0.6)
+    parser.add_argument("--degrade-seed", type=int)
+    parser.add_argument("--remove-synthid", action="store_true")
+    parser.add_argument("--synthid-strength", type=float, default=0.6)
+    parser.add_argument("--wmct-marker", action="store_true")
+    parser.add_argument("--keep-artifacts", action="store_true")
+    parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--audit", nargs="?", const="wm-audit.json")
+    parser.add_argument("--help", action="help")
+    parser.error = lambda message: (_ for _ in ()).throw(argparse.ArgumentError(None, message))
+    parser.print_help = lambda file=None: None
+    parser.exit = lambda status=0, message=None: (_ for _ in ()).throw(
+        argparse.ArgumentError(None, message or "help")
+    )
     return parser
 
 
@@ -353,11 +414,9 @@ def preview_command(state: Mapping[str, object]) -> str:
 def compose_request(state: Mapping[str, object], *, allow_remote: bool = False) -> Composition:
     """Compose the ``CleanRequest`` for one frontend ``state`` (PROTOCOL "State").
 
-    1. Parse ``[*preset.flags, *flags, "--", *paths]`` with ``clean_file``'s
-       parser, so a later flag wins over an earlier one and any CLI flag is
-       valid.  Paths go after ``--`` so a file named ``-x.md`` is a path, not
-       an option; argparse reads the same request either way.
-    2. Build the request with ``CleanRequest.from_args``.
+    1. Parse ``[*preset.flags, *flags, "--", *paths]`` with the TUI's local
+       typed-state parser, preserving parser defaults and mutual exclusions.
+    2. Build the request directly with ``CleanRequest``.
     3. Apply ``endpoint`` only when the request rewrites, which keeps the
        preview free of endpoint flags that would do nothing.  *allow_remote*
        is applied the same way: it is how ``clean`` passes a per-run
@@ -386,10 +445,12 @@ def compose_request(state: Mapping[str, object], *, allow_remote: bool = False) 
         if value is not None
     }
 
-    args = _raising_parser().parse_args([*flags, "--", *paths])
     try:
-        request = CleanRequest.from_args(args)
-    except (ValueError, TypeError) as error:
+        parsed = _state_parser().parse_args([*flags, "--", *paths])
+        values = vars(parsed)
+        values["paths"] = tuple(values.pop("path", ()) or ())
+        request = CleanRequest(**values)
+    except (argparse.ArgumentError, SystemExit, ValueError, TypeError) as error:
         raise InvalidOptions(str(error)) from error
 
     # Egress permission comes from the per-run confirmation and nowhere else:
@@ -640,6 +701,7 @@ HIT_NOUNS: dict[str, str] = {
     "confusable": "confusable character",
     "strip": "invisible character",
     "other_cf": "format character",
+    "braille_blank": "braille blank carrier",
 }
 
 
@@ -1056,6 +1118,9 @@ _ACTION_PHRASES: dict[str, Callable[[Mapping[str, Any]], Sequence[str]]] = {
     ActionCode.CLEAN_DATA_URI: lambda p: (f"cleaned an embedded {p['mime']} image{_nested(p)}",),
     ActionCode.DROP_HTML_META: lambda p: (f"dropped meta tag {p['tag']}",),
     ActionCode.DROP_JSON_LD: lambda p: ("dropped a JSON-LD provenance script",),
+    ActionCode.DROP_HTML_COMMENT: lambda p: (
+        f"dropped {_count(p['count'], 'HTML comment')} with AI markers",
+    ),
     ActionCode.DROP_DATA_AI_ATTRIBUTES: lambda p: (
         f"dropped {_count(p['count'], 'data-ai attribute')}",
     ),
@@ -1063,7 +1128,9 @@ _ACTION_PHRASES: dict[str, Callable[[Mapping[str, Any]], Sequence[str]]] = {
         f"dropped {_count(p['count'], 'SVG metadata block')}",
     ),
     ActionCode.DROP_SVG_XMP: lambda p: (f"dropped {_count(p['count'], 'XMP packet')}",),
-    ActionCode.DROP_SVG_COMMENT: lambda p: ("dropped an SVG comment with AI markers",),
+    ActionCode.DROP_SVG_COMMENT: lambda p: (
+        f"dropped {_count(p['count'], 'SVG comment')} with AI markers",
+    ),
     ActionCode.DROP_SVG_GENERATOR_ATTRIBUTES: lambda p: (
         f"dropped {_count(p['count'], 'generator attribute')}",
     ),

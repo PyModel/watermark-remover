@@ -11,6 +11,10 @@ Exit codes
          be fully clean).
     2  — Usage / input-selection error (bad flags, missing files, unsupported
          format).
+    3  — An optional backend a stage asked for is not installed. The stage was
+         skipped, its result is labeled, and any output that was still produced
+         matches a run without that stage. Distinct from 1 so a caller can tell
+         "not installed" from "ran and left residual signal".
 
 Operation status (enum)
 -----------------------
@@ -86,11 +90,13 @@ class ExitCode(Enum):
     - 0: success (verified).
     - 1: residual signal or processing error.
     - 2: usage or input-selection error.
+    - 3: a requested optional backend is unavailable; its stage was skipped.
     """
 
     SUCCESS = 0
     RESIDUAL_OR_ERROR = 1
     USAGE_ERROR = 2
+    BACKEND_UNAVAILABLE = 3
 
 
 # Mapping of operation status → exit code

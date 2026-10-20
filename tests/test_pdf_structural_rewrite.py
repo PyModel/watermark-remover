@@ -10,6 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
+pytest.importorskip("pypdf", reason="optional dependency pypdf is required")
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "remove-ai-marks" / "scripts"
 sys.path.insert(0, str(SCRIPTS))

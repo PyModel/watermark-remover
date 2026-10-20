@@ -4,4 +4,5 @@
 *
 !skills/
 !skills/**
+skills/**/node_modules
 !pyproject.toml

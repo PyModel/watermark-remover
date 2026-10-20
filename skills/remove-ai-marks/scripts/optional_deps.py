@@ -55,32 +55,96 @@ class BackendAvailability:
             )
 
 
+def module_available(*names: str) -> bool:
+    """True when every named module imports right now.
+
+    The probe optional decoders use to decide "can I run": unlike
+    :func:`check_optional` it names modules, not extras, so a caller can gate
+    on the exact set it will import next (and callers that prefer the
+    user-facing vocabulary still route through :func:`check_optional`).
+    """
+    for name in names:
+        try:
+            importlib.import_module(name)
+        except Exception:
+            return False
+    return True
+
+
 def check_optional(extra: str) -> BackendAvailability:
     """Return availability for a single named extra.
 
-    Dispatches to *_EXTRAS dicts defined below.
+    Dispatches to *_EXTRAS dicts defined below.  An extra may probe several
+    modules; it is available only when every probed module imports.
     """
-    _checkers: dict[str, str] = {
-        "visible": "cv2",
-        "quality": "skimage",
-        "ai": "torch",
-        "provenance": "c2pa",
+    _checkers: dict[str, tuple[str, ...]] = {
+        "visible": ("cv2",),
+        "quality": ("skimage",),
+        "ai": ("torch",),
+        "provenance": ("c2pa",),
+        # The pixel extra (numpy + headless OpenCV + Pillow) is the declared
+        # home for pixel-tier work; `visible` stays its superset alias.
+        "pixel": ("numpy", "cv2", "PIL"),
+        # The learned ONNX fill tiers (ticket 04): both probe the runtime and
+        # the hub client; the model weights themselves download pinned at
+        # first use into the HF cache and are never bundled.
+        "migan": ("onnxruntime", "huggingface_hub"),
+        "lama": ("onnxruntime", "huggingface_hub"),
+        # The open DWT-DCT detector (dwt_dct.py + invisible_watermark.py):
+        # the exact module set its is_available() probe names.
+        "detect": ("numpy", "cv2", "pywt"),
+        # The abstaining source-export classifiers (source_classify.py +
+        # source_classify_v2.py + source_spectral.py): the pixel stack plus the
+        # hub client that fetches the pinned weights on first use. Not a
+        # SynthID detector; absence of the extra is unknown, never clean.
+        "source-classify": ("numpy", "cv2", "PIL", "huggingface_hub"),
+        # The metadata-free photo classifier (classify.py and its CLIP-L-ft
+        # embedder module): the pixel stack plus torch + transformers and the
+        # hub client that fetches the pinned weights snapshot on first use.
+        # Absence of the extra (or of the weights) is unavailable — labeled,
+        # never a silent pass and never a clean verdict.
+        "classify": ("numpy", "cv2", "PIL", "torch", "transformers", "huggingface_hub"),
+        # The ONNX classify backend (classify.py --backend onnx): the classify
+        # stack plus ONNX Runtime; the checker probes the union because using
+        # the backend needs every one of them.
+        "classify-onnx": (
+            "numpy",
+            "cv2",
+            "PIL",
+            "torch",
+            "transformers",
+            "huggingface_hub",
+            "onnxruntime",
+        ),
+        # The Adobe TrustMark soft-binding decoder (trustmark_detector.py): the
+        # pip package pulls torch itself and downloads model weights on first
+        # use. Standalone by design -- it never joins the `all` aggregate
+        # (torch stays opt-in, per the extras-surface ruling).
+        "trustmark": ("trustmark",),
+        # The aggregate extra joins the registry with a real checker: every
+        # member declared in pyproject at this commit (visible + quality + ai
+        # + provenance + detect + source-classify). Probe order is irrelevant;
+        # the union is what the aggregate promises. The torch extras
+        # (ai/trustmark/classify/classify-onnx) stay standalone members of the
+        # registry, never members of the union (torch stays opt-in).
+        "all": ("cv2", "skimage", "torch", "c2pa", "numpy", "pywt", "PIL", "huggingface_hub"),
     }
-    pkg = _checkers.get(extra)
-    if pkg is None:
+    pkgs = _checkers.get(extra)
+    if pkgs is None:
         return BackendAvailability(
             available=False,
             extra=extra,
             reason=f"unknown extra: {extra}",
         )
-    try:
-        importlib.import_module(pkg)
-    except Exception as exc:
-        return BackendAvailability(
-            available=False,
-            extra=extra,
-            reason=str(exc).split("\n")[0][:120],
-        )
+    for pkg in pkgs:
+        try:
+            importlib.import_module(pkg)
+        except Exception as exc:
+            return BackendAvailability(
+                available=False,
+                extra=extra,
+                reason=str(exc).split("\n")[0][:120],
+            )
     return BackendAvailability(available=True, extra=extra)
 
 
@@ -105,8 +169,26 @@ def has_provenance() -> bool:
     return check_optional("provenance").available
 
 
+def has_pixel() -> bool:
+    return check_optional("pixel").available
+
+
 #: Every extra `check_optional` knows about, for capability reporting.
-KNOWN_EXTRAS = ("visible", "quality", "ai", "provenance")
+KNOWN_EXTRAS = (
+    "visible",
+    "quality",
+    "ai",
+    "provenance",
+    "pixel",
+    "migan",
+    "lama",
+    "detect",
+    "source-classify",
+    "classify",
+    "classify-onnx",
+    "trustmark",
+    "all",
+)
 
 
 def extras_status() -> dict[str, dict[str, object]]:

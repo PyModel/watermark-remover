@@ -15,9 +15,11 @@ from pathlib import Path
 from typing import Any
 
 import pipeline_actions as act
+import tc260_verify
 from common import atomic_write_bytes
-from image_meta import AI_META_HINTS, C2PA_MARKERS, _contains_any
+from image_meta import AI_META_HINTS, C2PA_MARKERS, _contains_any, _tc260_label_of
 from pipeline_actions import Action, report_actions
+from tc260_label import MAX_TC260_VALUE_BYTES, label_span, parse_tc260_aigc_json
 
 HEIF_BRANDS = {
     b"heic",
@@ -265,15 +267,42 @@ def _xmp_uuid_boxes(data: bytes) -> list[Box]:
     return out
 
 
+def _marker_uuid_boxes(data: bytes) -> list[Box]:
+    """Non-XMP `uuid` boxes carrying AI/provenance markers.
+
+    The single source of truth for this box set: ``inspect_heif`` and
+    ``neutralize_heif`` both call it, so inspection can never flag less (or
+    more) than clean neutralizes — no detect/clean asymmetry by construction.
+    """
+    out: list[Box] = []
+
+    def _candidate(box: Box) -> bool:
+        if box.type != b"uuid":
+            return False
+        payload = data[box.payload_start : box.end]
+        if payload.startswith(XMP_UUID):
+            return False
+        return bool(_contains_any(payload, AI_META_HINTS + C2PA_MARKERS))
+
+    for box in _iter_boxes(data, 0, len(data)):
+        if _candidate(box):
+            out.append(box)
+        if box.type == b"meta":
+            for child in _iter_boxes(data, box.payload_start + 4, box.end):
+                if _candidate(child):
+                    out.append(child)
+    return out
+
+
 def _item_extent_bytes(
     data: bytes,
     items: dict[int, tuple[bytes, str, str]],
     extents: dict[int, tuple[int, list[tuple[int, int]]]],
     wanted_types: tuple[bytes, ...],
-) -> list[tuple[int, int, bytes, str]]:
-    """(offset, length, item_type, content_type) for editable file extents."""
-    out: list[tuple[int, int, bytes, str]] = []
-    for item_id, (itype, _name, content_type) in items.items():
+) -> list[tuple[int, int, bytes, str, str]]:
+    """(offset, length, item_type, item_name, content_type) for editable extents."""
+    out: list[tuple[int, int, bytes, str, str]] = []
+    for item_id, (itype, name, content_type) in items.items():
         if itype not in wanted_types:
             continue
         loc = extents.get(item_id)
@@ -284,12 +313,30 @@ def _item_extent_bytes(
             continue  # idat-relative extents not supported for editing
         for off, ln in exts:
             if 0 <= off < len(data) and off + ln <= len(data):
-                out.append((off, ln, itype, content_type))
+                out.append((off, ln, itype, name, content_type))
     return out
 
 
 def _is_xmp_item(itype: bytes, content_type: str) -> bool:
     return itype == b"mime" and content_type.casefold() == XMP_MIME.decode("ascii")
+
+
+#: The iinf item name that marks an ISO-BMFF TC260 AIGC tag: a ``mime``
+#: (``application/json``) item named ``AIGC`` whose extent carries the label
+#: JSON. The name scopes the carrier, so neutralizing the extent can never
+#: touch camera/editor metadata living in other items.
+AIGC_ITEM_NAME = "AIGC"
+
+
+def _aigc_tag_label(payload: bytes) -> dict[str, str] | None:
+    """The TC260 label JSON carried by an ``AIGC`` tag extent, or None.
+
+    Bounded and strict: oversized (> ``MAX_TC260_VALUE_BYTES``) or non-UTF-8
+    extents are findings-free refusals, never a crash.
+    """
+    if not payload or len(payload) > MAX_TC260_VALUE_BYTES:
+        return None
+    return parse_tc260_aigc_json(payload)
 
 
 def _neutralize_runs(buf: bytearray, start: int, length: int, pad: int) -> list[str]:
@@ -345,16 +392,14 @@ def inspect_heif(data: bytes) -> tuple[bool, bool, list[str], list[str], dict[st
         else:
             notes.append(f"XMP uuid box @ {box.header_start}")
 
-    for box in _iter_boxes(data, 0, len(data)):
-        if box.type != b"uuid":
-            continue
+    # Non-XMP `uuid` boxes carrying markers, top level AND inside `meta` —
+    # the exact set clean neutralizes (shared helper: inspect can never flag
+    # less than clean removes, nor vice versa).
+    for box in _marker_uuid_boxes(data):
         payload = data[box.payload_start : box.end]
-        if payload.startswith(XMP_UUID):
-            continue
         hits = _contains_any(payload, AI_META_HINTS + C2PA_MARKERS)
-        if hits:
-            has_ai = True
-            findings.append(f"uuid box @ {box.header_start}: {', '.join(hits[:8])}")
+        has_ai = True
+        findings.append(f"uuid box @ {box.header_start}: {', '.join(hits[:8])}")
 
     try:
         items, extents = _provenance_items(data)
@@ -383,21 +428,41 @@ def inspect_heif(data: bytes) -> tuple[bool, bool, list[str], list[str], dict[st
         findings.append(f"unsupported external/idat metadata item {item_id} (method={method})")
         has_ai = True
 
-    for off, ln, itype, content_type in _item_extent_bytes(
+    for off, ln, itype, name, content_type in _item_extent_bytes(
         data, items, extents, (b"Exif", b"mime")
     ):
-        if itype == b"mime" and not _is_xmp_item(itype, content_type):
+        is_xmp = _is_xmp_item(itype, content_type)
+        is_aigc_tag = name == AIGC_ITEM_NAME
+        if itype == b"mime" and not is_xmp and not is_aigc_tag:
             continue
         payload = data[off : off + ln]
-        hits = _contains_any(payload, AI_META_HINTS + C2PA_MARKERS)
+        if is_aigc_tag:
+            # An ISO-BMFF TC260 AIGC tag: the extent is the label JSON.
+            tc260_label = _aigc_tag_label(payload)
+            if tc260_label is not None:
+                has_ai = True
+                findings.extend(
+                    tc260_verify.tc260_label_findings(
+                        tc260_label, carrier=f"HEIF meta AIGC item @ {off}"
+                    )
+                )
+                continue
         label = "Exif item" if itype == b"Exif" else "XMP item"
+        hits = _contains_any(payload, AI_META_HINTS + C2PA_MARKERS)
         if hits:
             has_ai = True
             if any(h.lower() in ("c2pa", "contentcredentials", "jumb", "aigc") for h in hits):
                 has_c2pa = True
             findings.append(f"{label} @ {off}: {', '.join(hits[:8])}")
-        else:
+        elif not is_aigc_tag:
             notes.append(f"{label} present ({ln} bytes, no AI markers)")
+        # Field-aware TC260 labels can also ride inside Exif/XMP items.
+        tc260 = _tc260_label_of(payload)
+        if tc260 is not None and not is_aigc_tag:
+            has_ai = True
+            findings.extend(
+                tc260_verify.tc260_label_findings(tc260, carrier=f"HEIF {label} @ {off}")
+            )
     if not items:
         notes.append("no iinf item table (or unsupported version)")
 
@@ -439,6 +504,19 @@ def neutralize_heif(data: bytes, *, strip_all_metadata: bool = True) -> tuple[by
             if hits:
                 actions.append(act.neutralize_tokens("XMP uuid box", hits[:8]))
 
+    # 1c. Neutralize any other `uuid` box carrying AI/provenance markers
+    # (mirrors inspect, so a flagged box is never left intact by clean).
+    for box in _marker_uuid_boxes(bytes(buf)):
+        if strip_all_metadata:
+            buf[box.header_start + 4 : box.header_start + 8] = b"free"
+            for i in range(box.payload_start, box.end):
+                buf[i] = 0
+            actions.append(act.neutralize_box("uuid", box.end - box.payload_start))
+        else:
+            hits = _neutralize_runs(buf, box.payload_start, box.end - box.payload_start, 0x00)
+            if hits:
+                actions.append(act.neutralize_tokens("uuid box", hits[:8]))
+
     # 2. Exif / XMP item extents.
     items, extents = _provenance_items(bytes(buf))
     unsupported = [
@@ -451,22 +529,40 @@ def neutralize_heif(data: bytes, *, strip_all_metadata: bool = True) -> tuple[by
         details = ", ".join(f"item {item_id} method={method}" for item_id, method in unsupported)
         raise ValueError(f"unsupported HEIF metadata extent layout: {details}")
     item_exts = _item_extent_bytes(bytes(buf), items, extents, (b"Exif", b"mime"))
-    for off, ln, itype, content_type in item_exts:
-        label = "Exif item" if itype == b"Exif" else "XMP item"
+    for off, ln, itype, name, content_type in item_exts:
+        is_xmp = _is_xmp_item(itype, content_type)
+        is_aigc_tag = name == AIGC_ITEM_NAME
         # HEIF `mime` items are generic. Only a declared RDF/XML item is XMP;
-        # XML/SVG/application content must never be inferred from payload bytes.
-        if itype == b"mime" and not _is_xmp_item(itype, content_type):
+        # XML/SVG/application content must never be inferred from payload bytes
+        # — except an item NAMED AIGC, whose extent is a TC260 label tag.
+        if itype == b"mime" and not is_xmp and not is_aigc_tag:
+            continue
+        label = "Exif item" if itype == b"Exif" else "XMP item"
+        pad = 0x20 if is_xmp else 0x00
+        payload = bytes(buf[off : off + ln])
+        # A parsed TC260 label is removed in both modes: a flagged label must
+        # never survive clean. AIGC tags zero whole (the name scopes the
+        # carrier); Exif/XMP items lose exactly the label JSON run, at equal
+        # length, so camera/editor metadata beside it is preserved.
+        span = label_span(payload) if not is_aigc_tag else None
+        if is_aigc_tag and _aigc_tag_label(payload) is not None:
+            for i in range(off, off + ln):
+                buf[i] = 0
+            actions.append(act.zero_item_payload("AIGC item", ln))
             continue
         if strip_all_metadata:
-            pad = 0x20 if _is_xmp_item(itype, content_type) else 0x00
             for i in range(off, off + ln):
                 buf[i] = pad
             actions.append(act.zero_item_payload(label, ln))
         else:
-            pad = 0x20 if _is_xmp_item(itype, content_type) else 0x00
             hits = _neutralize_runs(buf, off, ln, pad)
-            if hits:
-                actions.append(act.neutralize_tokens(label, hits[:8]))
+            if span is not None:
+                start, end = span
+                for i in range(off + start, off + end):
+                    buf[i] = pad
+            if hits or span is not None:
+                tokens = hits[:8] if hits else ["TC260 AIGC label"]
+                actions.append(act.neutralize_tokens(label, tokens))
 
     if not actions:
         actions.append(act.nothing_removed(fmt, "no HEIF/AVIF provenance metadata found"))

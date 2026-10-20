@@ -10,6 +10,7 @@ import sys
 import zlib
 from pathlib import Path
 
+import optional_deps
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -324,7 +325,7 @@ def test_remove_visible_texture_pipeline(tmp_path: Path):
         ),
     )
     assert report["status"] == "completed"
-    assert any("texture-patch" in action for action in report["actions"])
+    assert any("texture-patch" in action["text"] for action in report["action_details"])
     assert dest.is_file()
 
 
@@ -670,9 +671,9 @@ def test_clean_file_frictionless_no_mask_artifact_by_default(tmp_path: Path):
     assert dest2.with_name("kept.mask.pgm").is_file()
     visible = json.loads(r2.stdout)["visible"]
     assert visible["mask"] is not None
-    # The staged mask path is retargeted in the structured steps too, not
-    # only in the human lines, so no step names a deleted temp file.
-    assert [d["text"] for d in visible["action_details"]] == visible["actions"]
+    # The staged mask path is retargeted in the structured steps, so no step
+    # names a deleted temp file.
+    assert all(d["text"] for d in visible["action_details"])
     [mask_step] = [d for d in visible["action_details"] if d["code"] == "effective_mask"]
     assert mask_step["params"]["published"] == visible["mask"]
 
@@ -695,3 +696,144 @@ def test_remove_visible_respects_publish_mask_direct(tmp_path: Path):
     assert dest.is_file()
     assert not (tmp_path / "out.mask.pgm").exists()
     assert report["mask"] is None
+
+
+# ---------------------------------------------------------------------------
+# cv2 fill backends: selectable through the backend registry (ticket 02)
+# ---------------------------------------------------------------------------
+
+
+def _install_stub_opencv(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make OpenCV importable process-wide with a minimal cv2 stand-in.
+
+    ``cv2`` patches gate registry bootstrap and ``has_visible()``; the
+    ``numpy`` stand-in covers ``_raster_to_cv2``/``_cv2_to_raster`` on the
+    RGB path.  The stub ``inpaint`` fills each marked pixel from its nearest
+    unmasked row neighbour, so a uniform background is reproduced exactly.
+    """
+    import types
+
+    import optional_deps
+
+    class _StubArray:
+        def __init__(self, data: bytes, shape: tuple[int, ...]) -> None:
+            self._data = bytes(data)
+            self.shape = shape
+
+        def reshape(self, *shape: int) -> _StubArray:
+            return _StubArray(self._data, tuple(shape))
+
+        def tobytes(self) -> bytes:
+            return self._data
+
+    stub_numpy = types.ModuleType("numpy")
+    stub_numpy.uint8 = "uint8"
+    stub_numpy.frombuffer = lambda data, dtype=None: _StubArray(data, (len(data),))
+
+    def _inpaint(src, mask, radius, flags):
+        width = src.shape[1]
+        channels = src.shape[2]
+        data = bytearray(src._data)
+        marks = mask._data
+        for index, value in enumerate(marks):
+            if not value:
+                continue
+            row_start = (index // width) * width
+            replacement = b"\x00" * channels
+            for neighbour in range(index - 1, row_start - 1, -1):
+                if not marks[neighbour]:
+                    replacement = data[neighbour * channels : (neighbour + 1) * channels]
+                    break
+            else:
+                for neighbour in range(index + 1, row_start + width):
+                    if not marks[neighbour]:
+                        replacement = data[neighbour * channels : (neighbour + 1) * channels]
+                        break
+            data[index * channels : (index + 1) * channels] = replacement
+        return _StubArray(bytes(data), src.shape)
+
+    stub_cv2 = types.ModuleType("cv2")
+    stub_cv2.INPAINT_TELEA = 1
+    stub_cv2.INPAINT_NS = 2
+    stub_cv2.inpaint = _inpaint
+    monkeypatch.setitem(sys.modules, "numpy", stub_numpy)
+    monkeypatch.setitem(sys.modules, "cv2", stub_cv2)
+    monkeypatch.setattr(optional_deps, "cv2", stub_cv2)
+
+
+@pytest.fixture
+def fresh_backend_registry(monkeypatch: pytest.MonkeyPatch):
+    """Rebuild the backend registry from scratch, restoring it afterwards."""
+    import inpaint_backends
+
+    saved = list(inpaint_backends._REGISTRY)
+    saved_flag = inpaint_backends._bootstrapped
+    inpaint_backends._REGISTRY.clear()
+    inpaint_backends._bootstrapped = False
+    try:
+        yield inpaint_backends
+    finally:
+        inpaint_backends._REGISTRY.clear()
+        inpaint_backends._REGISTRY.extend(saved)
+        inpaint_backends._bootstrapped = saved_flag
+
+
+@pytest.mark.parametrize("backend", ["cv2-telea", "cv2-ns"])
+def test_remove_visible_cv2_backend_fills_mark_and_preserves_outside_mask(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_backend_registry,
+    backend: str,
+) -> None:
+    _install_stub_opencv(monkeypatch)
+    width = height = 16
+    background = bytearray([9, 8, 7] * width * height)
+    marked = bytearray(background)
+    index = (7 * width + 7) * 3  # single white pixel at (7, 7)
+    marked[index : index + 3] = b"\xff\xff\xff"
+    src = tmp_path / "input.png"
+    src.write_bytes(encode_png(Raster(width, height, 3, marked)))
+    mask = tmp_path / "mask.pgm"
+    write_pgm(box_mask(width, height, (7, 7, 1, 1)), mask)
+    dest = tmp_path / "cleaned.png"
+
+    report = remove_visible(
+        src,
+        dest,
+        VisiblePlan(mask_path=mask, backend=backend, dilation_radius=0),
+    )
+
+    assert report["status"] == "completed"
+    assert report["backend"] == backend
+    assert dest.is_file()
+    # The stub fills the marked pixel from its only neighbour, so the filled
+    # output equals the untouched background everywhere — outside-mask kept.
+    assert decode_png(dest.read_bytes()).data == background
+
+
+@pytest.mark.parametrize("backend", ["cv2-telea", "cv2-ns"])
+def test_remove_visible_cv2_backend_fails_soft_without_opencv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_backend_registry,
+    backend: str,
+) -> None:
+    # No OpenCV anywhere (the pooled venv never installs it): the registry
+    # holds only the incumbent backends, so the selection must fail soft with
+    # the labeled install hint instead of a traceback or a silent fallback.
+    monkeypatch.setattr(optional_deps, "cv2", None)
+    src = tmp_path / "input.png"
+    src.write_bytes(encode_png(Raster(4, 4, 3, bytearray([9, 8, 7] * 16))))
+    mask = tmp_path / "mask.pgm"
+    write_pgm(box_mask(4, 4, (1, 1, 1, 1)), mask)
+    dest = tmp_path / "cleaned.png"
+
+    with pytest.raises(ValueError, match="unavailable") as exc_info:
+        remove_visible(
+            src,
+            dest,
+            VisiblePlan(mask_path=mask, backend=backend, dilation_radius=0),
+        )
+
+    assert "watermark-remover[visible]" in str(exc_info.value)
+    assert not dest.exists()

@@ -4,7 +4,8 @@ description: >
   Inspect and clean multi-vendor AI provenance signals: hidden Unicode (Layer A),
   statistical text watermarks via rewrite/TSAPA (Layer B), visible image marks via
   mask+dilation+inpainting, and C2PA/EXIF/XMP/container metadata on PNG/JPEG/WebP/
-  BMP/GIF/TIFF/HEIC/HEIF/AVIF/SVG/PDF/DOCX/XLSX/PPTX/EPUB/ODT/HTML/Markdown.
+  BMP/GIF/TIFF/HEIC/HEIF/AVIF/SVG/PDF/DOCX/XLSX/PPTX/EPUB/ODT/HTML/Markdown,
+  plus video container provenance and opt-in visible video marks.
   Detects (does not remove) C2PA soft-binding risk. Use for watermark/C2PA/
   Content Credentials/AI metadata/hidden Unicode requests or /remove-ai-marks.
 ---
@@ -40,6 +41,7 @@ SCRIPTS="<skill_dir>/scripts"
 | PNG / JPEG / WebP / BMP / GIF / TIFF | image metadata; visible pipeline only when a mask/localizer is available |
 | HEIC / HEIF / AVIF | ISO-BMFF metadata neutralization |
 | SVG / PDF / DOCX / XLSX / PPTX / EPUB / ODT | container cleaner |
+| MP4 / MOV / M4V / WebM / MKV / AVI / FLV | container provenance strip (needs the `video` extra and ffmpeg/ffprobe); visible marks only with `--mark`, `--visible-box`, or `--visible-mask` |
 | Directory / mixed files | unified batch CLI |
 | Directory / website audit | `wm-audit-dir` / `wm-audit-site` (JSON/SARIF) |
 
@@ -198,5 +200,5 @@ results by layer (Verifiable, Best-effort, Detection-only), never by outcome.
 - Layer A does not remove token-distribution watermarks.
 - Layer B cannot be gold-verified without vendor detectors/keys.
 - Visible inpainting can damage texture or miss regions.
-- Pixel-domain removal (CtrlRegen / diffusion / DCT suppression) is best-effort and drifts image content; audio/video watermark removal, soft-binding removal, training backdoors, and secret-key detector emulation are out of scope.
+- Pixel-domain removal (CtrlRegen / diffusion / DCT suppression) is best-effort and drifts image content; removal of invisible watermarks embedded in audio or video frames, soft-binding removal, training backdoors, and secret-key detector emulation are out of scope.
 - Hard-bound C2PA stripping does not clear in-content binding or remote-manifest recovery.

@@ -113,7 +113,7 @@ def test_clean_image_marker_skipped_for_jpeg(tmp_path: Path) -> None:
     dest = tmp_path / "cleaned.jpg"
     report = clean_image(src, dest, wmct_marker=True)
     assert report["wmct_marker"] is False
-    assert any("wmCt" in a for a in report["actions"])
+    assert any("wmCt" in detail["text"] for detail in report["action_details"])
 
 
 def test_clean_file_cli_wmct_marker(tmp_path: Path) -> None:

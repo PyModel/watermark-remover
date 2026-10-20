@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import importlib.util
 import math
 import os
 import stat
+import sys
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
@@ -12,6 +14,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+import humanizer
+import tiling
 from asset_kind import AssetKind, classify_asset
 from common import (
     atomic_write_bytes,
@@ -19,24 +23,266 @@ from common import (
     backup_path,
     create_backup,
     paths_alias,
+    read_bytes_bounded,
     validate_output_path,
 )
 from container_meta import clean_container
 from dct_frequency import DEGRADE_STRATEGIES, degrade_image
+from external_command import command_from_template, run_command
+from image_io import PixelDependencyUnavailable, _import_pixel
 from image_meta import clean_image, detect_format
 from inspect_soft_binding import inspect_soft_binding
 from morpho_perturb import MORPHO_STRATEGIES, MORPHO_STRATEGY_KWARGS, morpho_perturb
 from morphomod import (
     VISIBLE_CLEAN_BACKENDS,
+    Mask,
     Raster,
     VisiblePlan,
     decode_png,
+    decode_to_raster,
     encode_png,
     remove_visible,
+    write_pgm,
 )
+from operation import ExitCode
+from video import VideoPlan, clean_video
+from watermark_profiles import (
+    DEFAULT_PROFILE,
+    resolve_effective_profile,
+    resolve_seed,
+    resolve_strength,
+)
+
+_PIXEL_BACKENDS = {
+    "ctrlregen": ("ctrlregen", "NOAI_WATERMARK_DIR"),
+    "diffusion": ("markdiffusion", "MARKDIFFUSION_DIR"),
+}
+
+
+def pixel_backend_capability(name: str) -> dict[str, Any]:
+    """Report support and availability for an optional pixel backend.
+
+    Resolution is deliberately owned here, beside execution.  Unknown or
+    unconfigured backends fail closed and are never reported as executed.
+    """
+    backend = _PIXEL_BACKENDS.get(name)
+    if backend is None:
+        return {
+            "requested": name,
+            "supported": False,
+            "available": False,
+            "executed": False,
+            "reason": "unsupported pixel backend",
+        }
+    module, configuration = backend
+    available = bool(os.environ.get(configuration)) and importlib.util.find_spec(module) is not None
+    return {
+        "requested": name,
+        "supported": True,
+        "available": available,
+        "executed": False,
+        "reason": None if available else "pixel backend is unavailable",
+    }
+
+
+def _resolve_pixel_backend(name: str) -> Any:
+    capability = pixel_backend_capability(name)
+    if not capability["available"]:
+        raise RuntimeError(capability["reason"])
+    module, _ = _PIXEL_BACKENDS[name]
+    return __import__(module)
+
+
+#: The shipped adapters for the optional GPU invisible-removal engines. Each is
+#: the backend's own CLI, invoked as one argument vector with a timeout; both
+#: report exit code 3 for "remover unavailable", the contract ``clean_ctrlregen``
+#: and ``markdiffusion_harness`` document, so an uninstalled engine becomes a
+#: labeled skip instead of a crash. The argv is fixed here, never a shell string.
+_INVISIBLE_ENGINE_ADAPTERS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "ctrlregen": (
+        "clean_ctrlregen.py",
+        ("{input}", "-o", "{output}", "--json", "--strength", "{strength}"),
+    ),
+    "diffusion": (
+        "markdiffusion_harness.py",
+        (
+            "purify",
+            "{input}",
+            "-o",
+            "{output}",
+            "--json",
+            "--purification-strength",
+            "{strength}",
+        ),
+    ),
+}
+
+#: The stage's default deadline. A regeneration is a long GPU call, but it is
+#: still bounded: a hung engine is a failed file, never an open-ended wait.
+DEFAULT_INVISIBLE_TIMEOUT = 1800.0
+
+#: Bounded engine output. The tail is what a failure reports; a chatty engine
+#: cannot grow the clean's memory.
+_INVISIBLE_ENGINE_OUTPUT_LIMIT = 64 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class InvisiblePlan:
+    """The optional invisible-watermark regeneration stage's frozen policy.
+
+    Presence of this on ``CleanPlan`` requests the stage; whether it actually
+    runs is decided at execution time by the invisible-target gate, so a file
+    with nothing to remove never reaches the engine. ``profile`` is a
+    ``watermark_profiles`` id and is what selects the engine and its calibrated
+    strength for each image. ``command`` is an explicit engine argv template
+    (``{input} {output} {profile} {strength} {seed}``) and exists for the same
+    reason ``VisiblePlan.command`` does: a caller that already drives an
+    adapter should not be forced through the shipped default.
+    """
+
+    profile: str = DEFAULT_PROFILE
+    backend: str = "ctrlregen"
+    strength: float | None = None
+    seed: int | None = None
+    timeout: float = DEFAULT_INVISIBLE_TIMEOUT
+    command: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.profile, str) or not self.profile.strip():
+            raise ValueError("invisible profile must be a non-empty string")
+        if self.backend not in _PIXEL_BACKENDS:
+            raise ValueError(f"unsupported invisible backend: {self.backend}")
+        if self.strength is not None and (
+            isinstance(self.strength, bool)
+            or not isinstance(self.strength, (int, float))
+            or not math.isfinite(self.strength)
+            or not 0.0 < self.strength <= 1.0
+        ):
+            raise ValueError("invisible strength must be a finite number in (0, 1]")
+        if self.seed is not None and (
+            isinstance(self.seed, bool) or not isinstance(self.seed, int)
+        ):
+            raise TypeError("invisible seed must be an integer or None")
+        if (
+            isinstance(self.timeout, bool)
+            or not isinstance(self.timeout, (int, float))
+            or not math.isfinite(self.timeout)
+            or self.timeout <= 0
+        ):
+            raise ValueError("invisible timeout must be a finite positive number")
+        if self.command is not None and (
+            not isinstance(self.command, str) or not self.command.strip()
+        ):
+            raise ValueError("invisible command must be a non-empty string or None")
+
+
+def invisible_target_scheme(path: Path) -> tuple[str | None, str | None]:
+    """The open invisible-watermark scheme *path* carries: ``(scheme, error)``.
+
+    Detection is the stage's gate: regenerating pixels is destructive, so the
+    stage runs only on a file a local decoder identified. A missing ``detect``
+    extra is "no target" here -- the engine's own availability probe is what
+    reports an absent engine. A decode error is returned, not raised, so the
+    stage can report a labeled skip instead of failing an otherwise good clean.
+    """
+    from invisible_watermark import detect_invisible_watermark
+
+    try:
+        return detect_invisible_watermark(path), None
+    except Exception as error:  # decode errors must not fail the metadata clean
+        return None, str(error)
+
+
+def _invisible_engine_available(plan: InvisiblePlan) -> bool:
+    """Whether *plan*'s engine can run. An explicit command is its own adapter."""
+    if plan.command is not None:
+        return True
+    return bool(pixel_backend_capability(plan.backend)["available"])
+
+
+def _invisible_engine_argv(
+    plan: InvisiblePlan,
+    *,
+    source: Path,
+    output: Path,
+    profile: str,
+    strength: float,
+    seed: int,
+) -> tuple[str, ...]:
+    """The engine invocation for *plan*, as one shell-free argument vector."""
+    values = {
+        "input": str(source),
+        "output": str(output),
+        "profile": profile,
+        "strength": f"{strength:g}",
+        "seed": str(seed),
+    }
+    if plan.command is not None:
+        return command_from_template(plan.command, **values)
+    script, tokens = _INVISIBLE_ENGINE_ADAPTERS[plan.backend]
+    adapter = Path(__file__).resolve().parent / script
+    return (sys.executable, str(adapter), *(token.format_map(values) for token in tokens))
+
+
+def _run_invisible_stage(
+    source: Path,
+    output: Path,
+    plan: InvisiblePlan,
+) -> dict[str, Any]:
+    """Regenerate *source* into *output* (a staging path), or raise.
+
+    Stateful-tier controls, in one place: the engine is one bounded subprocess
+    with a timeout and no retry; it writes only the staging path; the caller
+    publishes nothing unless this returns ``completed``. Exit code 3 from the
+    adapter is the adapter's own "engine unavailable" contract and is reported
+    as a labeled skip, not an error.
+    """
+    resolved_profile = resolve_effective_profile(plan.profile, None)
+    size = _probe_dimensions(source) or (1024, 1024)
+    strength = resolve_strength(plan.strength, None, resolved_profile, size=size)
+    seed = resolve_seed(plan.seed)
+    argv = _invisible_engine_argv(
+        plan,
+        source=source,
+        output=output,
+        profile=resolved_profile,
+        strength=strength,
+        seed=seed,
+    )
+    completed = run_command(
+        argv,
+        timeout=plan.timeout,
+        output_limit=_INVISIBLE_ENGINE_OUTPUT_LIMIT,
+    )
+    report: dict[str, Any] = {
+        "status": "completed",
+        "best_effort": True,
+        "profile": resolved_profile,
+        "backend": plan.backend,
+        "strength": strength,
+        "seed": seed,
+        "returncode": completed.returncode,
+    }
+    if completed.returncode == ExitCode.BACKEND_UNAVAILABLE.value:
+        report["status"] = "skipped"
+        report["reason"] = "engine-unavailable"
+        report["detail"] = completed.stderr_text[-_INVISIBLE_ENGINE_OUTPUT_LIMIT:]
+        return report
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "invisible-watermark engine failed "
+            f"(exit {completed.returncode}): "
+            f"{completed.stderr_text[-_INVISIBLE_ENGINE_OUTPUT_LIMIT:]}"
+        )
+    # codeql[py/path-injection] suppress output is the operator-named destination of this local run; verifying the engine produced that requested file
+    if not output.is_file():
+        raise RuntimeError("invisible-watermark engine produced no output")
+    return report
+
+
 from perturb_text import MODES as PERTURB_MODES
 from perturb_text import perturb_text
-from pipeline_actions import retarget_report
+from pipeline_actions import Action, ActionCode, Effect, retarget_report
 from rewrite_text import RewritePlan, TokenSink, rewrite
 from text_unicode import clean_text
 
@@ -250,20 +496,58 @@ class ImageDegradePlan:
 
 
 @dataclass(frozen=True, slots=True)
+class ImagePixelPlan:
+    """Complete immutable pixel policy for one image."""
+
+    visible: VisiblePlan | None = None
+    degrade: ImageDegradePlan | None = None
+    remove_synthid: bool = False
+    synthid_strength: float = 0.6
+    wmct_marker: bool = False
+    external_backend: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.visible is not None and not isinstance(self.visible, VisiblePlan):
+            raise TypeError("visible must be a VisiblePlan")
+        if self.degrade is not None and not isinstance(self.degrade, ImageDegradePlan):
+            raise TypeError("degrade must be an ImageDegradePlan or None")
+        if not isinstance(self.remove_synthid, bool) or not isinstance(self.wmct_marker, bool):
+            raise TypeError("pixel removal options must be bools")
+        if (
+            isinstance(self.synthid_strength, bool)
+            or not isinstance(self.synthid_strength, (int, float))
+            or not 0.0 <= self.synthid_strength <= 1.0
+        ):
+            raise ValueError("synthid_strength must be in [0, 1]")
+        if self.external_backend is not None and self.external_backend not in _PIXEL_BACKENDS:
+            raise ValueError(f"unsupported pixel backend: {self.external_backend}")
+
+
+@dataclass(frozen=True, slots=True)
 class CleanPlan:
     forced_kind: str = "auto"
     in_place: bool = False
     text: TextCleanPlan = field(default_factory=TextCleanPlan)
     strip_all_metadata: bool = True
+    pixel: ImagePixelPlan | None = None
     visible: VisiblePlan | None = None
     inspect_soft_binding: bool = False
     degrade: ImageDegradePlan | None = None
     remove_synthid: bool = False
     synthid_strength: float = 0.6
     wmct_marker: bool = False
+    humanize: bool = False
+    humanize_seed: int | None = None
+    also_layer_a_text: bool = True
+    #: The frozen video policy, built only when the asset kind is video.
+    video: VideoPlan | None = None
+    #: The optional invisible-watermark regeneration stage. ``None`` means the
+    #: stage is not requested; a present plan means the stage may run, gated at
+    #: execution time by whether the file actually carries an invisible target.
+    invisible: InvisiblePlan | None = None
 
     def __post_init__(self) -> None:
-        if self.forced_kind not in ("auto", "text", "image", "container"):
+        if self.forced_kind not in ("auto", "text", "image", "container", "video"):
             raise ValueError(f"unsupported forced asset kind: {self.forced_kind}")
         for name in (
             "in_place",
@@ -271,11 +555,14 @@ class CleanPlan:
             "inspect_soft_binding",
             "remove_synthid",
             "wmct_marker",
+            "also_layer_a_text",
         ):
             if not isinstance(getattr(self, name), bool):
                 raise TypeError(f"{name} must be a bool")
         if not isinstance(self.text, TextCleanPlan):
             raise TypeError("text must be a TextCleanPlan")
+        if self.pixel is not None and not isinstance(self.pixel, ImagePixelPlan):
+            raise TypeError("pixel must be an ImagePixelPlan or None")
         if (
             not isinstance(self.synthid_strength, (int, float))
             or not 0.0 <= self.synthid_strength <= 1.0
@@ -288,6 +575,28 @@ class CleanPlan:
                 raise ValueError("visible cleaning requires an inpainting backend")
         if self.degrade is not None and not isinstance(self.degrade, ImageDegradePlan):
             raise TypeError("degrade must be an ImageDegradePlan or None")
+        if self.video is not None and not isinstance(self.video, VideoPlan):
+            raise TypeError("video must be a VideoPlan or None")
+        if self.invisible is not None and not isinstance(self.invisible, InvisiblePlan):
+            raise TypeError("invisible must be an InvisiblePlan or None")
+        if not isinstance(self.humanize, bool):
+            raise TypeError("humanize must be a bool")
+        if self.humanize_seed is not None and (
+            isinstance(self.humanize_seed, bool) or not isinstance(self.humanize_seed, int)
+        ):
+            raise TypeError("humanize_seed must be an integer or None")
+
+
+def _image_pixel_plan(plan: CleanPlan) -> ImagePixelPlan:
+    if plan.pixel is not None:
+        return plan.pixel
+    return ImagePixelPlan(
+        visible=plan.visible,
+        degrade=plan.degrade,
+        remove_synthid=plan.remove_synthid,
+        synthid_strength=plan.synthid_strength,
+        wmct_marker=plan.wmct_marker,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,6 +606,11 @@ class CleanResult:
     output: Path
     residual: bool
     _details: Mapping[str, Any] = field(repr=False, compare=False)
+    #: True when a requested optional backend was unavailable and its stage was
+    #: skipped with a labeled report. The pipeline maps this to exit code 3
+    #: (``operation.ExitCode.BACKEND_UNAVAILABLE``); it is deliberately not part
+    #: of ``to_dict`` so the JSON report shape stays unchanged.
+    backend_unavailable: bool = False
 
     def __post_init__(self) -> None:
         details = dict(self._details)
@@ -305,6 +619,8 @@ class CleanResult:
         details.pop("output", None)
         if "exit_code" in details:
             raise ValueError("CleanResult details must not contain exit_code")
+        if not isinstance(self.backend_unavailable, bool):
+            raise TypeError("backend_unavailable must be a bool")
         object.__setattr__(self, "_details", _freeze_json(details))
 
     def to_dict(self) -> dict[str, Any]:
@@ -319,6 +635,7 @@ class CleanResult:
 def _validate_operation(path: Path, dest: Path, plan: CleanPlan) -> None:
     if not isinstance(plan, CleanPlan):
         raise TypeError("plan must be a CleanPlan")
+    pixel = _image_pixel_plan(plan)
     if path.is_symlink() or not path.is_file():
         raise ValueError(f"not a regular file: {path}")
     if plan.in_place:
@@ -328,31 +645,31 @@ def _validate_operation(path: Path, dest: Path, plan: CleanPlan) -> None:
         if backup.exists() or backup.is_symlink():
             raise ValueError(f"backup already exists: {backup}")
         if (
-            plan.visible is not None
-            and plan.visible.mask_output is not None
-            and paths_alias(plan.visible.mask_output, path)
+            pixel.visible is not None
+            and pixel.visible.mask_output is not None
+            and paths_alias(pixel.visible.mask_output, path)
         ):
-            raise ValueError(f"mask output aliases input: {plan.visible.mask_output}")
+            raise ValueError(f"mask output aliases input: {pixel.visible.mask_output}")
         if (
-            plan.visible is not None
-            and plan.visible.mask_output is not None
-            and paths_alias(plan.visible.mask_output, backup)
+            pixel.visible is not None
+            and pixel.visible.mask_output is not None
+            and paths_alias(pixel.visible.mask_output, backup)
         ):
-            raise ValueError(f"mask output aliases backup: {plan.visible.mask_output}")
+            raise ValueError(f"mask output aliases backup: {pixel.visible.mask_output}")
     else:
         validate_output_path(path, dest)
         if (
-            plan.visible is not None
-            and plan.visible.mask_output is not None
-            and paths_alias(plan.visible.mask_output, path)
+            pixel.visible is not None
+            and pixel.visible.mask_output is not None
+            and paths_alias(pixel.visible.mask_output, path)
         ):
-            raise ValueError(f"mask output aliases input: {plan.visible.mask_output}")
+            raise ValueError(f"mask output aliases input: {pixel.visible.mask_output}")
         if (
-            plan.visible is not None
-            and plan.visible.mask_output is not None
-            and paths_alias(plan.visible.mask_output, dest)
+            pixel.visible is not None
+            and pixel.visible.mask_output is not None
+            and paths_alias(pixel.visible.mask_output, dest)
         ):
-            raise ValueError(f"mask output aliases image output: {plan.visible.mask_output}")
+            raise ValueError(f"mask output aliases image output: {pixel.visible.mask_output}")
 
 
 def _clean_text_asset(
@@ -416,15 +733,245 @@ def _apply_image_degrade(raster: Raster, degrade: ImageDegradePlan) -> Any:
     )
 
 
+def _crop_mask(mask: Mask, tile: tiling.Tile) -> Mask:
+    """The whole-image mask cropped to *tile* (pure row slicing)."""
+    data = bytearray(tile.width * tile.height)
+    for row in range(tile.height):
+        source = (tile.y + row) * mask.width + tile.x
+        data[row * tile.width : (row + 1) * tile.width] = mask.data[source : source + tile.width]
+    return Mask(tile.width, tile.height, data)
+
+
+def _probe_dimensions(path: Path) -> tuple[int, int] | None:
+    """Pixel dimensions from the PNG/JPEG header, no decoder involved.
+
+    The visible pipeline's raster decoder (``decode_to_raster``) accepts only
+    PNG and JPEG, so a pure header parse covers every image that could take
+    the tiled path. Reads at most the first 64 KiB (advisory probe: a header
+    pushed past that yields None and the untiled path runs); deliberately
+    does not touch numpy/cv2 so probing stays available in pixel-less
+    environments and adds no stub-cv2 surface to the CLI path.
+    """
+    # codeql[py/path-injection] suppress read-only header probe of the input the operator asked to clean and inspect
+    with path.open("rb") as stream:
+        data = stream.read(65536)
+    if data[:8] == b"\x89PNG\r\n\x1a\n" and data[12:16] == b"IHDR" and len(data) >= 24:
+        return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+    if data[:2] == b"\xff\xd8":
+        offset = 2
+        while offset + 9 < len(data):
+            if data[offset] != 0xFF:
+                return None
+            marker = data[offset + 1]
+            if marker == 0xFF:  # fill bytes before the real marker
+                offset += 1
+                continue
+            if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:  # standalone markers
+                offset += 2
+                continue
+            segment_length = int.from_bytes(data[offset + 2 : offset + 4], "big")
+            if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                height = int.from_bytes(data[offset + 5 : offset + 7], "big")
+                width = int.from_bytes(data[offset + 7 : offset + 9], "big")
+                return width, height
+            offset += 2 + segment_length
+    return None
+
+
+def _run_tiled_visible(
+    path: Path,
+    staged_visible: Path,
+    staged_visible_plan: VisiblePlan,
+    mask_details: dict[str, Mask],
+    staging: Path,
+) -> dict[str, Any]:
+    """Run the visible clean per tile above the auto-tile threshold.
+
+    The mask is computed ONCE on the whole image -- through a ``print-plan``
+    ``remove_visible`` call, so the mask-source logic, the ``mask_details``
+    contract, and the mask actions are the untiled path's own -- then every
+    tile is filled by a plain ``remove_visible`` call on the tile crop with the
+    already-refined mask (radius-0 re-refine is idempotent) and the results are
+    feather-blended (see ``tiling`` for the same-result guarantee). Tile
+    reports are folded into one honest report: the whole-image mask actions
+    plus a single tiled-inpaint action, and the engagement dict.
+    """
+    data = read_bytes_bounded(path, limit=256 * 1024 * 1024, label="source image")
+    fmt = detect_format(bytes(data))
+    raster = decode_to_raster(bytes(data), fmt)
+    width, height, channels = raster.width, raster.height, raster.channels
+
+    mask_report = remove_visible(
+        path,
+        None,
+        replace(staged_visible_plan, backend="print-plan"),
+        mask_details=mask_details,
+    )
+    if mask_report["status"] != "mask-ready":
+        return mask_report
+    refined = mask_details["effective"]
+
+    tile_size = tiling.auto_tile_size()
+    overlap = tiling.auto_tile_overlap()
+    tiles = tiling.plan_tiles(width, height, tile_size, overlap)
+    np = _import_pixel("numpy")
+    arr = np.frombuffer(bytes(raster.data), dtype=np.uint8).reshape(height, width, channels)
+
+    def clean_tile(tile: tiling.Tile, crop: Any) -> Any:
+        tag = f"{tile.x}-{tile.y}"
+        tile_in = staging / f"tile-{tag}-in.png"
+        tile_out = staging / f"tile-{tag}-out.png"
+        tile_mask = staging / f"tile-{tag}-mask.pgm"
+        atomic_write_bytes(
+            tile_in,
+            encode_png(Raster(tile.width, tile.height, channels, bytearray(crop.tobytes()))),
+        )
+        tile_mask_crop = _crop_mask(refined, tile)
+        if tile_mask_crop.marked == 0:
+            # No part of the mark lives in this tile: pass the crop through
+            # unchanged (an identity tile keeps the blend exact).
+            return crop
+        write_pgm(tile_mask_crop, tile_mask)
+        # The whole-image mask is already refined; radius-0 re-refinement is
+        # the identity on it, so tile fills see exactly the untiled mask.
+        tile_plan = replace(
+            staged_visible_plan,
+            mask_path=tile_mask,
+            box=None,
+            detect_command=None,
+            mask_output=staging / f"tile-{tag}-mask-out.pgm",
+            dilation_radius=0,
+        )
+        tile_report = remove_visible(tile_in, tile_out, tile_plan)
+        if tile_report["status"] != "completed":
+            raise RuntimeError(
+                f"tiled visible clean failed on tile ({tag}): {tile_report['status']}"
+            )
+        tile_raster = decode_png(tile_out.read_bytes())
+        return np.frombuffer(bytes(tile_raster.data), dtype=np.uint8).reshape(
+            tile_raster.height, tile_raster.width, tile_raster.channels
+        )
+
+    blended = tiling.run_tiled(
+        clean_tile,
+        arr,
+        tile_size,
+        overlap,
+        set_progress=lambda line: None,
+    )
+    atomic_write_bytes(
+        staged_visible,
+        encode_png(Raster(width, height, channels, bytearray(blended.tobytes()))),
+    )
+
+    details = [
+        detail for detail in mask_report["action_details"] if detail["code"] != "inpaint_skipped"
+    ]
+    inpaint_action = Action(
+        ActionCode.INPAINT,
+        Effect.CHANGE,
+        f"tiled {staged_visible_plan.backend} inpaint over {len(tiles)} "
+        f"{tiles[0].width}x{tiles[0].height} tiles (overlap {overlap}) + feather blend",
+        {
+            "backend": staged_visible_plan.backend,
+            "tiles": len(tiles),
+            "tile_size": tile_size,
+            "overlap": overlap,
+        },
+    )
+    details.append(inpaint_action.to_dict())
+    return {
+        "status": "completed",
+        "input": str(path),
+        "output": str(staged_visible),
+        "format": fmt,
+        "backend": staged_visible_plan.backend,
+        "mask": mask_report["mask"],
+        "initial_mask_pixels": mask_report["initial_mask_pixels"],
+        "refined_mask_pixels": mask_report["refined_mask_pixels"],
+        "dilation_radius": staged_visible_plan.dilation_radius,
+        "actions": [detail["text"] for detail in details],
+        "action_details": details,
+        "tiling": {
+            "engaged": True,
+            "threshold": tiling.auto_tile_threshold(),
+            "tiles": len(tiles),
+            "tile_size": tile_size,
+            "overlap": overlap,
+            "note": (
+                "per-tile fills feather-blended; identical to whole-image processing "
+                "whenever the per-tile results agree across tile seams (see tiling docstring)"
+            ),
+        },
+        "note": mask_report["note"],
+    }
+
+
+def _apply_humanize_stage(
+    staged_final: Path, reference_path: Path, seed: int | None
+) -> dict[str, Any]:
+    """Apply the ``--humanize`` post-stage to the staged PNG output, in place.
+
+    Runs after verification on purpose (upstream order): the verification
+    speaks about the fill, and grain everywhere would fail outside-mask by
+    construction. Requires PNG output (the degrade precedent) so the stage
+    never silently re-encodes a lossy format.
+    """
+    try:
+        np = _import_pixel("numpy")
+        cv2 = _import_pixel("cv2")
+    except PixelDependencyUnavailable as error:
+        return {
+            "status": "unavailable",
+            "hint": f"Install watermark-remover[pixel] to enable the humanize stage. Reason: {error}",
+        }
+    final_data = read_bytes_bounded(staged_final, limit=256 * 1024 * 1024, label="final image")
+    if detect_format(bytes(final_data)) != "png":
+        raise ValueError("--humanize requires PNG output; JPEG/HEIF/AVIF inputs are not supported")
+    raster = decode_png(bytes(final_data))
+    if raster.channels != 3:
+        raise ValueError("--humanize supports 3-channel output; alpha images are not supported")
+    image = np.frombuffer(bytes(raster.data), dtype=np.uint8).reshape(
+        raster.height, raster.width, 3
+    )
+    ref_data = read_bytes_bounded(reference_path, limit=256 * 1024 * 1024, label="source image")
+    ref_raster = decode_to_raster(bytes(ref_data), detect_format(bytes(ref_data)))
+    if ref_raster.channels != 3:
+        raise ValueError("--humanize requires a 3-channel source image")
+    reference = np.frombuffer(bytes(ref_raster.data), dtype=np.uint8).reshape(
+        ref_raster.height, ref_raster.width, 3
+    )
+
+    bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+    ref_bgr = cv2.cvtColor(reference, cv2.COLOR_RGB2BGR)
+    if ref_bgr.shape[:2] != bgr.shape[:2]:
+        ref_bgr = cv2.resize(
+            ref_bgr, (bgr.shape[1], bgr.shape[0]), interpolation=cv2.INTER_LANCZOS4
+        )
+    out_bgr, stage_report = humanizer.humanize_stage(bgr, ref_bgr, seed=seed)
+    out_rgb = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
+    atomic_write_bytes(
+        staged_final,
+        encode_png(
+            Raster(
+                raster.width, raster.height, 3, bytearray(np.ascontiguousarray(out_rgb).tobytes())
+            )
+        ),
+    )
+    return {"status": "applied", **stage_report, "seed": seed}
+
+
 def _clean_image_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
-    from common import read_bytes_bounded
     from domain_types import QualityResult, map_quality_to_status
     from verification import verify_boundary_seam, verify_halo, verify_outside_mask
 
+    pixel = _image_pixel_plan(plan)
     soft = inspect_soft_binding(path) if plan.inspect_soft_binding else None
     visible_report = None
+    invisible_report = None
+    backend_unavailable = False
     verification_status = "VERIFIED"
-    final_mask_output = plan.visible.mask_output if plan.visible is not None else None
+    final_mask_output = pixel.visible.mask_output if pixel.visible is not None else None
 
     with tempfile.TemporaryDirectory(prefix="wm-image-") as temp_dir:
         staging = Path(temp_dir)
@@ -434,14 +981,63 @@ def _clean_image_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
         staged_mask = staging / "effective-mask.pgm"
         mask_details: dict[str, Any] = {}
 
-        if plan.visible is not None:
-            staged_visible_plan = replace(plan.visible, mask_output=staged_mask)
-            visible_report = remove_visible(
-                path,
-                staged_visible,
-                staged_visible_plan,
-                mask_details=mask_details,
-            )
+        if pixel.visible is not None:
+            staged_visible_plan = replace(pixel.visible, mask_output=staged_mask)
+            try:
+                dims = _probe_dimensions(path)
+                use_tiled = dims is not None and tiling.should_auto_tile(*dims)
+            except PixelDependencyUnavailable:
+                use_tiled = False
+            # Mark plans never tile: the tiled pass computes the mask through a
+            # dest-less remove_visible call, which the registry mark pass cannot
+            # honor (it only runs whole-image and always writes dest). Skipping
+            # keeps the mark pass on the untiled path; the report says so.
+            skipped_for_mark = use_tiled and staged_visible_plan.mark is not None
+            if skipped_for_mark:
+                use_tiled = False
+            if use_tiled:
+                try:
+                    visible_report = _run_tiled_visible(
+                        path,
+                        staged_visible,
+                        staged_visible_plan,
+                        mask_details,
+                        staging,
+                    )
+                except PixelDependencyUnavailable as error:
+                    # The tiled attempt is an optimization: degrade to the
+                    # whole-image clean and say so, never crash.
+                    visible_report = remove_visible(
+                        path,
+                        staged_visible,
+                        staged_visible_plan,
+                        mask_details=mask_details,
+                    )
+                    visible_report["tiling"] = {
+                        "engaged": False,
+                        "status": "unavailable",
+                        "hint": (
+                            "Install watermark-remover[pixel] to enable tiled "
+                            f"processing. Reason: {error}"
+                        ),
+                    }
+            else:
+                visible_report = remove_visible(
+                    path,
+                    staged_visible,
+                    staged_visible_plan,
+                    mask_details=mask_details,
+                )
+                if skipped_for_mark:
+                    visible_report["tiling"] = {
+                        "engaged": False,
+                        "status": "skipped-for-mark",
+                        "threshold": tiling.auto_tile_threshold(),
+                        "note": (
+                            "registry mark pass runs whole-image; auto-tiling applies "
+                            "only to explicit-mask plans"
+                        ),
+                    }
             if visible_report["status"] != "completed":
                 raise RuntimeError("visible pipeline did not produce an output")
             metadata_source = staged_visible
@@ -452,12 +1048,12 @@ def _clean_image_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
             metadata_source,
             staged_metadata,
             strip_all_metadata=plan.strip_all_metadata,
-            remove_synthid=plan.remove_synthid,
-            synthid_strength=plan.synthid_strength,
-            wmct_marker=plan.wmct_marker,
+            remove_synthid=pixel.remove_synthid,
+            synthid_strength=pixel.synthid_strength,
+            wmct_marker=pixel.wmct_marker,
         )
 
-        if plan.degrade is not None:
+        if pixel.degrade is not None:
             cleaned_data = read_bytes_bounded(
                 staged_metadata,
                 limit=256 * 1024 * 1024,
@@ -468,7 +1064,7 @@ def _clean_image_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
                     "degradation requires PNG output; JPEG/HEIF/AVIF inputs are not supported"
                 )
             raster = decode_png(bytes(cleaned_data))
-            degrade_result = _apply_image_degrade(raster, plan.degrade)
+            degrade_result = _apply_image_degrade(raster, pixel.degrade)
             out_raster = Raster(
                 degrade_result.width,
                 degrade_result.height,
@@ -479,7 +1075,7 @@ def _clean_image_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
             atomic_write_bytes(staged_final, encode_png(out_raster))
             report["degrade"] = degrade_result.to_dict()
 
-        if plan.visible is not None:
+        if pixel.visible is not None:
             try:
                 source_data = read_bytes_bounded(
                     path,
@@ -541,6 +1137,44 @@ def _clean_image_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
                     "error": str(error),
                 }
 
+        if plan.humanize:
+            report["humanize"] = _apply_humanize_stage(staged_final, path, plan.humanize_seed)
+
+        if plan.invisible is not None:
+            # Runs last, after the visible pass's outside-mask verification: an
+            # invisible-watermark regeneration is allowed to change every pixel,
+            # so it must not be judged against the named-region invariant.
+            #
+            # A file with no invisible target gets no report key at all: the
+            # stage was requested for every image (it is gated by the target, not
+            # by a flag), so always emitting a key would change the JSON shape of
+            # the common `wm image.png` run. A key appears only when the stage had
+            # something to say: it ran, it could not run, or detection failed.
+            resolved_profile = resolve_effective_profile(plan.invisible.profile, None)
+            scheme, detection_error = invisible_target_scheme(path)
+            if scheme is not None or detection_error is not None:
+                invisible_report = {
+                    "best_effort": True,
+                    "profile": resolved_profile,
+                    "backend": plan.invisible.backend,
+                }
+                if scheme is None:
+                    invisible_report["status"] = "skipped"
+                    invisible_report["reason"] = "detection-failed"
+                    invisible_report["error"] = detection_error
+                elif not _invisible_engine_available(plan.invisible):
+                    invisible_report["status"] = "skipped"
+                    invisible_report["reason"] = "engine-unavailable"
+                    backend_unavailable = True
+                else:
+                    staged_invisible = staging / f"invisible{path.suffix or '.png'}"
+                    invisible_report.update(
+                        _run_invisible_stage(path, staged_invisible, plan.invisible)
+                    )
+                    invisible_report["scheme"] = scheme
+                    if invisible_report["status"] == "completed":
+                        staged_final = staged_invisible
+
         mask_data = (
             staged_mask.read_bytes()
             if staged_mask.is_file() and final_mask_output is not None
@@ -576,6 +1210,8 @@ def _clean_image_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
     report["input"] = str(path)
     if visible_report is not None:
         report["visible"] = visible_report
+    if invisible_report is not None:
+        report["invisible"] = invisible_report
     if soft is not None:
         report["soft_binding"] = soft
     soft_found = bool(soft and soft["soft_binding"]["found"])
@@ -585,15 +1221,26 @@ def _clean_image_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
         or soft_found
         or verification_status != "VERIFIED"
     )
-    return CleanResult("image", path, dest, residual, report)
+    return CleanResult(
+        "image", path, dest, residual, report, backend_unavailable=backend_unavailable
+    )
 
 
 def _clean_container_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
     source = create_backup(path) if plan.in_place else path
-    report = clean_container(source, dest)
+    report = clean_container(source, dest, also_layer_a_text=plan.also_layer_a_text)
     report["input"] = str(path)
     residual = bool(report["still_has_c2pa"] or report["still_has_ai_metadata"])
     return CleanResult("container", path, dest, residual, report)
+
+
+def _clean_video_asset(path: Path, dest: Path, plan: CleanPlan) -> CleanResult:
+    """Clean one video: strip its metadata and verify the destination."""
+    if plan.video is None:
+        raise ValueError("video cleaning requires a video plan")
+    source = create_backup(path) if plan.in_place else path
+    result = clean_video(source, dest, plan.video)
+    return CleanResult("video", path, dest, result.residual, result.to_dict())
 
 
 def clean_asset(
@@ -615,15 +1262,31 @@ def clean_asset(
             ),
         )
     _validate_operation(path, dest, plan)
-    kind = classify_asset(path, forced_kind=plan.forced_kind)
+    # ``forced_kind`` may name video, which ``classify_asset`` deliberately does
+    # not accept as a forced kind yet; the plan itself is the routing decision.
+    kind: AssetKind = (
+        "video"
+        if plan.forced_kind == "video"
+        else classify_asset(path, forced_kind=plan.forced_kind)
+    )
     if kind == "unknown":
-        kind = "text"
+        # Contract (asset_kind.classify_asset): unknown binaries are never
+        # mangled as text. The CLI preflight refuses earlier; any direct
+        # caller gets the same refusal here.
+        raise ValueError(
+            f"refusing to clean {path}: unrecognized format "
+            "(pass --force-text to handle the bytes as text anyway, or --as to force a format)"
+        )
     if plan.visible is not None and kind != "image":
         raise ValueError("visible cleaning is only valid for image assets")
     if plan.degrade is not None and kind != "image":
         raise ValueError("degradation is only valid for image assets")
+    if plan.humanize and kind != "image":
+        raise ValueError("humanize is only valid for image assets")
     if kind == "text":
         return _clean_text_asset(path, dest, plan, on_token)
     if kind == "image":
         return _clean_image_asset(path, dest, plan)
+    if kind == "video":
+        return _clean_video_asset(path, dest, plan)
     return _clean_container_asset(path, dest, plan)

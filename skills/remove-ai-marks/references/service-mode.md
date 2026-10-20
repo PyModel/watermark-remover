@@ -55,6 +55,21 @@ field and writes it to the output path itself.
 | POST | `/inspect` | `{"file": "<base64>", "name": "notes.md", "detect": true}` | `{"ok", "kind", "suspicious", "detection_status", "report"}` |
 | POST | `/detect` | `{"file": "<base64>", "name": "notes.txt"}` | `{"ok", "kind", "detections": [...]}` |
 | POST | `/clean` | `{"file": "<base64>", "name": "notes.md", "options": {...}}` | `{"ok", "kind", "cleaned": "<base64>", "report"}` |
+| POST | `/rewrite` | `{"file": "<base64>", "name": "notes.txt", "strength": "paraphrase", "lang"?}` | `{"ok", "kind": "text", "cleaned": "<base64>", "report": {"rewrite": {...}}}` |
+| POST | `/visible` | `{"file": "<base64>", "name": "x.png", "box": [x, y, w, h], "backend"?: "texture" \| "simple"}` | `{"ok", "kind": "image", "cleaned": "<base64 PNG>", "report"}` |
+
+`/rewrite` takes only the strength (and `lang` for `backtranslate`); the backend,
+model, endpoint and key come from the server's `WATERMARKS_REWRITE_*` environment,
+and any other body field is refused with 400. An unset backend answers 400 naming
+the variable; a failing model endpoint answers 502. `/visible` accepts PNG or JPEG
+and always returns PNG; a box too large for `texture` answers 400, so retry with
+`simple`.
+
+A server started with `WATERMARKS_SERVER_PUBLIC=1` answers `/rewrite` and `/detect`
+with 403, refuses `detect` / `detect_before` / `detect_after` with 400, and
+rate-limits POSTs (429 with `Retry-After`). `/capabilities` reports `public`,
+`disabled` and `max_input_bytes`. Any server answers 421 to an unknown `Host`,
+403 to a browser POST from another origin, and 503 when its job slots are full.
 
 `/clean` and `/inspect` route by the uploaded `name` extension plus the bytes;
 unrecognized formats answer `kind: "unknown"` (`/inspect`) or 400 (`/clean`).
@@ -74,10 +89,11 @@ The machine-readable contract lives at `$WM/openapi.json` — plug it into any
 OpenAPI tooling instead of hand-rolling clients.
 
 `options` accepted by `/clean`: `nfkc`, `aggressive_homoglyphs` (text),
-`keep_non_ai_metadata`, `strip_all_metadata`, `remove_pixel` (`ctrlregen` |
-`diffusion`) (images), `also_layer_a_text` (containers), `detect_before` /
-`detect_after` (text and images), plus our extras `remove_synthid` and
-`wmct_marker` (images, PNG output).
+`keep_non_ai_metadata` (the inverse of `strip_all_metadata`),
+`strip_all_metadata`, `also_layer_a_text` (containers),
+`detect_before` / `detect_after` (text and images), plus our extras
+`remove_synthid` and `wmct_marker` (images, PNG output). Requests naming a
+pixel backend receive a capability result when that backend is unavailable.
 
 **Inspect first** (decide, don't guess):
 

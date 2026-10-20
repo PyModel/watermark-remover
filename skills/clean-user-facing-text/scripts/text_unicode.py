@@ -458,6 +458,21 @@ def _decide(
             and _is_visible_cp(next_cp)
         ):
             return ("keep", ch, None)
+    if cp == 0x2800:
+        # BRAILLE PATTERN BLANK renders blank-width and is a known invisible
+        # separator in AI-generated stego text. Inside a real braille run
+        # (between U+2801-U+28FF letters) it is legitimate spacing; anywhere
+        # else it is a carrier and is REMOVED, never replaced: substituting a
+        # visible space would re-tokenize the text and leave a hole where the
+        # carrier sat. Consistent kind/severity in every mode: braille_blank
+        # -> probable, not the informational "space" class.
+        neighbours = (
+            ord(prev_input) if prev_input is not None else 0,
+            ord(next_input) if next_input is not None else 0,
+        )
+        if any(0x2801 <= c <= 0x28FF for c in neighbours):
+            return ("keep", ch, None)
+        return ("strip", "", "braille_blank")
     if _is_strip_cp(cp):
         return ("strip", "", _strip_kind(cp))
     if normalize_spaces and cp in SPACE_HOMOGLYPHS:
@@ -487,7 +502,7 @@ class CharHit:
     char: str
     label: str
     count: int
-    kind: str  # strip | bidi | tag_chars | variation_selector | zwj_family | private_use | space | confusable | other_cf
+    kind: str  # strip | bidi | tag_chars | variation_selector | zwj_family | private_use | space | confusable | other_cf | braille_blank
     samples: list[int] = field(default_factory=list)  # character offsets
 
 
@@ -573,7 +588,7 @@ def inspect_text(
     notes = [
         "Layer A only: invisible/format Unicode and space homoglyphs (edit-based carriers).",
         "Statistical (token-sampling) watermarks are not detectable here; use Layer B rewrite.",
-        "Inspect kinds: strip, bidi, tag_chars, variation_selector, zwj_family, private_use, space, confusable, other_cf.",
+        "Inspect kinds: strip, bidi, tag_chars, variation_selector, zwj_family, private_use, space, confusable, other_cf, braille_blank.",
         "Load-bearing invisibles are preserved by default during cleaning: emoji glue, CJK/Mongolian variation selectors, script joiners, complete flag tag sequences, same-script fillers/selectors (Mongolian FVS, Khmer inherent vowels, Hangul jamo fillers), RTL directional marks/paired embeddings, orthographic Arabic/Syriac Cf marks, and invisible math operators between visible operands. Inspection still reports bidi controls. Use explicit strip flags only after review.",
     ]
     if not hits:

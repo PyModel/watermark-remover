@@ -807,6 +807,17 @@ def test_the_diff_shows_invisible_characters_and_is_capped():
 
 RLO = "\u202e"
 
+#: JSON a non-Python consumer can read without running this module.
+#: U+1F600 is one code point and two UTF-16 units, so the index units disagree.
+ASTRAL_REVEAL_FIXTURE_JSON = """
+{
+  "text": "😀x◆y",
+  "marks": [[2, 3, "ZWSP"]],
+  "names": ["ZWSP"]
+}
+"""
+ASTRAL_REVEAL_FIXTURE: dict[str, Any] = json.loads(ASTRAL_REVEAL_FIXTURE_JSON)
+
 
 def _reveal(path: Path) -> list[dict]:
     from inspect_file import inspect_asset
@@ -821,6 +832,46 @@ def test_reveal_maps_offsets_to_the_right_columns(tmp_path):
         {"line": 1, "text": "Hello\u25c6 world", "marks": [[5, 6, "ZWSP"]]},
         {"line": 2, "text": "second \u25c6line", "marks": [[7, 8, "RLO"]]},
     ]
+
+
+def test_reveal_offsets_are_code_points_when_a_non_bmp_character_precedes_the_mark(
+    tmp_path,
+):
+    """A real inspect emits code-point indices of the excerpt, not UTF-16 units."""
+    source = tmp_path / "astral.txt"
+    source.write_text(f"\U0001f600x{ZWSP}y\n", encoding="utf-8")
+    raw = source.read_text(encoding="utf-8")
+    assert ord(raw[0]) > 0xFFFF and raw.index(ZWSP) > 0
+    fixture = ASTRAL_REVEAL_FIXTURE
+    assert json.loads(ASTRAL_REVEAL_FIXTURE_JSON) == fixture
+    assert set(fixture) == {"text", "marks", "names"}
+    env = bridge_env(tmp_path, WM_TUI_CWD=str(tmp_path))
+    bridge = BridgeProcess(tmp_path, env)
+    try:
+        assert bridge.next_frame()["event"] == "ready"
+        frames = bridge.request(1, "inspect", {"state": state([source])})
+        assert frames[0]["event"] == "inspected"
+        [excerpt] = frames[0]["data"]["reveal"]
+        assert response(frames)["result"]["files"][0]["reveal"] == [excerpt]
+        text, marks = excerpt["text"], excerpt["marks"]
+        assert text == fixture["text"]
+        assert marks == fixture["marks"]
+        assert [name for _, _, name in marks] == fixture["names"]
+        for start, end, name in marks:
+            assert text[start:end] == "\u25c6" and name == "ZWSP"
+            assert start == len(text[:start]) and end == len(text[:end])
+            assert len(text[:start].encode("utf-16-le")) // 2 != start
+        assert bridge.close() == 0
+    finally:
+        bridge.close()
+
+
+def test_the_protocol_defines_reveal_offsets_as_unicode_code_point_indices():
+    protocol = (ROOT / "skills/remove-ai-marks/tui/PROTOCOL.md").read_text(encoding="utf-8")
+    _, _, reveal = protocol.partition("`reveal` shows")
+    reveal, _, _ = reveal.partition("### `clean`")
+    assert reveal
+    assert "Unicode code-point indices" in reveal
 
 
 def test_reveal_merges_marks_on_one_line_and_reads_markdown(tmp_path):
@@ -873,7 +924,13 @@ def test_informational_notes_are_neither_counted_nor_shown_as_marks(tmp_path):
     ]
 
 
-def test_a_cleaned_heif_reports_no_metadata_left(tmp_path):
+def test_a_cleaned_heif_reports_no_metadata_left(tmp_path, monkeypatch):
+    from conftest import exiftool_free_path
+
+    # The line list encodes the exiftool-absent contract: an installed
+    # exiftool (CI installs it) would append "Stripped remaining metadata
+    # with exiftool." to what the cleaned file reported.
+    monkeypatch.setenv("PATH", exiftool_free_path())
     source = tmp_path / "sample_c2pa.avif"
     source.write_bytes((ROOT / "tests" / "fixtures" / "sample_c2pa.avif").read_bytes())
     bridge, sink = make_bridge()
@@ -1307,7 +1364,7 @@ def test_plan_shows_the_remote_gate_and_clean_stops_at_it(tmp_path, monkeypatch)
         seen.append(request)
         return {"kind": "text", "output": str(output), "exit_code": 0}
 
-    monkeypatch.setattr(tui_bridge, "run_clean_item", fake_run)
+    monkeypatch.setattr(tui_bridge, "execute_item", fake_run)
     done = response(call(bridge, sink, "clean", {"state": remote, "confirmed": ["remote"]}, rid=3))[
         "result"
     ]
@@ -1383,7 +1440,7 @@ def test_a_second_clean_is_busy_and_cancel_stops_after_the_current_file(tmp_path
         assert release.wait(10)
         return {"kind": "text", "output": str(output), "exit_code": 0}
 
-    monkeypatch.setattr(tui_bridge, "run_clean_item", slow_run)
+    monkeypatch.setattr(tui_bridge, "execute_item", slow_run)
     bridge, sink = make_bridge()
     first = bridge.handle_line(
         json.dumps({"id": 1, "method": "clean", "params": {"state": state([folder])}})
@@ -1444,14 +1501,14 @@ def test_a_pipeline_system_exit_is_an_internal_error_not_a_wedged_bridge(tmp_pat
 
 def test_a_file_whose_clean_raises_is_a_row_and_the_batch_continues(tmp_path, monkeypatch):
     folder = _two_files(tmp_path)
-    real = tui_bridge.run_clean_item
+    real = tui_bridge.execute_item
 
     def flaky(path, output, request, plan, *, on_token=None):
         if path.name == "a.txt":
             raise SystemExit(2)
         return real(path, output, request, plan, on_token=on_token)
 
-    monkeypatch.setattr(tui_bridge, "run_clean_item", flaky)
+    monkeypatch.setattr(tui_bridge, "execute_item", flaky)
     bridge, sink = make_bridge()
     frames = call(bridge, sink, "clean", {"state": state([folder])})
     done = [frame["data"] for frame in frames if frame.get("event") == "file_done"]
@@ -1469,7 +1526,7 @@ def test_a_failed_file_reports_no_output(tmp_path, monkeypatch):
     def fails(path, output, request, plan, *, on_token=None):
         return {"kind": "text", "output": str(output), "error": "disk full", "exit_code": 1}
 
-    monkeypatch.setattr(tui_bridge, "run_clean_item", fails)
+    monkeypatch.setattr(tui_bridge, "execute_item", fails)
     bridge, sink = make_bridge()
     frames = call(bridge, sink, "clean", {"state": state([source])})
     [done] = [frame["data"] for frame in frames if frame.get("event") == "file_done"]
@@ -1823,7 +1880,8 @@ def test_a_missing_frontend_is_a_clear_error(monkeypatch, capsys, tmp_path):
 def _fake_frontend(root: Path) -> Path:
     (root / "src").mkdir(parents=True)
     (root / "package.json").write_text("{}", encoding="utf-8")
-    (root / "src" / "index.tsx").write_text("", encoding="utf-8")
+    (root / "bun.lock").write_text("fixture lock", encoding="utf-8")
+    (root / "src" / "index.ts").write_text("", encoding="utf-8")
     return root
 
 
@@ -1850,7 +1908,7 @@ def test_the_launcher_installs_once_then_execs_bun_in_the_frontend(monkeypatch, 
     assert launcher.main(["."]) == 0
     assert installs == [frontend]
     file, args, env, cwd = execs[0]
-    assert (file, args) == ("/fake/bun", ["/fake/bun", "run", "src/index.tsx"])
+    assert (file, args) == ("/fake/bun", ["/fake/bun", "run", "src/index.ts"])
     assert cwd.resolve() == frontend.resolve()
     assert env["WM_TUI_PYTHON"] == sys.executable
     assert json.loads(env["WM_TUI_ARGV"]) == ["."]
@@ -1883,7 +1941,7 @@ def test_a_truly_read_only_frontend_is_staged_into_a_writable_copy(monkeypatch, 
     monkeypatch.setattr(launcher, "_install", fake_install)
     run_dirs: list[Path] = []
     monkeypatch.setattr(launcher.os, "execvpe", lambda *args: run_dirs.append(Path.cwd()))
-    paths = [frontend / "package.json", frontend / "src" / "index.tsx", frontend / "src", frontend]
+    paths = [frontend / "package.json", frontend / "src" / "index.ts", frontend / "src", frontend]
     try:
         for path in paths:
             path.chmod(0o555 if path.is_dir() else 0o444)
@@ -1896,9 +1954,28 @@ def test_a_truly_read_only_frontend_is_staged_into_a_writable_copy(monkeypatch, 
             path.chmod(0o755 if path.is_dir() else 0o644)
     staged = tmp_path / "cache" / "watermark-remover" / f"tui-{launcher.package_version()}"
     assert installs == [staged]
-    assert (staged / "src" / "index.tsx").is_file()
+    assert (staged / "src" / "index.ts").is_file()
     assert [path.resolve() for path in run_dirs] == [staged.resolve()] * 2
     assert os.access(staged, os.W_OK) and os.access(staged / "package.json", os.W_OK)
+
+
+def test_the_first_run_install_is_frozen_and_production(monkeypatch, tmp_path, capsys):
+    """First-run install must not resolve versions or pull devDependencies."""
+    calls: list[tuple[list[str], dict]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((list(argv), kwargs))
+        return subprocess.CompletedProcess(argv, 1)
+
+    monkeypatch.setattr(launcher.subprocess, "run", fake_run)
+    assert launcher._install(tmp_path, "/fake/bun") == 1
+    assert len(calls) == 1
+    argv, kwargs = calls[0]
+    assert argv == ["/fake/bun", "install", "--frozen-lockfile", "--production"]
+    assert kwargs["cwd"] == tmp_path and kwargs["check"] is False
+    err = capsys.readouterr().err
+    assert "--frozen-lockfile --production" in err
+    assert "first run only" in err
 
 
 def test_a_failed_install_stops_the_launch(monkeypatch, tmp_path, capsys):

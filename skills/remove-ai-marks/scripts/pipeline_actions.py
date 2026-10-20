@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
-"""What a clean did to a file, as a stable machine code plus the human line.
+"""What a clean did to a file, as stable machine codes plus edge sentences.
 
 Every stripper and cleaner reports its steps as :class:`Action` values.  A
-step's ``code`` names *what kind* of step it was and never changes wording;
+step's ``code`` names what kind of step it was and never changes wording;
 ``params`` carry its counts and names (a part, a chunk, a field, a byte
-count); ``text`` is the line the CLI has always printed.  ``effect`` says
-whether the step changed the output, was only informational, or warns that a
-tool failed or fell back.
+count); ``text`` is the sentence rendered at a presentation edge.
+``effect`` says whether the step changed the output, was only informational,
+or warns that a tool failed or fell back.
 
-A result payload carries the same steps twice, from one list, so the two can
-never disagree:
-
-* ``actions`` -- the human lines, unchanged from before codes existed;
-* ``action_details`` -- ``{"code", "effect", "text", "params"}`` per step, in
-  the same order, for any consumer that must not parse the lines.
+Internal result payloads carry only ``action_details``.  Edge adapters use
+``action_sentences`` to render the canonical sentence from those structured
+records, without parsing a prose list.
 
 Each code has exactly one constructor (a few codes have more than one, where
 the historical wording differs), so a call site never pairs a code with a
@@ -70,6 +67,7 @@ class ActionCode(str, Enum):
     CLEAN_DATA_URI = "clean_data_uri"
     DROP_HTML_META = "drop_html_meta"
     DROP_JSON_LD = "drop_json_ld"
+    DROP_HTML_COMMENT = "drop_html_comment"
     DROP_DATA_AI_ATTRIBUTES = "drop_data_ai_attributes"
     DROP_SVG_METADATA = "drop_svg_metadata"
     DROP_SVG_XMP = "drop_svg_xmp"
@@ -152,20 +150,17 @@ def _wire(value: Any) -> Any:
 
 
 def report_actions(actions: Sequence[Action]) -> dict[str, list[Any]]:
-    """The two payload fields for *actions*: ``actions`` and ``action_details``."""
-    return {
-        "actions": [action.text for action in actions],
-        "action_details": [action.to_dict() for action in actions],
-    }
+    """Return the structured action channel for an internal report."""
+    return {"action_details": [action.to_dict() for action in actions]}
+
+
+def action_sentences(details: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Render edge sentences from structured action records."""
+    return [str(detail["text"]) for detail in details]
 
 
 def retarget_report(report: dict[str, Any], old: str, new: str) -> None:
-    """Rename *old* to *new* in a report's steps, in both fields.
-
-    For a path a step named while it was staged in a temporary directory and
-    that has since been published elsewhere.
-    """
-    report["actions"] = [text.replace(old, new) for text in report["actions"]]
+    """Rename *old* to *new* in a report's structured steps."""
     report["action_details"] = [_retarget(detail, old, new) for detail in report["action_details"]]
 
 
@@ -382,6 +377,26 @@ def drop_json_ld() -> Action:
     return _act(ActionCode.DROP_JSON_LD, Effect.CHANGE, "drop json-ld provenance-like script")
 
 
+def scrub_json_ld_key(key: str) -> Action:
+    """Remove one provenance key from a kept JSON-LD block (surgical clean)."""
+    return _act(
+        ActionCode.SCRUB_FIELD,
+        Effect.CHANGE,
+        f"scrub json-ld provenance key: {key}",
+        part="json-ld",
+        field=key,
+    )
+
+
+def drop_html_comment(count: int) -> Action:
+    return _act(
+        ActionCode.DROP_HTML_COMMENT,
+        Effect.CHANGE,
+        f"drop {count} HTML comment(s) with AI markers",
+        count=count,
+    )
+
+
 def drop_data_ai_attributes(count: int) -> Action:
     return _act(
         ActionCode.DROP_DATA_AI_ATTRIBUTES,
@@ -401,8 +416,13 @@ def drop_svg_xmp(count: int) -> Action:
     return _act(ActionCode.DROP_SVG_XMP, Effect.CHANGE, f"drop xmpmeta x{count}", count=count)
 
 
-def drop_svg_comment() -> Action:
-    return _act(ActionCode.DROP_SVG_COMMENT, Effect.CHANGE, "drop SVG comment with AI markers")
+def drop_svg_comment(count: int) -> Action:
+    return _act(
+        ActionCode.DROP_SVG_COMMENT,
+        Effect.CHANGE,
+        f"drop {count} SVG comment(s) with AI markers",
+        count=count,
+    )
 
 
 def drop_svg_generator_attributes(count: int) -> Action:

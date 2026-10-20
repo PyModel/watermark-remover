@@ -104,7 +104,7 @@ def _validate_request(request: InpaintRequest) -> None:
 class Cv2TeleaBackend:
     """cv2.INPAINT_TELEA — fast method based on Navier-Stokes principle."""
 
-    name = "opencv-telea"
+    name = "cv2-telea"
     radius: int = 3
 
     @property
@@ -141,7 +141,7 @@ class Cv2TeleaBackend:
 class Cv2NavierStokesBackend:
     """cv2.INPAINT_NS — Navier-Stokes based inpainting."""
 
-    name = "opencv-ns"
+    name = "cv2-ns"
     radius: int = 3
 
     @property
