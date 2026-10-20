@@ -1,6 +1,6 @@
 # Test/lint dependencies for local dev and CI.
 pytest>=9.1.1,<10
-pypdf>=6.19.0,<7
+pypdf>=6.21.0,<7
 # Fixture builder + independent verifier for `make verify` (tests/verify_full_clean.py).
 # The cleaner itself stays stdlib-only; this is test-only.
 pillow>=11,<14
