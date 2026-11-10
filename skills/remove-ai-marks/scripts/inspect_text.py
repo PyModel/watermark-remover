@@ -11,7 +11,7 @@ from pathlib import Path
 # Allow running as script from any cwd
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from common import TEXT_TOOL_ADVICE, emit_json, read_text_input
+from common import TEXT_TOOL_ADVICE, emit_json, eprint, read_text_input
 from score_stylometry import print_human_stylometry_report, score_text_stylometry
 from text_unicode import human_report, inspect_text
 
@@ -56,6 +56,12 @@ def main() -> int:
         help="Scan even when the input looks like a binary container",
     )
     args = p.parse_args()
+
+    if args.path not in (None, "-"):
+        source = Path(args.path)
+        if not source.is_file() or source.is_symlink():
+            eprint(f"not a regular file: {source}")
+            return 2
 
     text = read_text_input(args.path, allow_binary=args.force_text, advice=TEXT_TOOL_ADVICE)
     report = inspect_text(text, aggressive=args.aggressive, strip_emoji_glue=args.strip_emoji_glue)
