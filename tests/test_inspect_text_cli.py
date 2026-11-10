@@ -61,3 +61,19 @@ class TestThresholdValidation:
         r = _run_inspect("--threshold", "-0.1", "-")
         assert r.returncode == 2
         assert "threshold" in (r.stderr or "").lower()
+
+
+class TestMissingInputFile:
+    """A missing input path must fail cleanly, not with a traceback."""
+
+    def test_missing_file_exits_2_without_traceback(self, tmp_path):
+        r = _run_inspect(str(tmp_path / "does-not-exist.txt"))
+        assert r.returncode == 2, r.stderr
+        assert "Traceback" not in (r.stderr or "")
+        assert "not a regular file" in (r.stderr or "")
+
+    def test_directory_exits_2_without_traceback(self, tmp_path):
+        r = _run_inspect(str(tmp_path))
+        assert r.returncode == 2, r.stderr
+        assert "Traceback" not in (r.stderr or "")
+        assert "not a regular file" in (r.stderr or "")
