@@ -90,7 +90,7 @@ source-classify = [
     "numpy",
     "opencv-python-headless",
     "Pillow",
-    "huggingface-hub>=0.20.0,<2",
+    "huggingface-hub>=0.20.0,<3",
 ]
 # The metadata-free photo classifier (classify.py + clip_l_ft.py): the frozen
 # CLIP-L-ft Model 1 plus the gated provider head (Model 2). Same pixel stack
@@ -105,7 +105,7 @@ classify = [
     "Pillow",
     "torch",
     "transformers",
-    "huggingface-hub>=0.20.0,<2",
+    "huggingface-hub>=0.20.0,<3",
 ]
 # The ONNX photo-classifier backend (classify.py --backend onnx): the classify
 # stack by reference plus ONNX Runtime for the vision-only FP32 export.
@@ -140,12 +140,12 @@ provenance = [
 migan = [
     "watermark-remover[pixel]",
     "onnxruntime>=1.20,<2",
-    "huggingface-hub>=0.20,<2",
+    "huggingface-hub>=0.20,<3",
 ]
 lama = [
     "watermark-remover[pixel]",
     "onnxruntime>=1.20,<2",
-    "huggingface-hub>=0.20,<2",
+    "huggingface-hub>=0.20,<3",
 ]
 all = [
     "watermark-remover[visible]",
