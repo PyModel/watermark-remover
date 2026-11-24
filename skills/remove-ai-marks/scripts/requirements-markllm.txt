@@ -33,4 +33,4 @@ Cython==3.3.0
 numpy==2.5.3
 scipy==1.18.1
 huggingface_hub==1.32.0
-Pillow==12.3.0
+Pillow==13.0.0
